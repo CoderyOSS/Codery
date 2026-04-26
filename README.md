@@ -1,6 +1,10 @@
 # Codery
 
+[![Project Status: Pre-Alpha](https://img.shields.io/badge/status-pre--alpha-orange)](https://github.com/CoderyOSS/Codery)
+
 Infrastructure for a VPS-hosted AI development environment. Two Docker containers — a sandbox (OpenCode + VS Code) and an apps container (project web servers) — deployed via CoderyCI with blue/green zero-downtime deployments.
+
+> **Status:** This project is pre-1.0 and under active development. APIs, configuration formats, and deployment workflows may change without notice. Not recommended for production use yet.
 
 ## Components
 
