@@ -215,6 +215,26 @@ Apps container code lives in same repos under `/home/gem/projects/` — projects
 
 ---
 
+## Cutting Releases
+
+All components follow [semver](https://semver.org). Pre-1.0: minor bumps for features, patch for fixes.
+
+| Component | Tag format | Artifacts |
+|-----------|-----------|-----------|
+| CoderyCI | `codery-ci-v{major}.{minor}.{patch}` | `codery-ci-linux-x86_64`, `codery-ci-linux-aarch64` |
+| Sandbox | `sandbox-v{major}.{minor}.{patch}` | Docker image `ghcr.io/OWNER/codery:sandbox-{version}` |
+| Apps | `apps-v{major}.{minor}.{patch}` | Docker image `ghcr.io/OWNER/codery:apps-{version}` |
+
+To cut a CoderyCI release:
+1. Bump version in `system/orchestrator/Cargo.toml`
+2. Commit: `git commit -m "codery-ci: bump to v{version}"`
+3. Tag: `git tag codery-ci-v{version}`
+4. Push: `github-push master && git push origin codery-ci-v{version}`
+
+Same pattern for sandbox/apps — no Cargo.toml bump needed, just tag and push.
+
+---
+
 ## Preferred Tools & Style
 - **Languages**: Rust, TypeScript, Python (in that order of preference)
 - Concise; show commands before running

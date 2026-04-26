@@ -4,7 +4,7 @@
 
 Infrastructure for a VPS-hosted AI development environment. Two Docker containers — a sandbox (OpenCode + VS Code) and an apps container (project web servers) — deployed via CoderyCI with blue/green zero-downtime deployments.
 
-> **Status:** This project is pre-1.0 and under active development. APIs, configuration formats, and deployment workflows may change without notice. Not recommended for production use yet.
+> **Status:** This project is pre-1.0 and under active development. All components follow [semantic versioning](https://semver.org). APIs, configuration formats, and deployment workflows may change without notice. Not recommended for production use yet.
 
 ## Components
 
@@ -71,3 +71,23 @@ cat /opt/codery/state/apps
 - [CLAUDE.md](CLAUDE.md) — Full architecture reference
 - [hosting/examples/](hosting/examples/) — Provider-specific setup guides
 - [docs/customizing.md](docs/customizing.md) — Customization guide
+
+## Releasing
+
+All components use [semver](https://semver.org). Cut a release by pushing a tag:
+
+```bash
+# CoderyCI (bump Cargo.toml version first)
+git tag codery-ci-v0.1.0
+git push origin codery-ci-v0.1.0
+
+# Sandbox
+git tag sandbox-v0.1.0
+git push origin sandbox-v0.1.0
+
+# Apps
+git tag apps-v0.1.0
+git push origin apps-v0.1.0
+```
+
+CI builds and publishes artifacts automatically. See [CLAUDE.md](CLAUDE.md) for full release instructions.

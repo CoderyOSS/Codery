@@ -266,6 +266,45 @@ All workflows also have `workflow_dispatch` for manual triggering.
 
 ---
 
+## Releasing
+
+All components follow [semantic versioning](https://semver.org). Pre-1.0: minor bumps for features, patch for fixes. No stability guarantees until 1.0.
+
+### Tag format
+
+| Component | Tag prefix | Artifacts |
+|-----------|-----------|-----------|
+| CoderyCI | `codery-ci-v*` | `codery-ci-linux-x86_64`, `codery-ci-linux-aarch64` (static musl binaries) |
+| Sandbox | `sandbox-v*` | Docker image `ghcr.io/OWNER/codery:sandbox-{version}` |
+| Apps | `apps-v*` | Docker image `ghcr.io/OWNER/codery:apps-{version}` |
+
+### Cutting a CoderyCI release
+
+1. Bump version in `system/orchestrator/Cargo.toml` (`version` field in `[package]`)
+2. Commit: `git commit -m "codery-ci: bump to vX.Y.Z"`
+3. Tag: `git tag codery-ci-vX.Y.Z`
+4. Push: `github-push master && git push origin codery-ci-vX.Y.Z`
+5. CI builds both x86_64 and aarch64 binaries via `cross`, attaches them to a GitHub Release
+
+### Cutting a Sandbox release
+
+1. Tag: `git tag sandbox-vX.Y.Z`
+2. Push: `git push origin sandbox-vX.Y.Z`
+3. CI builds Docker image, pushes to GHCR
+
+### Cutting an Apps release
+
+1. Tag: `git tag apps-vX.Y.Z`
+2. Push: `git push origin apps-vX.Y.Z`
+3. CI builds Docker image, pushes to GHCR
+
+### Release artifacts
+
+- **CoderyCI**: Static musl binaries for Linux x86_64 and aarch64. Users download from GitHub Releases.
+- **Sandbox/Apps**: Docker images pushed to GHCR. Users pull via `docker pull ghcr.io/coderyoss/codery:sandbox-latest`.
+
+---
+
 ## Project Structure
 
 ```
@@ -341,7 +380,9 @@ docs/
 .github/workflows/
   deploy-sandbox.yml        # Sandbox CI/CD
   deploy-apps.yml           # Apps CI/CD
-  build-orchestrator.yml    # CoderyCI CI/CD
+  release-orchestrator.yml  # CoderyCI release (tag codery-ci-v*)
+  release-sandbox.yml       # Sandbox image release (tag sandbox-v*)
+  release-apps.yml          # Apps image release (tag apps-v*)
 ```
 
 ---
