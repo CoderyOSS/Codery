@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Willow Deploy Console</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #111; color: #e0e0e0; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; padding: 24px; }
+h1 { font-size: 1.4rem; font-weight: 600; color: #e0e0e0; }
+.header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 24px; border-bottom: 1px solid #333; padding-bottom: 16px; }
+.header-sub { font-size: 0.8rem; color: #666; }
+.cards { display: flex; flex-direction: column; gap: 16px; max-width: 860px; }
+.card { background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 20px; transition: border-color 0.2s, box-shadow 0.2s; min-width: 0; }
+.card.in-progress { border-color: #7c3aed; box-shadow: 0 0 0 1px #7c3aed33; }
+.card.success { border-color: #4caf50; box-shadow: 0 0 0 1px #4caf5033; }
+.card.error { border-color: #ef4444; box-shadow: 0 0 0 1px #ef444433; }
+.card.unavailable { background: #1a1a1a; border-color: #2a2a2a; opacity: 0.7; }
+.card-inner { align-items: flex-start; justify-content: space-between; gap: 16px; }
+.card-left { flex: 1; min-width: 0; overflow: hidden; }
+.service-name { font-size: 1.1rem; font-weight: 600; color: #e0e0e0; }
+.service-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.badge { border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; font-weight: 600; border: 1px solid; white-space: nowrap; }
+.badge-green { background: #1a4a1a; color: #4caf50; border-color: #4caf50; }
+.badge-blue { background: #1a3a5c; color: #5c9bd6; border-color: #5c9bd6; }
+.meta { font-size: 0.85rem; color: #999; font-family: monospace; display: flex; flex-direction: column; gap: 4px; }
+.meta-row { display: flex; align-items: baseline; gap: 4px; min-width: 0; overflow: hidden; }
+.meta-row > .lbl { flex-shrink: 0; white-space: nowrap; }
+.meta-row > .val { color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.card-right { flex-shrink: 0; text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.rollback-target { font-size: 0.8rem; color: #888; font-family: monospace; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 240px; }
+.rollback-target .meta-row { justify-content: flex-end; }
+.rollback-target .target-green { color: #4caf50; }
+.rollback-target .target-blue { color: #5c9bd6; }
+.first-deploy { font-style: italic; color: #555; font-size: 0.8rem; }
+.status-msg { font-size: 0.8rem; min-height: 1.2em; }
+.status-msg.spinning { color: #a78bfa; font-style: italic; }
+.status-msg.done { color: #4caf50; font-weight: 600; }
+.status-msg.err { color: #ef4444; }
+.btn { border: none; border-radius: 6px; padding: 8px 20px; font-size: 0.9rem; font-weight: 500; cursor: pointer; }
+.btn-rollback { background: #7c3aed; color: #fff; }
+.btn-rollback:hover:not(:disabled) { background: #6d28d9; }
+.btn-in-progress { background: #4c1d95; color: #a78bfa; border: 1px solid #7c3aed; cursor: not-allowed; opacity: 0.8; }
+.btn-done { background: #1a3a1a; color: #4caf50; border: 1px solid #4caf50; cursor: not-allowed; }
+.btn-unavailable { background: #333; color: #555; cursor: not-allowed; }
+.footer { margin-top: 16px; font-size: 0.75rem; color: #555; max-width: 860px; text-align: right; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.spin { display: inline-block; animation: spin 1s linear infinite; }
+@media (min-width: 601px) {
+  .card-inner { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; }
+}
+@media (max-width: 600px) {
+  body { padding: 12px; }
+  .card { padding: 16px; }
+  .card-inner { flex-direction: column; gap: 0; }
+  .card-right { text-align: left; align-items: flex-start; width: 100%; border-top: 1px solid #2a2a2a; padding-top: 12px; margin-top: 12px; }
+  .rollback-target { align-items: flex-start; max-width: none; }
+  .rollback-target .meta-row { justify-content: flex-start; }
+  .btn { width: 100%; text-align: center; padding: 10px 20px; }
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Willow Deploy Console</h1>
+  <span class="header-sub">Deploy Console</span>
+</div>
+<div id="cards" class="cards"><p style="color:#666">Loading…</p></div>
+<div class="footer">Rollback: restarts stopped container · health-checks · flips Caddy routing</div>
+
+<script>
+const inFlight = new Set();
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function colorClass(color) {
+  return color === 'green' ? 'badge-green' : 'badge-blue';
+}
+
+function targetColorClass(color) {
+  return color === 'green' ? 'target-green' : 'target-blue';
+}
+
+function renderCards(services) {
+  const container = document.getElementById('cards');
+  container.innerHTML = '';
+  for (const svc of services) {
+    container.appendChild(buildCard(svc));
+  }
+  // Re-apply in-progress state for any rollback still running
+  for (const svc of services) {
+    if (inFlight.has(svc.service)) {
+      setCardState(svc.service, 'progress', svc.prev_color);
+    }
+  }
+}
+
+function buildCard(svc) {
+  const card = document.createElement('div');
+  card.id = 'card-' + svc.service;
+  card.className = 'card' + (svc.rollback_available ? '' : ' unavailable');
+
+  const targetInfo = svc.rollback_available
+    ? `<div class="meta-row"><span class="lbl">target:</span> <span class="val ${escHtml(targetColorClass(svc.prev_color))}">${escHtml(svc.prev_container)}</span></div>
+       <div class="meta-row"><span class="lbl">sha:</span> <span class="val">${escHtml(svc.prev_sha || '—')}</span></div>`
+    : `<span class="first-deploy">no stopped container — first deploy</span>`;
+
+  const btnLabel = svc.rollback_available
+    ? `↩ Rollback to ${escHtml(svc.prev_color)}`
+    : '↩ Rollback unavailable';
+  const btnClass = svc.rollback_available ? 'btn btn-rollback' : 'btn btn-unavailable';
+  const btnDisabled = svc.rollback_available ? '' : 'disabled';
+
+  card.innerHTML = `
+    <div class="card-inner">
+      <div class="card-left">
+        <div class="service-row">
+          <span class="service-name">${escHtml(svc.service)}</span>
+          <span class="badge ${escHtml(colorClass(svc.active_color))}">● ${escHtml(svc.active_color.toUpperCase())} active</span>
+        </div>
+        <div class="meta">
+          <div class="meta-row"><span class="lbl">sha:</span> <span class="val">${escHtml(svc.active_sha || '—')}</span></div>
+          <div class="meta-row"><span class="lbl">container:</span> <span class="val">${escHtml(svc.active_container)}</span></div>
+        </div>
+      </div>
+      <div class="card-right">
+        <div class="rollback-target">${targetInfo}</div>
+        <div class="status-msg" id="status-${svc.service}"></div>
+        <button id="btn-${svc.service}" class="${btnClass}" ${btnDisabled}
+          onclick="handleRollback(${JSON.stringify(svc.service)}, ${JSON.stringify(svc.prev_color)})">
+          ${btnLabel}
+        </button>
+      </div>
+    </div>`;
+  return card;
+}
+
+function setCardState(service, state, msg) {
+  const card = document.getElementById('card-' + service);
+  const btn = document.getElementById('btn-' + service);
+  const statusEl = document.getElementById('status-' + service);
+  if (!card || !btn || !statusEl) return;
+
+  card.classList.remove('in-progress', 'success', 'error');
+  statusEl.className = 'status-msg';
+  statusEl.textContent = '';
+
+  if (state === 'progress') {
+    card.classList.add('in-progress');
+    btn.disabled = true;
+    btn.className = 'btn btn-in-progress';
+    btn.textContent = '↩ Rolling back…';
+    statusEl.className = 'status-msg spinning';
+    statusEl.innerHTML = '<span class="spin">⟳</span> Rolling back to ' + escHtml(msg) + '…';
+  } else if (state === 'success') {
+    card.classList.add('success');
+    btn.disabled = true;
+    btn.className = 'btn btn-done';
+    btn.textContent = '✓ Done';
+    statusEl.className = 'status-msg done';
+    statusEl.textContent = '✓ Rollback finished';
+  } else if (state === 'error') {
+    card.classList.add('error');
+    btn.disabled = false;
+    btn.className = 'btn btn-rollback';
+    statusEl.className = 'status-msg err';
+    statusEl.textContent = '✗ ' + msg;
+  }
+}
+
+async function handleRollback(service, prevColor) {
+  if (inFlight.has(service)) return;
+  inFlight.add(service);
+  setCardState(service, 'progress', prevColor);
+
+  try {
+    const resp = await fetch('/api/rollback/' + encodeURIComponent(service), { method: 'POST' });
+    if (resp.ok) {
+      setCardState(service, 'success', '');
+      setTimeout(async () => {
+        inFlight.delete(service);
+        await loadStatus();
+      }, 500);
+    } else {
+      const text = await resp.text();
+      inFlight.delete(service);
+      setCardState(service, 'error', text || 'rollback failed');
+    }
+  } catch (err) {
+    inFlight.delete(service);
+    setCardState(service, 'error', 'network error');
+  }
+}
+
+async function loadStatus() {
+  try {
+    const resp = await fetch('/api/status');
+    if (!resp.ok) {
+      document.getElementById('cards').innerHTML =
+        '<p style="color:#ef4444">Failed to load status: ' + escHtml(resp.statusText) + '</p>';
+      return;
+    }
+    const services = await resp.json();
+    renderCards(services);
+  } catch (err) {
+    document.getElementById('cards').innerHTML =
+      '<p style="color:#ef4444">Network error loading status</p>';
+  }
+}
+
+loadStatus();
+</script>
+</body>
+</html>

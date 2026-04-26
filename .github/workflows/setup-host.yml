@@ -1,0 +1,28 @@
+name: Setup Host
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup:
+    name: Run proxy/setup.sh on VPS
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run setup.sh on VPS
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          trap 'rm -f /tmp/deploy_key' EXIT
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+          SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
+
+          $SCP -r proxy deploy@${DEPLOY_HOST}:/tmp/codery-proxy
+
+          $SSH "sudo bash /tmp/codery-proxy/setup.sh && rm -rf /tmp/codery-proxy"

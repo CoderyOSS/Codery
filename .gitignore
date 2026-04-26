@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.vagrant/
+workspace/
+.worktrees/
+.opencode/plans/
+system/orchestrator/target/
+*.pem
+*.key
+debug/
+.claude/
+.agents/
+auth.json
+skills-lock.json
+*.original.md
+sandbox/bin/

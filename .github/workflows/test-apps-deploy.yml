@@ -1,0 +1,58 @@
+name: Test Apps Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test apps blue/green deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test apps deploy end-to-end
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          trap 'rm -f /tmp/deploy_key' EXIT
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+
+          printf '%s\n' "${{ secrets.ENV_FILE }}" | $SSH "cat > /opt/codery/.env"
+          $SSH "echo 'GHCR_USERNAME=${{ github.actor }}' >> /opt/codery/.env"
+          $SSH "echo 'GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}' >> /opt/codery/.env"
+
+          $SSH "mkdir -p /opt/codery/state"
+
+          echo "=== Pre-flight: VPS prerequisites ==="
+          $SSH "
+            echo 'PEM file:' && ls -la /opt/codery/github-app.pem 2>&1 || echo 'MISSING'
+            echo 'GITHUB_APP_ID:' && grep -q '^GITHUB_APP_ID=' /opt/codery/.env && echo 'set' || echo 'MISSING'
+            echo 'GITHUB_APP_SLUG:' && grep -q '^GITHUB_APP_SLUG=' /opt/codery/.env && echo 'set' || echo 'MISSING'
+            echo 'codery_projects volume:' && docker volume inspect codery_projects 2>&1 | grep -E 'Name|Mountpoint' || echo 'MISSING'
+          "
+
+          echo "=== Deploy 1: apps deploy as inactive color ==="
+          $SSH "sudo /opt/codery/codery-ci deploy apps latest 2>&1"
+
+          echo "=== Verify after deploy 1 ==="
+          $SSH "
+            echo 'State:' && cat /opt/codery/state/apps.color
+            echo 'Containers:' && docker ps --filter name=codery-apps --format 'table {{.Names}}\t{{.Status}}'
+            echo 'Healthcheck:' && docker inspect codery-apps-\$(cat /opt/codery/state/apps.color) --format '{{.State.Health.Status}}' 2>/dev/null || true
+          "
+
+          echo "=== Deploy 2: flip back to original color ==="
+          $SSH "sudo /opt/codery/codery-ci deploy apps latest 2>&1"
+
+          echo "=== Verify after deploy 2 ==="
+          $SSH "
+            echo 'State:' && cat /opt/codery/state/apps.color
+            echo 'Containers:' && docker ps --filter name=codery-apps --format 'table {{.Names}}\t{{.Status}}'
+          "
+
+          echo "=== Task 11 COMPLETE ==="

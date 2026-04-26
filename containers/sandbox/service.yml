@@ -1,0 +1,74 @@
+service: sandbox
+image: ghcr.io/CoderyOSS/codery:sandbox-{sha}
+
+# Port formula: host_port = container_port + offset
+# blue:  opencode 3000+10000=13000, vscode 7000+10000=17000, ttyd 7681+10000=17681
+# green: opencode 3000+20000=23000, vscode 7000+20000=27000, ttyd 7681+20000=27681
+port_scheme:
+  blue_offset: 10000
+  green_offset: 20000
+
+ports:
+  - name: opencode
+    container_port: 3000
+    subdomain: opencode
+  - name: vscode
+    container_port: 7000
+    subdomain: vscode
+  - name: ttyd
+    container_port: 7681
+    subdomain: cli
+  - name: archon
+    container_port: 3090
+    subdomain: ops
+  - name: ssh
+    container_port: 22
+    fixed_port: 2222
+    # No subdomain — raw TCP, not HTTP. Caddy does not proxy this.
+    # blue: host 10022  green: host 20022  (port_scheme offsets apply)
+    # fixed_port: stable proxy port — orchestrator serve-tcp-proxy forwards
+    # connections here to the active color's SSH port automatically.
+
+health_check:
+  type: tcp
+  port: opencode
+  timeout_secs: 60
+  interval_secs: 2
+
+volumes:
+  - type: bind
+    host: /opt/codery/projects
+    container: /home/gem/projects
+  - type: bind
+    host: /opt/codery/data/opencode
+    container: /home/gem/.local/share/opencode
+  - type: bind
+    host: /opt/codery/data/claude
+    container: /home/gem/.claude
+  - type: bind
+    host: /opt/codery/github-app.pem
+    container: /run/secrets/github-app.pem
+    readonly: true
+  - type: bind
+    host: /opt/codery/ssh/authorized_keys
+    container: /run/secrets/authorized_keys
+    readonly: true
+
+env_overrides:
+  # The PEM is bind-mounted at /run/secrets/github-app.pem inside the container.
+  # Override whatever host path .env has so github-app-token finds the key.
+  GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+  GITHUB_APP_SLUG: ${GITHUB_APP_SLUG}
+
+required_env:
+  - GHCR_USERNAME
+  - GHCR_TOKEN
+  - ANTHROPIC_API_KEY
+  - ZAI_API_KEY
+  - GITHUB_APP_ID
+
+network: codery-net
+
+# Allow the container to reach the host (for direct MCP access over Docker bridge).
+extra_hosts:
+  - host.docker.internal:host-gateway

@@ -1,0 +1,115 @@
+name: Build Sandbox
+
+on:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build sandbox image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Download custom Archon binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p containers/sandbox/bin
+          gh release download archon-opencode --repo CoderyOSS/codery \
+            --pattern 'archon*' -O containers/sandbox/bin/archon-linux-x64
+          chmod +x containers/sandbox/bin/archon-linux-x64
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+
+      - name: Build and push sandbox image
+        uses: docker/build-push-action@v6
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: containers/sandbox/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:sandbox-latest
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:sandbox-${{ github.sha }}
+          provenance: false
+          sbom: false
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:sandbox-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:sandbox-buildcache,mode=max
+
+  deploy:
+    name: Deploy sandbox to VPS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy sandbox via codery-ci
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          trap 'rm -f /tmp/deploy_key' EXIT
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+          SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
+
+          $SSH "mkdir -p /opt/codery/services"
+          $SCP containers/sandbox/service.yml deploy@${DEPLOY_HOST}:/tmp/sandbox.yml
+          $SSH "sudo mv /tmp/sandbox.yml /opt/codery/services/sandbox.yml"
+
+          $SSH "mkdir -p /opt/codery/proxy"
+          $SCP proxy/sandbox-routes.json deploy@${DEPLOY_HOST}:/tmp/sandbox-routes.json
+          $SSH "sudo mv /tmp/sandbox-routes.json /opt/codery/proxy/sandbox-routes.json"
+
+          $SCP opencode.json deploy@${DEPLOY_HOST}:/tmp/opencode-codery.json
+          $SSH "test -d /opt/codery/projects/codery && \
+                cp /tmp/opencode-codery.json /opt/codery/projects/codery/opencode.json && \
+                echo '[sync] opencode.json → /opt/codery/projects/codery/' || \
+                echo '[sync] /opt/codery/projects/codery not present, skipping'"
+
+          printf '%s\n' "${{ secrets.ENV_FILE }}" | $SSH "cat > /opt/codery/.env"
+          $SSH "echo 'GHCR_USERNAME=${{ github.actor }}' >> /opt/codery/.env"
+          $SSH "echo 'GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}' >> /opt/codery/.env"
+
+          $SSH "mkdir -p /opt/codery/state"
+
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf status codery-ci-mcp 2>/dev/null \
+            | grep -q RUNNING \
+            || supervisorctl -c /etc/supervisor/supervisord.conf start codery-ci-mcp 2>/dev/null \
+            || echo '[mcp] codery-ci-mcp not configured yet — skipping'"
+
+          $SSH "sudo /opt/codery/codery-ci deploy sandbox ${{ github.sha }} 2>&1"

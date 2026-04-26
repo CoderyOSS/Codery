@@ -1,0 +1,56 @@
+#cloud-config
+# Codery host bootstrap. Provider-agnostic — works on any Ubuntu 24.04 VPS.
+# Paste as "User data" / "Launch script" when creating your server, or via
+# your provider's CLI. See hosting/examples/ for provider-specific instructions.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ufw
+  - curl
+  - git
+  - nginx
+  - certbot
+  - python3-certbot-nginx
+
+groups:
+  - docker
+
+users:
+  - name: deploy
+    groups: [docker, sudo]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    ssh_authorized_keys:
+      # YOUR_SSH_PUBLIC_KEY_HERE
+      # e.g. - "ssh-ed25519 AAAA... user@host"
+
+runcmd:
+  # Install Docker (official script)
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker deploy
+
+  # Install Docker Compose plugin (v2)
+  - apt-get install -y docker-compose-plugin
+
+  # Configure firewall: allow SSH, HTTP, HTTPS; deny everything else inbound
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow ssh
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+
+  # Create app directory owned by deploy user
+  - mkdir -p /opt/codery
+  - chown deploy:deploy /opt/codery
+
+  # Enable nginx (CI/CD deploy script installs the site config)
+  - systemctl enable nginx
+  - systemctl start nginx
+
+final_message: |
+  Bootstrap complete. Next steps (from your local machine):
+  1. DNS: ensure ${DOMAIN_NAME} A record points to this server's IP
+  2. Push to main — GitHub Actions builds images and deploys via SSH

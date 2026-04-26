@@ -1,0 +1,46 @@
+name: Diagnose Container
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    name: Check system and sandbox logs
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Dump logs via SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+
+          echo "=== All Docker containers ==="
+          $SSH "docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'"
+
+          echo "=== Port bindings (relevant ports) ==="
+          $SSH "ss -tlnp | grep -E '13000|17000|17681|10022|23000|27000|27681|20022|443|80' || echo '(none)'"
+
+          echo "=== Codery state files ==="
+          $SSH "ls -la /opt/codery/state/ && cat /opt/codery/state/* 2>/dev/null || echo '(no state files)'"
+
+          echo "=== Host supervisorctl status ==="
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf status 2>&1 || echo '(supervisord not running)'"
+
+          echo "=== Caddy status ==="
+          $SSH "curl -s http://localhost:2019/config/ 2>&1 | head -20 || echo '(caddy admin not reachable)'"
+
+          echo "=== Sandbox blue container logs (last 50 lines) ==="
+          $SSH "docker logs codery-sandbox-blue --tail 50 2>&1 || echo '(no codery-sandbox-blue)'"
+
+          echo "=== Sandbox green container logs (last 50 lines) ==="
+          $SSH "docker logs codery-sandbox-green --tail 50 2>&1 || echo '(no codery-sandbox-green)'"
+
+          echo "=== Sandbox supervisord status (active container) ==="
+          ACTIVE=$($SSH "cat /opt/codery/state/sandbox 2>/dev/null || echo unknown")
+          $SSH "docker exec codery-sandbox-${ACTIVE} supervisorctl status 2>&1 || echo '(container not running)'"
+
+          rm -f /tmp/deploy_key

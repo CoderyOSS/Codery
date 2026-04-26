@@ -1,0 +1,82 @@
+name: Build Orchestrator
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    name: Build and deploy codery-ci binary
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            system/orchestrator/target
+          key: codery-ci-${{ hashFiles('system/orchestrator/Cargo.lock') }}
+          restore-keys: codery-ci-
+
+      - name: Test
+        run: cargo test
+        working-directory: system/orchestrator
+
+      - name: Build release (musl static binary)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+        working-directory: system/orchestrator
+
+      - name: Deploy binary to VPS
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+          SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
+
+          $SSH "sudo mkdir -p /opt/codery && sudo chown deploy:deploy /opt/codery"
+
+          $SCP system/orchestrator/target/x86_64-unknown-linux-musl/release/orchestrator \
+            deploy@${DEPLOY_HOST}:/opt/codery/codery-ci.new
+          $SSH "chmod +x /opt/codery/codery-ci.new && mv /opt/codery/codery-ci.new /opt/codery/codery-ci"
+
+          $SSH "/opt/codery/codery-ci --version"
+
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf \
+                  stop codery-ci-mcp codery-ci-ui codery-ci-tcp-proxy 2>/dev/null || true"
+
+          $SSH "sudo rm -f \
+                  /etc/supervisor/conf.d/codery-ci-mcp.conf \
+                  /etc/supervisor/conf.d/codery-ci-ui.conf \
+                  /etc/supervisor/conf.d/codery-ci-tcp-proxy.conf"
+
+          $SCP proxy/supervisor/conf.d/codery-ci-daemon.conf \
+            deploy@${DEPLOY_HOST}:/tmp/codery-ci-daemon.conf
+          $SSH "sudo mv /tmp/codery-ci-daemon.conf \
+                        /etc/supervisor/conf.d/codery-ci-daemon.conf && \
+                sudo chmod 644 /etc/supervisor/conf.d/codery-ci-daemon.conf"
+
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf update"
+
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf \
+                  restart codery-ci-daemon 2>/dev/null || \
+                supervisorctl -c /etc/supervisor/supervisord.conf \
+                  start codery-ci-daemon"
+
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf status codery-ci-daemon | grep -q RUNNING"
+
+          rm -f /tmp/deploy_key

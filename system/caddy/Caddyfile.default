@@ -1,0 +1,18 @@
+{
+    acme_dns cloudflare {$CLOUDFLARE_API_TOKEN}
+}
+
+opencode.example.com {
+    bind {$TAILSCALE_IP}
+    reverse_proxy localhost:13000
+}
+
+vscode.example.com {
+    bind {$TAILSCALE_IP}
+    reverse_proxy localhost:17000
+}
+
+cli.example.com {
+    bind {$TAILSCALE_IP}
+    reverse_proxy localhost:17681
+}

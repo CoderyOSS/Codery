@@ -1,0 +1,53 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "/home/gem/AGENTS.md",
+    "/home/gem/.config/opencode/AGENTS.md"
+  ],
+  "plugin": [
+    "superpowers@git+https://github.com/obra/superpowers.git"
+  ],
+  "mcp": {
+    "codery": {
+      "type": "remote",
+      "url": "http://host.docker.internal:4040/sse"
+    }
+  },
+  "permission": {
+    "read": {
+      "*": "allow",
+      ".env": "deny",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow",
+      "/run/secrets/*": "deny",
+      "~/.ssh/*": "deny",
+      "~/.local/share/opencode/auth.json": "deny",
+      ".claude/*": "deny"
+    },
+    "bash": {
+      "*": "allow",
+      "cat /run/secrets/*": "deny",
+      "cat ~/.ssh/*": "deny",
+      "cat .env": "deny",
+      "cat *.env": "deny",
+      "cat *.env.*": "deny",
+      "less /run/secrets/*": "deny",
+      "less ~/.ssh/*": "deny",
+      "head /run/secrets/*": "deny",
+      "head ~/.ssh/*": "deny",
+      "tail /run/secrets/*": "deny",
+      "tail ~/.ssh/*": "deny"
+    }
+  },
+  "watcher": {
+    "ignore": [
+      "/run/secrets/**",
+      "~/.ssh/**",
+      ".env",
+      "*.env.*",
+      ".claude/**",
+      "debug/**"
+    ]
+  }
+}

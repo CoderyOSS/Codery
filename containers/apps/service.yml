@@ -1,0 +1,46 @@
+service: apps
+image: ghcr.io/CoderyOSS/codery:apps-{sha}
+
+# Port formula: host_port = container_port + offset
+# blue:  8000-9000 + 0     = 8000-9000   (host ports equal container ports)
+# green: 8000-9000 + 10000 = 18000-19000
+port_scheme:
+  blue_offset: 0
+  green_offset: 10000
+
+# Docker binds ALL ports in this range so any app in 8000-9000 is reachable.
+# Caddy routes are declared separately in routes_file (per-app subdomains).
+port_range:
+  container_start: 8000
+  container_end: 9000
+
+# Per-app public URL routes for Caddy (subset of the range with subdomains).
+# The orchestrator applies the color offset when generating the Caddyfile.
+routes_file: /opt/codery/proxy/apps-routes.json
+
+health_check:
+  type: docker
+  timeout_secs: 90
+
+volumes:
+  - type: bind
+    host: "${SSH_DIR}"
+    container: /home/gem/.ssh
+    readonly: true
+  - type: bind
+    host: /opt/codery/github-app.pem
+    container: /run/secrets/github-app.pem
+    readonly: true
+  - type: bind
+    host: /opt/codery/projects
+    container: /home/gem/projects
+
+env_overrides:
+  GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+
+required_env:
+  - GHCR_USERNAME
+  - GHCR_TOKEN
+  - SSH_DIR
+
+network: codery-net

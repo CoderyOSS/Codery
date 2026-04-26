@@ -1,0 +1,26 @@
+[package]
+name = "codery-ci"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "codery-ci"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+bollard = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+schemars = "1"
+anyhow = "1"
+futures-util = "0.3"
+rmcp = { version = "1", features = ["server", "transport-streamable-http-server", "schemars"] }
+tar = "0.4"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,220 @@
+name: Migrate to Container Architecture
+
+on:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  migrate:
+    name: Blue/green migration to apps + sandbox containers
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate required secrets
+        run: |
+          MISSING=""
+          [ -z "${{ secrets.ANTHROPIC_API_KEY }}"     ] && MISSING="$MISSING ANTHROPIC_API_KEY"
+          [ -z "${{ secrets.TAILSCALE_AUTH_KEY }}"    ] && MISSING="$MISSING TAILSCALE_AUTH_KEY"
+          [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}"  ] && MISSING="$MISSING CLOUDFLARE_API_TOKEN"
+          [ -z "${{ secrets.CLOUDFLARE_ZONE_ID }}"    ] && MISSING="$MISSING CLOUDFLARE_ZONE_ID"
+          [ -z "${{ secrets.DEPLOY_HOST }}" ]           && MISSING="$MISSING DEPLOY_HOST"
+          [ -z "${{ secrets.DEPLOY_SSH_KEY }}"        ] && MISSING="$MISSING DEPLOY_SSH_KEY"
+          [ -z "${{ secrets.GH_APP_ID }}"            ] && MISSING="$MISSING GH_APP_ID"
+          [ -z "${{ secrets.GH_APP_SLUG }}"          ] && MISSING="$MISSING GH_APP_SLUG"
+          if [ -n "$MISSING" ]; then
+            echo "ERROR: Missing required secrets:$MISSING"
+            exit 1
+          fi
+          echo "All required secrets present."
+
+      - name: Write .env from secrets
+        run: |
+          cat > .env <<EOF
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}
+          OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
+          GITHUB_APP_SLUG=${{ secrets.GH_APP_SLUG }}
+          TAILSCALE_AUTH_KEY=${{ secrets.TAILSCALE_AUTH_KEY }}
+          CLOUDFLARE_API_TOKEN=${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID=${{ secrets.CLOUDFLARE_ZONE_ID }}
+          TZ=America/Los_Angeles
+          EOF
+
+      - name: Write GitHub App private key
+        run: |
+          echo "${{ secrets.GH_APP_PRIVATE_KEY }}" > /tmp/github-app.pem
+          chmod 600 /tmp/github-app.pem
+          echo "GITHUB_APP_PRIVATE_KEY_PATH=/opt/willow/github-app.pem" >> .env
+          echo "SSH_DIR=/home/gem/.ssh" >> .env
+
+      - name: Migrate via SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+          SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
+
+          echo "============================================"
+          echo "PHASE 1: Verify current system is healthy"
+          echo "============================================"
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf status 2>&1 || true"
+          $SSH "curl -sf --connect-timeout 5 http://localhost:3000 > /dev/null && echo 'OpenCode: OK' || echo 'OpenCode: FAILED'"
+
+          echo ""
+          echo "============================================"
+          echo "PHASE 2: Deploy proxy setup (host-level Caddy/Tailscale)"
+          echo "============================================"
+          $SCP -r proxy/ deploy@${DEPLOY_HOST}:/opt/willow/proxy/
+          $SSH "cd /opt/willow && TAILSCALE_AUTH_KEY='${{ secrets.TAILSCALE_AUTH_KEY }}' CLOUDFLARE_API_TOKEN='${{ secrets.CLOUDFLARE_API_TOKEN }}' CLOUDFLARE_ZONE_ID='${{ secrets.CLOUDFLARE_ZONE_ID }}' bash proxy/setup.sh"
+
+          echo "=== Waiting for Tailscale IP (60s) ==="
+          TS_OK=false
+          for i in $(seq 1 60); do
+            if $SSH "test -s /run/tailscale.ip 2>/dev/null"; then
+              TS_IP=$($SSH "cat /run/tailscale.ip 2>/dev/null")
+              echo "Tailscale IP: $TS_IP"
+              TS_OK=true
+              break
+            fi
+            echo "Waiting for Tailscale... (attempt $i/60)"
+            sleep 1
+          done
+
+          if [ "$TS_OK" = "false" ]; then
+            echo "=== PROXY SETUP FAILED - ABORTING ==="
+            exit 1
+          fi
+
+          echo ""
+          echo "============================================"
+          echo "PHASE 3: Stop native OpenCode/code-server, start sandbox container"
+          echo "============================================"
+          echo "Stopping native OpenCode and code-server (ports 3000/7000 needed)..."
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf stop opencode code-server 2>/dev/null || true"
+          $SSH "rm -f /etc/supervisor/conf.d/opencode.conf /etc/supervisor/conf.d/code-server.conf"
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf reread 2>/dev/null || true"
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf update 2>/dev/null || true"
+
+          $SCP docker-compose.yml .env /tmp/github-app.pem deploy@${DEPLOY_HOST}:/opt/willow/
+
+          mkdir -p ~/.docker
+          echo '{"auths":{"ghcr.io":{"username":"${{ github.actor }}","password":"${{ secrets.GITHUB_TOKEN }}"}}}' > /tmp/docker-config.json
+          $SCP /tmp/docker-config.json deploy@${DEPLOY_HOST}:~/.docker/config.json
+
+          echo "Starting sandbox container..."
+          $SSH "cd /opt/willow \
+            && docker compose pull sandbox \
+            && docker compose up -d sandbox"
+
+          echo "=== Waiting for sandbox on port 13000 (60s) ==="
+          SANDBOX_OK=false
+          for i in $(seq 1 60); do
+            if $SSH "curl -sf --connect-timeout 2 http://localhost:13000 > /dev/null 2>&1"; then
+              echo "Sandbox responding on port 13000!"
+              SANDBOX_OK=true
+              break
+            fi
+            echo "Waiting... (attempt $i/60)"
+            sleep 1
+          done
+
+          if [ "$SANDBOX_OK" = "false" ]; then
+            echo "=== SANDBOX FAILED - ROLLING BACK ==="
+            $SSH "docker logs willow-sandbox 2>&1 | tail -50"
+            $SSH "docker stop willow-sandbox 2>/dev/null || true"
+            echo "Restoring native OpenCode/code-server..."
+            $SSH "printf '%s\\n' '[program:opencode]' 'command=opencode serve --hostname 127.0.0.1 --port 3000 --cors https://opencode.example.com' 'user=root' 'directory=/home/gem/workspace' 'autostart=true' 'autorestart=true' 'priority=40' 'stdout_logfile=/var/log/supervisor/opencode.log' 'stdout_logfile_maxbytes=10MB' 'stdout_logfile_backups=2' 'stderr_logfile=/var/log/supervisor/opencode.log' 'stderr_logfile_maxbytes=10MB' 'stderr_logfile_backups=2' > /etc/supervisor/conf.d/opencode.conf"
+            $SSH "printf '%s\\n' '[program:code-server]' 'command=/opt/gem/code-server.sh' 'user=root' 'autostart=true' 'autorestart=true' 'priority=200' 'environment=CODE_SERVER_PORT=\"7000\",PUBLIC_PORT=\"7000\"' 'stdout_logfile=/var/log/supervisor/code-server.log' 'stdout_logfile_maxbytes=1MB' 'stdout_logfile_backups=1' 'stderr_logfile=/var/log/supervisor/code-server.log' 'stderr_logfile_maxbytes=1MB' 'stderr_logfile_backups=1' > /etc/supervisor/conf.d/code-server.conf"
+            $SSH "supervisorctl -c /etc/supervisor/supervisord.conf reread 2>/dev/null || true"
+            $SSH "supervisorctl -c /etc/supervisor/supervisord.conf start opencode code-server 2>/dev/null || true"
+            exit 1
+          fi
+
+          echo ""
+          echo "============================================"
+          echo "PHASE 4: Update Caddy routes and start apps"
+          echo "============================================"
+          echo "Updating Caddyfile to route to sandbox container ports..."
+          $SSH "cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak 2>/dev/null || true"
+          $SSH "cat > /etc/caddy/Caddyfile <<'CADDYEOF'
+          {
+              acme_dns cloudflare {\$CLOUDFLARE_API_TOKEN}
+          }
+
+          opencode.example.com {
+              bind {\$TAILSCALE_IP}
+              reverse_proxy localhost:13000
+          }
+
+          vscode.example.com {
+              bind {\$TAILSCALE_IP}
+              reverse_proxy localhost:17000
+          }
+          CADDYEOF"
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf restart caddy 2>/dev/null || true"
+          $SSH "sleep 5"
+
+          echo "Starting apps container..."
+          $SSH "cd /opt/willow \
+            && docker compose pull apps \
+            && docker compose up -d apps \
+            && sleep 5"
+
+          echo ""
+          echo "============================================"
+          echo "PHASE 5: Verify new system"
+          echo "============================================"
+          $SSH "curl -sf --connect-timeout 5 http://localhost:13000 > /dev/null && echo 'Sandbox 13000: OK' || echo 'Sandbox 13000: FAILED'"
+          $SSH "curl -sf --connect-timeout 5 http://localhost:17000 > /dev/null && echo 'Sandbox 17000: OK' || echo 'Sandbox 17000: FAILED'"
+
+          echo "Checking HTTPS end-to-end..."
+          HTTPS_OK=false
+          for i in $(seq 1 30); do
+            if $SSH "curl -sf --connect-timeout 5 https://opencode.example.com > /dev/null 2>&1"; then
+              echo "HTTPS: OK"
+              HTTPS_OK=true
+              break
+            fi
+            echo "Waiting for HTTPS... (attempt $i/30)"
+            sleep 2
+          done
+
+          if [ "$HTTPS_OK" = "false" ]; then
+            echo "=== HTTPS VERIFICATION FAILED - ROLLING BACK ==="
+            $SSH "docker stop willow-apps willow-sandbox 2>/dev/null || true"
+            echo "Restoring native OpenCode/code-server..."
+            $SSH "if [ -f /etc/caddy/Caddyfile.bak ]; then cp /etc/caddy/Caddyfile.bak /etc/caddy/Caddyfile; fi"
+            $SSH "supervisorctl -c /etc/supervisor/supervisord.conf start opencode code-server 2>/dev/null || true"
+            exit 1
+          fi
+
+          echo ""
+          echo "============================================"
+          echo "PHASE 6: Cleanup"
+          echo "============================================"
+          $SSH "docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'"
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf status 2>&1 || true"
+
+          echo ""
+          echo "============================================"
+          echo "MIGRATION COMPLETE"
+          echo "============================================"
+          rm -f /tmp/deploy_key /tmp/github-app.pem .env /tmp/docker-config.json

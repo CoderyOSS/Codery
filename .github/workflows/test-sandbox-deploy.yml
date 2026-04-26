@@ -1,0 +1,51 @@
+name: Test Sandbox Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test sandbox blue/green deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test sandbox deploy end-to-end
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          trap 'rm -f /tmp/deploy_key' EXIT
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+
+          printf '%s\n' "${{ secrets.ENV_FILE }}" | $SSH "cat > /opt/codery/.env"
+          $SSH "echo 'GHCR_USERNAME=${{ github.actor }}' >> /opt/codery/.env"
+          $SSH "echo 'GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}' >> /opt/codery/.env"
+
+          $SSH "mkdir -p /opt/codery/state"
+
+          echo "=== Deploy 1: should deploy as inactive color ==="
+          $SSH "sudo /opt/codery/codery-ci deploy sandbox latest 2>&1"
+
+          echo "=== Verify after deploy 1 ==="
+          $SSH "
+            echo 'State:' && cat /opt/codery/state/sandbox.color
+            echo 'Containers:' && docker ps --filter name=codery-sandbox --format 'table {{.Names}}\t{{.Status}}'
+            echo 'Caddyfile excerpt:' && grep 'reverse_proxy' /etc/caddy/Caddyfile
+          "
+
+          echo "=== Deploy 2: should flip back to original color ==="
+          $SSH "sudo /opt/codery/codery-ci deploy sandbox latest 2>&1"
+
+          echo "=== Verify after deploy 2 ==="
+          $SSH "
+            echo 'State:' && cat /opt/codery/state/sandbox.color
+            echo 'Containers:' && docker ps --filter name=codery-sandbox --format 'table {{.Names}}\t{{.Status}}'
+            echo 'Caddyfile excerpt:' && grep 'reverse_proxy' /etc/caddy/Caddyfile
+          "
+
+          echo "=== Task 9 COMPLETE ==="

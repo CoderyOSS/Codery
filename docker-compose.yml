@@ -1,0 +1,60 @@
+services:
+  # Apps: Bun/Node project servers, SSH agent (frequently deployed)
+  # Runs on host network for simplicity
+  apps:
+    container_name: codery-apps
+    image: ghcr.io/CoderyOSS/codery:apps-latest
+    networks:
+      - codery-net
+    ports:
+      - "8000-9000:8000-9000"
+    volumes:
+      - ${SSH_DIR:-~/.ssh}:/home/gem/.ssh:ro
+      - ${GITHUB_APP_PRIVATE_KEY_PATH:-/dev/null}:/run/secrets/github-app.pem:ro
+      - projects:/home/gem/projects
+    env_file:
+      - .env
+    environment:
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+    restart: "unless-stopped"
+
+  # Sandbox: OpenCode + code-server (frequently deployed)
+  # Uses bridge network for isolation, ports 13000/17000
+  sandbox:
+    container_name: codery-sandbox
+    image: ghcr.io/CoderyOSS/codery:sandbox-latest
+    networks:
+      - codery-net
+    volumes:
+      - projects:/home/gem/projects
+      - opencode-data:/home/gem/.local/share/opencode
+      - ${GITHUB_APP_PRIVATE_KEY_PATH:-/dev/null}:/run/secrets/github-app.pem:ro
+    ports:
+      - "13000:3000"
+      - "17000:7000"
+      - "17681:7681"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run
+      - /var/log/supervisor
+      - /run
+    env_file:
+      - .env
+    environment:
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+    restart: "unless-stopped"
+    depends_on:
+      - apps
+
+networks:
+  codery-net:
+    driver: bridge
+
+volumes:
+  projects:
+  opencode-data:

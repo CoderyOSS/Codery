@@ -1,0 +1,189 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main, 'feat/**']
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build images and push to GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+
+      - name: Build and push system image
+        uses: docker/build-push-action@v6
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: Dockerfile.system
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:system-latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:system-${{ github.sha }}
+          provenance: false
+          sbom: false
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:system-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:system-buildcache,mode=max
+
+      - name: Build and push sandbox image
+        uses: docker/build-push-action@v6
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: Dockerfile.sandbox
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sandbox-latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sandbox-${{ github.sha }}
+          provenance: false
+          sbom: false
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sandbox-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sandbox-buildcache,mode=max
+
+  deploy:
+    name: SSH deploy to Hetzner
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate required secrets
+        run: |
+          MISSING=""
+          [ -z "${{ secrets.ANTHROPIC_API_KEY }}"     ] && MISSING="$MISSING ANTHROPIC_API_KEY"
+          [ -z "${{ secrets.TAILSCALE_AUTH_KEY }}"    ] && MISSING="$MISSING TAILSCALE_AUTH_KEY"
+          [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}"  ] && MISSING="$MISSING CLOUDFLARE_API_TOKEN"
+          [ -z "${{ secrets.CLOUDFLARE_ZONE_ID }}"    ] && MISSING="$MISSING CLOUDFLARE_ZONE_ID"
+          [ -z "${{ secrets.DEPLOY_HOST }}"           ] && MISSING="$MISSING DEPLOY_HOST"
+          [ -z "${{ secrets.DEPLOY_SSH_KEY }}"        ] && MISSING="$MISSING DEPLOY_SSH_KEY"
+          if [ -n "$MISSING" ]; then
+            echo "ERROR: Missing required secrets:$MISSING"
+            exit 1
+          fi
+          echo "All required secrets present."
+
+      - name: Write .env from secrets
+        run: |
+          cat > .env <<EOF
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}
+          OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
+          GITHUB_APP_SLUG=${{ secrets.GH_APP_SLUG }}
+          TAILSCALE_AUTH_KEY=${{ secrets.TAILSCALE_AUTH_KEY }}
+          CLOUDFLARE_API_TOKEN=${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID=${{ secrets.CLOUDFLARE_ZONE_ID }}
+          TZ=America/Los_Angeles
+          EOF
+
+      - name: Write GitHub App private key
+        run: |
+          echo "${{ secrets.GH_APP_PRIVATE_KEY }}" > /tmp/github-app.pem
+          chmod 600 /tmp/github-app.pem
+          echo "GITHUB_APP_PRIVATE_KEY_PATH=/opt/willow/github-app.pem" >> .env
+          echo "SSH_DIR=/home/gem/.ssh" >> .env
+
+      - name: Rewrite docker-compose to pull from GHCR
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          python3 - <<'PYEOF'
+          import re, os
+          image = os.environ['IMAGE']
+          with open('docker-compose.yml') as f:
+              content = f.read()
+          content = re.sub(
+              r'(\n    )build:\n      context: \.\n      dockerfile: Dockerfile\.system',
+              r'\1image: ' + image + r':system-latest',
+              content
+          )
+          content = re.sub(
+              r'(\n    )build:\n      context: \.\n      dockerfile: Dockerfile\.sandbox',
+              r'\1image: ' + image + r':sandbox-latest',
+              content
+          )
+          with open('docker-compose.yml', 'w') as f:
+              f.write(content)
+          PYEOF
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Deploy via SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+          SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
+
+          $SSH "sudo mkdir -p /opt/willow && sudo chown deploy:deploy /opt/willow" || true
+          $SCP docker-compose.yml .env /tmp/github-app.pem deploy@${DEPLOY_HOST}:/opt/willow/
+
+          $SSH "sudo nginx -t && sudo systemctl reload nginx || true"
+
+          mkdir -p ~/.docker
+          echo '{"auths":{"ghcr.io":{"username":"${{ github.actor }}","password":"${{ secrets.GITHUB_TOKEN }}"}}}' > /tmp/docker-config.json
+          $SCP /tmp/docker-config.json deploy@${DEPLOY_HOST}:~/.docker/config.json
+
+          $SSH "echo '=== Port status before deploy ===' && ss -tlnp | grep -E '3000|7000|13000|17000' || echo 'No relevant ports bound' \
+            && echo '=== Docker containers ===' && docker ps -a \
+            && docker stop \$(docker ps -q) 2>/dev/null || true \
+            && cd /opt/willow \
+            && docker compose down --remove-orphans || true \
+            && echo '=== Port status after down ===' && ss -tlnp | grep -E '3000|7000|13000|17000' || echo 'No relevant ports bound' \
+            && docker compose pull \
+            && docker compose up -d --force-recreate \
+            && sleep 5 \
+            && echo '=== Port status after up ===' && ss -tlnp | grep -E '3000|7000|13000|17000' || echo 'No relevant ports bound' \
+            && docker compose ps \
+            && docker image prune -f"
+
+          rm -f /tmp/deploy_key /tmp/github-app.pem .env /tmp/docker-config.json

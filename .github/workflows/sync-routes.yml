@@ -1,0 +1,31 @@
+name: Sync Routes
+
+on:
+  push:
+    branches: [main]
+    paths: ['proxy/apps-routes.json']
+  workflow_dispatch:
+
+jobs:
+  sync:
+    name: Sync routes to VPS
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync routes and reload Caddy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          trap 'rm -f /tmp/deploy_key' EXIT
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+          SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
+
+          $SSH "mkdir -p /opt/codery/proxy"
+          $SCP proxy/apps-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/apps-routes.json
+          $SSH "/opt/codery/codery-ci reload-routes 2>&1"
