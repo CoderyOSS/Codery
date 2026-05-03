@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
+use bollard::container::ListContainersOptions;
 use crate::service_def::ServiceDef;
 use crate::{caddy, config, deploy, state};
 
@@ -19,14 +20,10 @@ pub type RollbackLock = Arc<Mutex<HashSet<String>>>;
 
 #[derive(Serialize)]
 pub struct ServiceStatus {
-    pub service:            String,
-    pub active_color:       String,
-    pub active_sha:         Option<String>,
-    pub active_container:   String,
-    pub prev_color:         String,
-    pub prev_sha:           Option<String>,
-    pub prev_container:     String,
-    pub rollback_available: bool,
+    pub name:   String,
+    pub image:  String,
+    pub status: String,
+    pub state:  String,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -102,76 +99,28 @@ async fn post_rollback(
 // ── Status builder ────────────────────────────────────────────────────────────
 
 async fn build_status() -> Result<Vec<ServiceStatus>> {
-    let defs = ServiceDef::load_all()?;
     let docker = Docker::connect_with_socket_defaults()?;
-    let mut out = Vec::new();
+    let containers = docker.list_containers(Some(ListContainersOptions::<String> {
+        all: false, // running only
+        ..Default::default()
+    })).await?;
 
-    for def in &defs {
-        let blue = config::container_name(&def.service, "blue");
-        let green = config::container_name(&def.service, "green");
+    let out = containers.into_iter().map(|c| {
+        let name = c.names
+            .unwrap_or_default()
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches('/')
+            .to_string();
+        ServiceStatus {
+            name,
+            image:  c.image.unwrap_or_default(),
+            status: c.status.unwrap_or_default(),
+            state:  c.state.unwrap_or_default(),
+        }
+    }).collect();
 
-        let blue_info = docker.inspect_container(&blue, None).await.ok();
-        let green_info = docker.inspect_container(&green, None).await.ok();
-
-        let is_running = |info: &Option<_>| -> bool {
-            let Some(i): &Option<bollard::models::ContainerInspectResponse> = info else { return false };
-            i.state.as_ref().and_then(|s| s.running).unwrap_or(false)
-        };
-
-        let blue_running = is_running(&blue_info);
-        let green_running = is_running(&green_info);
-
-        // Derive active color from Docker; fall back to state file if ambiguous.
-        let active_color = if blue_running && !green_running {
-            "blue".to_string()
-        } else if green_running && !blue_running {
-            "green".to_string()
-        } else {
-            state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string())
-        };
-
-        let prev_color = config::flip(&active_color).to_string();
-        let active_container = config::container_name(&def.service, &active_color);
-        let prev_container = config::container_name(&def.service, &prev_color);
-
-        let sha_from_info = |info: &Option<bollard::models::ContainerInspectResponse>| -> Option<String> {
-            info.as_ref()
-                .and_then(|i| i.config.as_ref())
-                .and_then(|c| c.image.as_deref())
-                .and_then(|img| sha_from_image_tag(&def.service, img))
-        };
-
-        let (active_info, prev_info) = if active_color == "blue" {
-            (&blue_info, &green_info)
-        } else {
-            (&green_info, &blue_info)
-        };
-
-        let active_sha = sha_from_info(active_info);
-
-        let (prev_sha, rollback_available) = match prev_info {
-            None => (None, false),
-            Some(i) => {
-                let running = i.state.as_ref().and_then(|s| s.running).unwrap_or(false);
-                if running {
-                    (None, false)
-                } else {
-                    (sha_from_info(prev_info), true)
-                }
-            }
-        };
-
-        out.push(ServiceStatus {
-            service: def.service.clone(),
-            active_color,
-            active_sha,
-            active_container,
-            prev_color,
-            prev_sha,
-            prev_container,
-            rollback_available,
-        });
-    }
     Ok(out)
 }
 
