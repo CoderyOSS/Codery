@@ -16,6 +16,7 @@ h1 { font-size: 1.4rem; font-weight: 600; color: #e0e0e0; }
 .card.success { border-color: #4caf50; box-shadow: 0 0 0 1px #4caf5033; }
 .card.error { border-color: #ef4444; box-shadow: 0 0 0 1px #ef444433; }
 .card.unavailable { background: #1a1a1a; border-color: #2a2a2a; opacity: 0.7; }
+.card.inactive { opacity: 0.5; }
 .card-inner { align-items: flex-start; justify-content: space-between; gap: 16px; }
 .card-left { flex: 1; min-width: 0; overflow: hidden; }
 .service-name { font-size: 1.1rem; font-weight: 600; color: #e0e0e0; }
@@ -49,6 +50,9 @@ h1 { font-size: 1.4rem; font-weight: 600; color: #e0e0e0; }
 .footer { margin-top: 16px; font-size: 0.75rem; color: #555; max-width: 860px; text-align: right; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .spin { display: inline-block; animation: spin 1s linear infinite; }
+.conn-dot { font-size: 0.65rem; vertical-align: middle; margin-left: 6px; }
+.conn-live { color: #4caf50; }
+.conn-dead { color: #555; }
 @media (min-width: 601px) {
   .card-inner { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; }
 }
@@ -66,15 +70,15 @@ h1 { font-size: 1.4rem; font-weight: 600; color: #e0e0e0; }
 </head>
 <body>
 <div class="header">
-  <h1>Codery Deploy Console</h1>
+  <h1>Codery Deploy Console <span id="conn-dot" class="conn-dot conn-dead" title="Connecting…">●</span></h1>
   <span class="header-sub">Deploy Console</span>
 </div>
 <div id="cards" class="cards"><p style="color:#666">Loading…</p></div>
 <div class="footer">Restart: docker restart · Rollback: restarts stopped container · health-checks · flips Caddy routing</div>
 
 <script>
-const rollbackInFlight = new Set(); // keyed by service name
-const restartInFlight  = new Set(); // keyed by container name
+const rollbackInFlight = new Map(); // service → containerName
+const restartInFlight  = new Set();
 
 function escHtml(s) {
   return String(s)
@@ -84,30 +88,50 @@ function escHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-// Stable DOM id from a container name (hyphens are valid in IDs).
 function cid(name) { return 'card-' + name; }
+
+// ── Connection status ──────────────────────────────────────────────────────────
+
+function setConnStatus(live) {
+  const el = document.getElementById('conn-dot');
+  el.className = 'conn-dot ' + (live ? 'conn-live' : 'conn-dead');
+  el.title     = live ? 'Live' : 'Reconnecting…';
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────────
 
 function renderCards(containers) {
   const el = document.getElementById('cards');
   el.innerHTML = '';
   if (!containers.length) {
-    el.innerHTML = '<p style="color:#666">No running containers</p>';
+    el.innerHTML = '<p style="color:#666">No containers</p>';
     return;
   }
-  for (const c of containers) el.appendChild(buildCard(c));
+  const alpha = (a, b) => a.name.localeCompare(b.name);
+  const running  = containers.filter(c => c.state === 'running').sort(alpha);
+  const inactive = containers.filter(c => c.state !== 'running').sort(alpha);
+  for (const c of [...running, ...inactive]) el.appendChild(buildCard(c));
+  for (const name of restartInFlight) {
+    const els = cardEls(name, '-restart');
+    if (els.card) setProgress(els, '↺ Restarting…', 'Restarting…');
+  }
+  for (const [, name] of rollbackInFlight) {
+    const els = cardEls(name, '-rbtn');
+    if (els.card) setProgress(els, '↩ Rolling back…', 'Rolling back…');
+  }
 }
 
 function buildCard(c) {
-  const id = cid(c.name);
-  const card = document.createElement('div');
-  card.id = id;
-  card.className = 'card';
+  const id      = cid(c.name);
+  const card    = document.createElement('div');
+  card.id        = id;
+  card.className = 'card' + (c.state !== 'running' ? ' inactive' : '');
 
   const stateClass = c.state === 'running' ? 'badge-green' : 'badge-blue';
 
   const rollbackBtn = c.rollback_available
     ? `<button class="btn btn-rollback" id="${id}-rbtn"
-         onclick="handleRollback(${JSON.stringify(c.service)},${JSON.stringify(c.name)})"
+         onclick="handleRollback(${escHtml(JSON.stringify(c.service))},${escHtml(JSON.stringify(c.name))})"
        >↩ Rollback</button>`
     : '';
 
@@ -132,7 +156,7 @@ function buildCard(c) {
         <div class="status-msg" id="${id}-status"></div>
         <div class="btn-row">
           <button class="btn btn-restart" id="${id}-restart"
-            onclick="handleRestart(${JSON.stringify(c.name)})"
+            onclick="handleRestart(${escHtml(JSON.stringify(c.name))})"
           >↺ Restart</button>
           ${rollbackBtn}
         </div>
@@ -141,7 +165,7 @@ function buildCard(c) {
   return card;
 }
 
-// ── Shared card helpers ────────────────────────────────────────────────────────
+// ── Shared card state helpers ──────────────────────────────────────────────────
 
 function cardEls(name, suffix) {
   const id = cid(name);
@@ -193,7 +217,7 @@ async function handleRestart(name) {
     const resp = await fetch('/api/restart/' + encodeURIComponent(name), { method: 'POST' });
     if (resp.ok) {
       setSuccess(els, '✓ Restarted', '✓ Restart complete');
-      setTimeout(async () => { restartInFlight.delete(name); await loadStatus(); }, 1500);
+      setTimeout(() => restartInFlight.delete(name), 1500);
     } else {
       const text = await resp.text();
       restartInFlight.delete(name);
@@ -209,7 +233,7 @@ async function handleRestart(name) {
 
 async function handleRollback(service, name) {
   if (rollbackInFlight.has(service)) return;
-  rollbackInFlight.add(service);
+  rollbackInFlight.set(service, name);
   const els = cardEls(name, '-rbtn');
   els.card.classList.remove('success', 'error');
   setProgress(els, '↩ Rolling back…', 'Rolling back…');
@@ -217,7 +241,7 @@ async function handleRollback(service, name) {
     const resp = await fetch('/api/rollback/' + encodeURIComponent(service), { method: 'POST' });
     if (resp.ok) {
       setSuccess(els, '✓ Done', '✓ Rollback complete');
-      setTimeout(async () => { rollbackInFlight.delete(service); await loadStatus(); }, 500);
+      setTimeout(() => rollbackInFlight.delete(service), 500);
     } else {
       const text = await resp.text();
       rollbackInFlight.delete(service);
@@ -229,24 +253,14 @@ async function handleRollback(service, name) {
   }
 }
 
-// ── Poll ───────────────────────────────────────────────────────────────────────
+// ── SSE connection ─────────────────────────────────────────────────────────────
 
-async function loadStatus() {
-  try {
-    const resp = await fetch('/api/status');
-    if (!resp.ok) {
-      document.getElementById('cards').innerHTML =
-        '<p style="color:#ef4444">Failed to load status: ' + escHtml(resp.statusText) + '</p>';
-      return;
-    }
-    renderCards(await resp.json());
-  } catch (err) {
-    document.getElementById('cards').innerHTML =
-      '<p style="color:#ef4444">Network error loading status</p>';
-  }
-}
-
-loadStatus();
+const es = new EventSource('/api/events');
+es.onmessage = (e) => {
+  setConnStatus(true);
+  try { renderCards(JSON.parse(e.data)); } catch (_) {}
+};
+es.onerror = () => setConnStatus(false);
 </script>
 </body>
 </html>
