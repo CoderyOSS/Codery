@@ -77,9 +77,6 @@ h1 { font-size: 1.4rem; font-weight: 600; color: #e0e0e0; }
 <div class="footer">Restart: docker restart · Rollback: restarts stopped container · health-checks · flips Caddy routing</div>
 
 <script>
-const rollbackInFlight = new Map(); // service → containerName
-const restartInFlight  = new Set();
-
 function escHtml(s) {
   return String(s)
     .replace(/&/g, '&amp;')
@@ -111,27 +108,36 @@ function renderCards(containers) {
   const running  = containers.filter(c => c.state === 'running').sort(alpha);
   const inactive = containers.filter(c => c.state !== 'running').sort(alpha);
   for (const c of [...running, ...inactive]) el.appendChild(buildCard(c));
-  for (const name of restartInFlight) {
-    const els = cardEls(name, '-restart');
-    if (els.card) setProgress(els, '↺ Restarting…', 'Restarting…');
-  }
-  for (const [, name] of rollbackInFlight) {
-    const els = cardEls(name, '-rbtn');
-    if (els.card) setProgress(els, '↩ Rolling back…', 'Rolling back…');
-  }
 }
 
 function buildCard(c) {
   const id      = cid(c.name);
   const card    = document.createElement('div');
   card.id        = id;
-  card.className = 'card' + (c.state !== 'running' ? ' inactive' : '');
+
+  const classes = ['card'];
+  if (c.state !== 'running') classes.push('inactive');
+  if (c.operation)           classes.push('in-progress');
+  card.className = classes.join(' ');
 
   const stateClass = c.state === 'running' ? 'badge-green' : 'badge-blue';
 
+  const opLabel = c.operation === 'rolling_back' ? '↩ Rolling back…'
+                : c.operation === 'restarting'   ? '↺ Restarting…'
+                : null;
+
+  const statusHtml = opLabel
+    ? `<div class="status-msg spinning" id="${id}-status"><span class="spin">⟳</span> ${escHtml(opLabel)}</div>`
+    : `<div class="status-msg" id="${id}-status"></div>`;
+
+  const restartBtnClass = c.operation ? 'btn btn-in-progress' : 'btn btn-restart';
+  const restartBtnText  = c.operation === 'restarting' ? '↺ Restarting…' : '↺ Restart';
+  const restartDisabled = c.operation ? 'disabled' : '';
+
   const rollbackBtn = c.rollback_available
-    ? `<button class="btn btn-rollback" id="${id}-rbtn"
+    ? `<button class="btn ${c.operation ? 'btn-in-progress' : 'btn-rollback'}" id="${id}-rbtn"
          onclick="handleRollback(${escHtml(JSON.stringify(c.service))},${escHtml(JSON.stringify(c.name))})"
+         ${c.operation ? 'disabled' : ''}
        >↩ Rollback</button>`
     : '';
 
@@ -153,11 +159,12 @@ function buildCard(c) {
         </div>
       </div>
       <div class="card-right">
-        <div class="status-msg" id="${id}-status"></div>
+        ${statusHtml}
         <div class="btn-row">
-          <button class="btn btn-restart" id="${id}-restart"
+          <button class="${restartBtnClass}" id="${id}-restart"
             onclick="handleRestart(${escHtml(JSON.stringify(c.name))})"
-          >↺ Restart</button>
+            ${restartDisabled}
+          >${escHtml(restartBtnText)}</button>
           ${rollbackBtn}
         </div>
       </div>
@@ -176,80 +183,55 @@ function cardEls(name, suffix) {
   };
 }
 
-function setProgress(els, label, msg) {
-  els.card.classList.add('in-progress');
-  els.btn.disabled = true;
-  els.btn.className = 'btn btn-in-progress';
-  els.btn.textContent = label;
-  els.status.className = 'status-msg spinning';
-  els.status.innerHTML = '<span class="spin">⟳</span> ' + escHtml(msg);
-}
-
-function setSuccess(els, label, msg) {
-  els.card.classList.remove('in-progress');
-  els.card.classList.add('success');
-  els.btn.disabled = true;
-  els.btn.className = 'btn btn-done';
-  els.btn.textContent = label;
-  els.status.className = 'status-msg done';
-  els.status.textContent = msg;
-}
-
 function setError(els, origClass, origLabel, msg) {
   els.card.classList.remove('in-progress');
   els.card.classList.add('error');
-  els.btn.disabled = false;
-  els.btn.className = 'btn ' + origClass;
-  els.btn.textContent = origLabel;
-  els.status.className = 'status-msg err';
-  els.status.textContent = '✗ ' + msg;
+  if (els.btn) {
+    els.btn.disabled = false;
+    els.btn.className = 'btn ' + origClass;
+    els.btn.textContent = origLabel;
+  }
+  if (els.status) {
+    els.status.className = 'status-msg err';
+    els.status.textContent = '✗ ' + msg;
+  }
 }
 
 // ── Restart ────────────────────────────────────────────────────────────────────
 
 async function handleRestart(name) {
-  if (restartInFlight.has(name)) return;
-  restartInFlight.add(name);
-  const els = cardEls(name, '-restart');
-  els.card.classList.remove('success', 'error');
-  setProgress(els, '↺ Restarting…', 'Restarting…');
+  const btn = document.getElementById(cid(name) + '-restart');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
   try {
     const resp = await fetch('/api/restart/' + encodeURIComponent(name), { method: 'POST' });
-    if (resp.ok) {
-      setSuccess(els, '✓ Restarted', '✓ Restart complete');
-      setTimeout(() => restartInFlight.delete(name), 1500);
-    } else {
+    if (!resp.ok) {
       const text = await resp.text();
-      restartInFlight.delete(name);
-      setError(els, 'btn-restart', '↺ Restart', text || 'restart failed');
+      const els = cardEls(name, '-restart');
+      if (els.card) setError(els, 'btn-restart', '↺ Restart', text || 'restart failed');
     }
-  } catch (err) {
-    restartInFlight.delete(name);
-    setError(els, 'btn-restart', '↺ Restart', 'network error');
+  } catch (_) {
+    const els = cardEls(name, '-restart');
+    if (els.card) setError(els, 'btn-restart', '↺ Restart', 'network error');
   }
 }
 
 // ── Rollback ───────────────────────────────────────────────────────────────────
 
 async function handleRollback(service, name) {
-  if (rollbackInFlight.has(service)) return;
-  rollbackInFlight.set(service, name);
-  const els = cardEls(name, '-rbtn');
-  els.card.classList.remove('success', 'error');
-  setProgress(els, '↩ Rolling back…', 'Rolling back…');
+  const btn = document.getElementById(cid(name) + '-rbtn');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
   try {
     const resp = await fetch('/api/rollback/' + encodeURIComponent(service), { method: 'POST' });
-    if (resp.ok) {
-      setSuccess(els, '✓ Done', '✓ Rollback complete');
-      setTimeout(() => rollbackInFlight.delete(service), 500);
-    } else {
+    if (!resp.ok) {
       const text = await resp.text();
-      rollbackInFlight.delete(service);
-      setError(els, 'btn-rollback', '↩ Rollback', text || 'rollback failed');
+      const els = cardEls(name, '-rbtn');
+      if (els.card) setError(els, 'btn-rollback', '↩ Rollback', text || 'rollback failed');
     }
-  } catch (err) {
-    rollbackInFlight.delete(service);
-    setError(els, 'btn-rollback', '↩ Rollback', 'network error');
+  } catch (_) {
+    const els = cardEls(name, '-rbtn');
+    if (els.card) setError(els, 'btn-rollback', '↩ Rollback', 'network error');
   }
 }
 

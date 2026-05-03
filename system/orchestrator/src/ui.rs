@@ -22,11 +22,13 @@ use crate::{caddy, config, deploy, state};
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 pub type RollbackLock = Arc<Mutex<HashSet<String>>>;
+pub type Ops = Arc<Mutex<HashMap<String, &'static str>>>;
 
 #[derive(Clone)]
 pub struct AppState {
     pub rollback_lock: RollbackLock,
     pub events_tx:    Arc<broadcast::Sender<String>>,
+    pub ops:          Ops,
 }
 
 #[derive(Serialize)]
@@ -38,14 +40,16 @@ pub struct ServiceStatus {
     pub service:            Option<String>,
     pub rollback_available: bool,
     pub prev_container:     Option<String>,
+    pub operation:          Option<String>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn make_router(events_tx: Arc<broadcast::Sender<String>>) -> Router {
+pub fn make_router(events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Router {
     let state = AppState {
         rollback_lock: Arc::new(Mutex::new(HashSet::new())),
         events_tx,
+        ops,
     };
     Router::new()
         .route("/", get(serve_index))
@@ -56,11 +60,11 @@ pub fn make_router(events_tx: Arc<broadcast::Sender<String>>) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(port: u16, events_tx: Arc<broadcast::Sender<String>>) -> Result<()> {
+pub async fn serve(port: u16, events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Result<()> {
     let addr = format!("127.0.0.1:{}", port);
     println!("[ui] Listening on http://{}", addr);
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, make_router(events_tx)).await?;
+    axum::serve(listener, make_router(events_tx, ops)).await?;
     Ok(())
 }
 
@@ -78,7 +82,8 @@ async fn get_events(
     State(state): State<AppState>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.events_tx.subscribe();
-    let initial = build_status_json().await.unwrap_or_else(|_| "[]".to_string());
+    let ops_snap = state.ops.lock().unwrap().clone();
+    let initial = build_status_json(&ops_snap).await.unwrap_or_else(|_| "[]".to_string());
 
     let stream = futures_util::stream::unfold(
         (rx, Some(initial)),
@@ -101,8 +106,9 @@ async fn get_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-async fn get_status() -> impl IntoResponse {
-    match build_status().await {
+async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
+    let ops_snap = state.ops.lock().unwrap().clone();
+    match build_status(&ops_snap).await {
         Ok(statuses) => {
             let json = serde_json::to_string(&statuses).unwrap_or_else(|_| "[]".to_string());
             (
@@ -130,7 +136,7 @@ async fn post_rollback(
         set.insert(service.clone());
     }
 
-    let result = run_rollback(&service).await;
+    let result = run_rollback(&service, &state.ops, &state.events_tx).await;
 
     {
         let mut set = state.rollback_lock.lock().unwrap();
@@ -145,12 +151,12 @@ async fn post_rollback(
 
 // ── Status builder ────────────────────────────────────────────────────────────
 
-pub async fn build_status_json() -> Result<String> {
-    let statuses = build_status().await?;
+pub async fn build_status_json(ops: &HashMap<String, &'static str>) -> Result<String> {
+    let statuses = build_status(ops).await?;
     Ok(serde_json::to_string(&statuses)?)
 }
 
-async fn build_status() -> Result<Vec<ServiceStatus>> {
+async fn build_status(ops: &HashMap<String, &'static str>) -> Result<Vec<ServiceStatus>> {
     let docker = Docker::connect_with_socket_defaults()?;
     let containers = docker.list_containers(Some(ListContainersOptions::<String> {
         all: true, // running AND stopped
@@ -166,6 +172,8 @@ async fn build_status() -> Result<Vec<ServiceStatus>> {
             .unwrap_or_default()
             .trim_start_matches('/')
             .to_string();
+
+        let operation = ops.get(&name).map(|s| s.to_string());
 
         let (service, rollback_available, prev_container) =
             if let Some((svc, color)) = parse_service_container(&name) {
@@ -185,6 +193,7 @@ async fn build_status() -> Result<Vec<ServiceStatus>> {
             service,
             rollback_available,
             prev_container,
+            operation,
         });
     }
     Ok(out)
@@ -227,13 +236,21 @@ fn sha_from_image_tag(service: &str, image: &str) -> Option<String> {
     image.strip_prefix(&prefix).map(|s| s.to_string())
 }
 
+// ── broadcast helper ──────────────────────────────────────────────────────────
+
+async fn broadcast_status(tx: &broadcast::Sender<String>, ops: &Ops) {
+    let ops_snap = ops.lock().unwrap().clone();
+    let json = build_status_json(&ops_snap).await.unwrap_or_else(|_| "[]".to_string());
+    let _ = tx.send(json);
+}
+
 // ── Event watcher ─────────────────────────────────────────────────────────────
 
 /// Spawned once at daemon startup. Reconnects automatically if the Docker
 /// event stream ends (e.g. daemon restart).
-pub async fn event_watcher(tx: Arc<broadcast::Sender<String>>) {
+pub async fn event_watcher(tx: Arc<broadcast::Sender<String>>, ops: Ops) {
     loop {
-        if let Err(e) = run_event_watcher(&tx).await {
+        if let Err(e) = run_event_watcher(&tx, &ops).await {
             println!("[ui] Docker event stream error: {}", e);
         } else {
             println!("[ui] Docker event stream ended");
@@ -243,7 +260,7 @@ pub async fn event_watcher(tx: Arc<broadcast::Sender<String>>) {
     }
 }
 
-async fn run_event_watcher(tx: &broadcast::Sender<String>) -> Result<()> {
+async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<()> {
     let docker = Docker::connect_with_socket_defaults()?;
 
     let filters: HashMap<String, Vec<String>> = [(
@@ -258,7 +275,8 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>) -> Result<()> {
 
     while let Some(event) = stream.next().await {
         let _ = event?; // propagate Docker errors → outer loop reconnects
-        let snapshot = build_status_json().await.unwrap_or_else(|_| "[]".to_string());
+        let ops_snap = ops.lock().unwrap().clone();
+        let snapshot = build_status_json(&ops_snap).await.unwrap_or_else(|_| "[]".to_string());
         let _ = tx.send(snapshot); // ignore Err (no receivers connected)
     }
 
@@ -268,10 +286,18 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>) -> Result<()> {
 // ── Restart flow ──────────────────────────────────────────────────────────────
 
 async fn post_restart(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(container): Path<String>,
 ) -> impl IntoResponse {
-    match do_restart(&container).await {
+    state.ops.lock().unwrap().insert(container.clone(), "restarting");
+    broadcast_status(&state.events_tx, &state.ops).await;
+
+    let result = do_restart(&container).await;
+
+    state.ops.lock().unwrap().remove(&container);
+    broadcast_status(&state.events_tx, &state.ops).await;
+
+    match result {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -288,7 +314,7 @@ async fn do_restart(container: &str) -> Result<()> {
 
 // ── Rollback flow ─────────────────────────────────────────────────────────────
 
-async fn run_rollback(service: &str) -> Result<()> {
+async fn run_rollback(service: &str, ops: &Ops, tx: &broadcast::Sender<String>) -> Result<()> {
     let _lock = crate::deploy_lock::DeployLock::try_acquire(service)
         .map_err(|_| anyhow::anyhow!("deploy already in progress for {}", service))?;
 
@@ -302,9 +328,28 @@ async fn run_rollback(service: &str) -> Result<()> {
     let prev_container = config::container_name(service, prev_color);
     let active_container = config::container_name(service, &active_color);
 
+    ops.lock().unwrap().insert(active_container.clone(), "rolling_back");
+    broadcast_status(tx, ops).await;
+
+    let result = do_rollback(&docker, &def, service, prev_color, &prev_container, &active_container).await;
+
+    ops.lock().unwrap().remove(&active_container);
+    broadcast_status(tx, ops).await;
+
+    result
+}
+
+async fn do_rollback(
+    docker: &Docker,
+    def: &ServiceDef,
+    service: &str,
+    prev_color: &str,
+    prev_container: &str,
+    active_container: &str,
+) -> Result<()> {
     // Verify the previous container exists and is stopped
     let info = docker
-        .inspect_container(&prev_container, None)
+        .inspect_container(prev_container, None)
         .await
         .map_err(|_| anyhow::anyhow!("no stopped container for {}", service))?;
 
@@ -327,13 +372,13 @@ async fn run_rollback(service: &str) -> Result<()> {
     // Start the previous container
     use bollard::container::StartContainerOptions;
     docker
-        .start_container(&prev_container, None::<StartContainerOptions<String>>)
+        .start_container(prev_container, None::<StartContainerOptions<String>>)
         .await
         .map_err(|e| anyhow::anyhow!("failed to start {}: {}", prev_container, e))?;
 
     // Health check — on failure, stop the container we just started
-    if let Err(e) = deploy::poll_health(&docker, &def, prev_color).await {
-        let _ = deploy::stop_container(&docker, &prev_container).await;
+    if let Err(e) = deploy::poll_health(docker, def, prev_color).await {
+        let _ = deploy::stop_container(docker, prev_container).await;
         bail!("health check failed after restart: {}", e);
     }
 
@@ -347,7 +392,7 @@ async fn run_rollback(service: &str) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("caddy reload failed after state write: {}", e))?;
 
     // Stop the now-old active container (only reached if Caddy reload succeeded)
-    deploy::stop_container(&docker, &active_container).await?;
+    deploy::stop_container(docker, active_container).await?;
 
     println!("[ui] Rollback complete: {} is now {}", service, prev_color);
     Ok(())
@@ -365,10 +410,11 @@ mod tests {
 
     async fn start_test_server() -> u16 {
         let (tx, _) = tokio::sync::broadcast::channel::<String>(16);
+        let ops: Ops = Arc::new(Mutex::new(HashMap::new()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            axum::serve(listener, make_router(Arc::new(tx))).await.unwrap()
+            axum::serve(listener, make_router(Arc::new(tx), ops)).await.unwrap()
         });
         port
     }

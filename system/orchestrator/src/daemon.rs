@@ -16,14 +16,15 @@ pub async fn serve() -> Result<()> {
 
     let (events_tx, _) = broadcast::channel::<String>(64);
     let events_tx = Arc::new(events_tx);
+    let ops = ui::Ops::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
-    tokio::spawn(ui::event_watcher(Arc::clone(&events_tx)));
+    tokio::spawn(ui::event_watcher(Arc::clone(&events_tx), Arc::clone(&ops)));
 
     tokio::select! {
-        r = mcp::serve(config::MCP_PORT)              => r?,
-        r = ui::serve(config::UI_PORT, events_tx)     => r?,
-        r = tcp_proxy::serve()                        => r?,
-        _ = shutdown_signal()                         => {
+        r = mcp::serve(config::MCP_PORT)                                        => r?,
+        r = ui::serve(config::UI_PORT, Arc::clone(&events_tx), Arc::clone(&ops)) => r?,
+        r = tcp_proxy::serve()                                                  => r?,
+        _ = shutdown_signal()                                                   => {
             println!("[daemon] Received shutdown signal — stopping");
         }
     }
