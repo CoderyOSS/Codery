@@ -43,6 +43,9 @@ h1 { font-size: 1.4rem; font-weight: 600; color: #e0e0e0; }
 .btn-in-progress { background: #4c1d95; color: #a78bfa; border: 1px solid #7c3aed; cursor: not-allowed; opacity: 0.8; }
 .btn-done { background: #1a3a1a; color: #4caf50; border: 1px solid #4caf50; cursor: not-allowed; }
 .btn-unavailable { background: #333; color: #555; cursor: not-allowed; }
+.btn-restart { background: #374151; color: #d1d5db; }
+.btn-restart:hover:not(:disabled) { background: #4b5563; }
+.btn-row { display: grid; grid-template-columns: auto auto; gap: 8px; justify-content: end; }
 .footer { margin-top: 16px; font-size: 0.75rem; color: #555; max-width: 860px; text-align: right; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .spin { display: inline-block; animation: spin 1s linear infinite; }
@@ -56,6 +59,7 @@ h1 { font-size: 1.4rem; font-weight: 600; color: #e0e0e0; }
   .card-right { text-align: left; align-items: flex-start; width: 100%; border-top: 1px solid #2a2a2a; padding-top: 12px; margin-top: 12px; }
   .rollback-target { align-items: flex-start; max-width: none; }
   .rollback-target .meta-row { justify-content: flex-start; }
+  .btn-row { grid-template-columns: 1fr 1fr; }
   .btn { width: 100%; text-align: center; padding: 10px 20px; }
 }
 </style>
@@ -66,10 +70,11 @@ h1 { font-size: 1.4rem; font-weight: 600; color: #e0e0e0; }
   <span class="header-sub">Deploy Console</span>
 </div>
 <div id="cards" class="cards"><p style="color:#666">Loading…</p></div>
-<div class="footer">Rollback: restarts stopped container · health-checks · flips Caddy routing</div>
+<div class="footer">Restart: docker restart · Rollback: restarts stopped container · health-checks · flips Caddy routing</div>
 
 <script>
-const inFlight = new Set();
+const rollbackInFlight = new Set(); // keyed by service name
+const restartInFlight  = new Set(); // keyed by container name
 
 function escHtml(s) {
   return String(s)
@@ -79,13 +84,8 @@ function escHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-function colorClass(color) {
-  return color === 'green' ? 'badge-green' : 'badge-blue';
-}
-
-function targetColorClass(color) {
-  return color === 'green' ? 'target-green' : 'target-blue';
-}
+// Stable DOM id from a container name (hyphens are valid in IDs).
+function cid(name) { return 'card-' + name; }
 
 function renderCards(containers) {
   const el = document.getElementById('cards');
@@ -94,15 +94,27 @@ function renderCards(containers) {
     el.innerHTML = '<p style="color:#666">No running containers</p>';
     return;
   }
-  for (const c of containers) {
-    el.appendChild(buildCard(c));
-  }
+  for (const c of containers) el.appendChild(buildCard(c));
 }
 
 function buildCard(c) {
+  const id = cid(c.name);
   const card = document.createElement('div');
+  card.id = id;
   card.className = 'card';
+
   const stateClass = c.state === 'running' ? 'badge-green' : 'badge-blue';
+
+  const rollbackBtn = c.rollback_available
+    ? `<button class="btn btn-rollback" id="${id}-rbtn"
+         onclick="handleRollback(${JSON.stringify(c.service)},${JSON.stringify(c.name)})"
+       >↩ Rollback</button>`
+    : '';
+
+  const prevRow = c.prev_container
+    ? `<div class="meta-row"><span class="lbl">rollback&nbsp;target:</span> <span class="val">${escHtml(c.prev_container)}</span></div>`
+    : '';
+
   card.innerHTML = `
     <div class="card-inner">
       <div class="card-left">
@@ -111,70 +123,113 @@ function buildCard(c) {
           <span class="badge ${stateClass}">● ${escHtml(c.state.toUpperCase())}</span>
         </div>
         <div class="meta">
-          <div class="meta-row"><span class="lbl">image:</span> <span class="val">${escHtml(c.image)}</span></div>
+          <div class="meta-row"><span class="lbl">image:</span>  <span class="val">${escHtml(c.image)}</span></div>
           <div class="meta-row"><span class="lbl">status:</span> <span class="val">${escHtml(c.status)}</span></div>
+          ${prevRow}
+        </div>
+      </div>
+      <div class="card-right">
+        <div class="status-msg" id="${id}-status"></div>
+        <div class="btn-row">
+          <button class="btn btn-restart" id="${id}-restart"
+            onclick="handleRestart(${JSON.stringify(c.name)})"
+          >↺ Restart</button>
+          ${rollbackBtn}
         </div>
       </div>
     </div>`;
   return card;
 }
 
-function setCardState(service, state, msg) {
-  const card = document.getElementById('card-' + service);
-  const btn = document.getElementById('btn-' + service);
-  const statusEl = document.getElementById('status-' + service);
-  if (!card || !btn || !statusEl) return;
+// ── Shared card helpers ────────────────────────────────────────────────────────
 
-  card.classList.remove('in-progress', 'success', 'error');
-  statusEl.className = 'status-msg';
-  statusEl.textContent = '';
+function cardEls(name, suffix) {
+  const id = cid(name);
+  return {
+    card:   document.getElementById(id),
+    btn:    document.getElementById(id + suffix),
+    status: document.getElementById(id + '-status'),
+  };
+}
 
-  if (state === 'progress') {
-    card.classList.add('in-progress');
-    btn.disabled = true;
-    btn.className = 'btn btn-in-progress';
-    btn.textContent = '↩ Rolling back…';
-    statusEl.className = 'status-msg spinning';
-    statusEl.innerHTML = '<span class="spin">⟳</span> Rolling back to ' + escHtml(msg) + '…';
-  } else if (state === 'success') {
-    card.classList.add('success');
-    btn.disabled = true;
-    btn.className = 'btn btn-done';
-    btn.textContent = '✓ Done';
-    statusEl.className = 'status-msg done';
-    statusEl.textContent = '✓ Rollback finished';
-  } else if (state === 'error') {
-    card.classList.add('error');
-    btn.disabled = false;
-    btn.className = 'btn btn-rollback';
-    statusEl.className = 'status-msg err';
-    statusEl.textContent = '✗ ' + msg;
+function setProgress(els, label, msg) {
+  els.card.classList.add('in-progress');
+  els.btn.disabled = true;
+  els.btn.className = 'btn btn-in-progress';
+  els.btn.textContent = label;
+  els.status.className = 'status-msg spinning';
+  els.status.innerHTML = '<span class="spin">⟳</span> ' + escHtml(msg);
+}
+
+function setSuccess(els, label, msg) {
+  els.card.classList.remove('in-progress');
+  els.card.classList.add('success');
+  els.btn.disabled = true;
+  els.btn.className = 'btn btn-done';
+  els.btn.textContent = label;
+  els.status.className = 'status-msg done';
+  els.status.textContent = msg;
+}
+
+function setError(els, origClass, origLabel, msg) {
+  els.card.classList.remove('in-progress');
+  els.card.classList.add('error');
+  els.btn.disabled = false;
+  els.btn.className = 'btn ' + origClass;
+  els.btn.textContent = origLabel;
+  els.status.className = 'status-msg err';
+  els.status.textContent = '✗ ' + msg;
+}
+
+// ── Restart ────────────────────────────────────────────────────────────────────
+
+async function handleRestart(name) {
+  if (restartInFlight.has(name)) return;
+  restartInFlight.add(name);
+  const els = cardEls(name, '-restart');
+  els.card.classList.remove('success', 'error');
+  setProgress(els, '↺ Restarting…', 'Restarting…');
+  try {
+    const resp = await fetch('/api/restart/' + encodeURIComponent(name), { method: 'POST' });
+    if (resp.ok) {
+      setSuccess(els, '✓ Restarted', '✓ Restart complete');
+      setTimeout(async () => { restartInFlight.delete(name); await loadStatus(); }, 1500);
+    } else {
+      const text = await resp.text();
+      restartInFlight.delete(name);
+      setError(els, 'btn-restart', '↺ Restart', text || 'restart failed');
+    }
+  } catch (err) {
+    restartInFlight.delete(name);
+    setError(els, 'btn-restart', '↺ Restart', 'network error');
   }
 }
 
-async function handleRollback(service, prevColor) {
-  if (inFlight.has(service)) return;
-  inFlight.add(service);
-  setCardState(service, 'progress', prevColor);
+// ── Rollback ───────────────────────────────────────────────────────────────────
 
+async function handleRollback(service, name) {
+  if (rollbackInFlight.has(service)) return;
+  rollbackInFlight.add(service);
+  const els = cardEls(name, '-rbtn');
+  els.card.classList.remove('success', 'error');
+  setProgress(els, '↩ Rolling back…', 'Rolling back…');
   try {
     const resp = await fetch('/api/rollback/' + encodeURIComponent(service), { method: 'POST' });
     if (resp.ok) {
-      setCardState(service, 'success', '');
-      setTimeout(async () => {
-        inFlight.delete(service);
-        await loadStatus();
-      }, 500);
+      setSuccess(els, '✓ Done', '✓ Rollback complete');
+      setTimeout(async () => { rollbackInFlight.delete(service); await loadStatus(); }, 500);
     } else {
       const text = await resp.text();
-      inFlight.delete(service);
-      setCardState(service, 'error', text || 'rollback failed');
+      rollbackInFlight.delete(service);
+      setError(els, 'btn-rollback', '↩ Rollback', text || 'rollback failed');
     }
   } catch (err) {
-    inFlight.delete(service);
-    setCardState(service, 'error', 'network error');
+    rollbackInFlight.delete(service);
+    setError(els, 'btn-rollback', '↩ Rollback', 'network error');
   }
 }
+
+// ── Poll ───────────────────────────────────────────────────────────────────────
 
 async function loadStatus() {
   try {
@@ -184,8 +239,7 @@ async function loadStatus() {
         '<p style="color:#ef4444">Failed to load status: ' + escHtml(resp.statusText) + '</p>';
       return;
     }
-    const services = await resp.json();
-    renderCards(services);
+    renderCards(await resp.json());
   } catch (err) {
     document.getElementById('cards').innerHTML =
       '<p style="color:#ef4444">Network error loading status</p>';

@@ -20,10 +20,13 @@ pub type RollbackLock = Arc<Mutex<HashSet<String>>>;
 
 #[derive(Serialize)]
 pub struct ServiceStatus {
-    pub name:   String,
-    pub image:  String,
-    pub status: String,
-    pub state:  String,
+    pub name:               String,
+    pub image:              String,
+    pub status:             String,
+    pub state:              String,
+    pub service:            Option<String>,
+    pub rollback_available: bool,
+    pub prev_container:     Option<String>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -34,6 +37,7 @@ pub fn make_router() -> Router {
         .route("/", get(serve_index))
         .route("/api/status", get(get_status))
         .route("/api/rollback/{service}", post(post_rollback))
+        .route("/api/restart/{container}", post(post_restart))
         .with_state(lock)
 }
 
@@ -107,7 +111,8 @@ async fn build_status() -> Result<Vec<ServiceStatus>> {
         ..Default::default()
     })).await?;
 
-    let out = containers.into_iter().map(|c| {
+    let mut out = Vec::new();
+    for c in containers {
         let name = c.names
             .unwrap_or_default()
             .into_iter()
@@ -115,21 +120,86 @@ async fn build_status() -> Result<Vec<ServiceStatus>> {
             .unwrap_or_default()
             .trim_start_matches('/')
             .to_string();
-        ServiceStatus {
-            name,
-            image:  c.image.unwrap_or_default(),
-            status: c.status.unwrap_or_default(),
-            state:  c.state.unwrap_or_default(),
-        }
-    }).collect();
 
+        let (service, rollback_available, prev_container) =
+            if let Some((svc, color)) = parse_service_container(&name) {
+                let peer_color = config::flip(color);
+                let peer = peer_container_name(&name, &svc, peer_color);
+                let stopped = is_container_stopped(&docker, &peer).await;
+                (Some(svc), stopped, if stopped { Some(peer) } else { None })
+            } else {
+                (None, false, None)
+            };
+
+        out.push(ServiceStatus {
+            name,
+            image:              c.image.unwrap_or_default(),
+            status:             c.status.unwrap_or_default(),
+            state:              c.state.unwrap_or_default(),
+            service,
+            rollback_available,
+            prev_container,
+        });
+    }
     Ok(out)
+}
+
+/// Parse `{prefix}-{service}-{color}` — supports both `codery-` and `willow-` prefixes.
+fn parse_service_container(name: &str) -> Option<(String, &'static str)> {
+    for prefix in ["codery-", "willow-"] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            if let Some(svc) = rest.strip_suffix("-blue") {
+                return Some((svc.to_string(), "blue"));
+            }
+            if let Some(svc) = rest.strip_suffix("-green") {
+                return Some((svc.to_string(), "green"));
+            }
+        }
+    }
+    None
+}
+
+/// Build the peer container name using the same prefix as the running container.
+fn peer_container_name(name: &str, service: &str, peer_color: &str) -> String {
+    if name.starts_with("willow-") {
+        format!("willow-{}-{}", service, peer_color)
+    } else {
+        config::container_name(service, peer_color)
+    }
+}
+
+async fn is_container_stopped(docker: &Docker, container: &str) -> bool {
+    match docker.inspect_container(container, None).await {
+        Ok(info) => !info.state.and_then(|s| s.running).unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 /// Extract short SHA from image tag `ghcr.io/CoderyOSS/codery:{service}-{sha}`.
 fn sha_from_image_tag(service: &str, image: &str) -> Option<String> {
     let prefix = format!("{}:{}-", config::REGISTRY, service);
     image.strip_prefix(&prefix).map(|s| s.to_string())
+}
+
+// ── Restart flow ──────────────────────────────────────────────────────────────
+
+async fn post_restart(
+    State(_lock): State<RollbackLock>,
+    Path(container): Path<String>,
+) -> impl IntoResponse {
+    match do_restart(&container).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn do_restart(container: &str) -> Result<()> {
+    use bollard::container::RestartContainerOptions;
+    let docker = Docker::connect_with_socket_defaults()?;
+    docker
+        .restart_container(container, Some(RestartContainerOptions { t: 10 }))
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to restart {}: {}", container, e))
 }
 
 // ── Rollback flow ─────────────────────────────────────────────────────────────
