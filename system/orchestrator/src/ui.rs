@@ -3,12 +3,17 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use bollard::Docker;
+use bollard::system::EventsOptions;
+use futures_util::StreamExt;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 
 use bollard::container::ListContainersOptions;
 use crate::service_def::ServiceDef;
@@ -17,6 +22,12 @@ use crate::{caddy, config, deploy, state};
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 pub type RollbackLock = Arc<Mutex<HashSet<String>>>;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub rollback_lock: RollbackLock,
+    pub events_tx:    Arc<broadcast::Sender<String>>,
+}
 
 #[derive(Serialize)]
 pub struct ServiceStatus {
@@ -31,21 +42,25 @@ pub struct ServiceStatus {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn make_router() -> Router {
-    let lock: RollbackLock = Arc::new(Mutex::new(HashSet::new()));
+pub fn make_router(events_tx: Arc<broadcast::Sender<String>>) -> Router {
+    let state = AppState {
+        rollback_lock: Arc::new(Mutex::new(HashSet::new())),
+        events_tx,
+    };
     Router::new()
         .route("/", get(serve_index))
         .route("/api/status", get(get_status))
+        .route("/api/events", get(get_events))
         .route("/api/rollback/{service}", post(post_rollback))
         .route("/api/restart/{container}", post(post_restart))
-        .with_state(lock)
+        .with_state(state)
 }
 
-pub async fn serve(port: u16) -> Result<()> {
+pub async fn serve(port: u16, events_tx: Arc<broadcast::Sender<String>>) -> Result<()> {
     let addr = format!("127.0.0.1:{}", port);
     println!("[ui] Listening on http://{}", addr);
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, make_router()).await?;
+    axum::serve(listener, make_router(events_tx)).await?;
     Ok(())
 }
 
@@ -57,6 +72,33 @@ async fn serve_index() -> impl IntoResponse {
         [(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))],
         html,
     )
+}
+
+async fn get_events(
+    State(state): State<AppState>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.events_tx.subscribe();
+    let initial = build_status_json().await.unwrap_or_else(|_| "[]".to_string());
+
+    let stream = futures_util::stream::unfold(
+        (rx, Some(initial)),
+        |(mut rx, initial)| async move {
+            if let Some(json) = initial {
+                return Some((Ok(Event::default().data(json)), (rx, None)));
+            }
+            loop {
+                match rx.recv().await {
+                    Ok(json) => {
+                        return Some((Ok(Event::default().data(json)), (rx, None)));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 async fn get_status() -> impl IntoResponse {
@@ -74,12 +116,11 @@ async fn get_status() -> impl IntoResponse {
 }
 
 async fn post_rollback(
-    State(lock): State<RollbackLock>,
+    State(state): State<AppState>,
     Path(service): Path<String>,
 ) -> impl IntoResponse {
-    // 409 if already in flight
     {
-        let mut set = lock.lock().unwrap();
+        let mut set = state.rollback_lock.lock().unwrap();
         if set.contains(&service) {
             return (
                 StatusCode::CONFLICT,
@@ -92,7 +133,7 @@ async fn post_rollback(
     let result = run_rollback(&service).await;
 
     {
-        let mut set = lock.lock().unwrap();
+        let mut set = state.rollback_lock.lock().unwrap();
         set.remove(&service);
     }
 
@@ -104,10 +145,15 @@ async fn post_rollback(
 
 // ── Status builder ────────────────────────────────────────────────────────────
 
+pub async fn build_status_json() -> Result<String> {
+    let statuses = build_status().await?;
+    Ok(serde_json::to_string(&statuses)?)
+}
+
 async fn build_status() -> Result<Vec<ServiceStatus>> {
     let docker = Docker::connect_with_socket_defaults()?;
     let containers = docker.list_containers(Some(ListContainersOptions::<String> {
-        all: false, // running only
+        all: true, // running AND stopped
         ..Default::default()
     })).await?;
 
@@ -181,10 +227,48 @@ fn sha_from_image_tag(service: &str, image: &str) -> Option<String> {
     image.strip_prefix(&prefix).map(|s| s.to_string())
 }
 
+// ── Event watcher ─────────────────────────────────────────────────────────────
+
+/// Spawned once at daemon startup. Reconnects automatically if the Docker
+/// event stream ends (e.g. daemon restart).
+pub async fn event_watcher(tx: Arc<broadcast::Sender<String>>) {
+    loop {
+        if let Err(e) = run_event_watcher(&tx).await {
+            println!("[ui] Docker event stream error: {}", e);
+        } else {
+            println!("[ui] Docker event stream ended");
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        println!("[ui] Reconnecting to Docker event stream…");
+    }
+}
+
+async fn run_event_watcher(tx: &broadcast::Sender<String>) -> Result<()> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let filters: HashMap<String, Vec<String>> = [(
+        "type".to_string(),
+        vec!["container".to_string()],
+    )].into_iter().collect();
+
+    let mut stream = docker.events(Some(EventsOptions::<String> {
+        filters,
+        ..Default::default()
+    }));
+
+    while let Some(event) = stream.next().await {
+        let _ = event?; // propagate Docker errors → outer loop reconnects
+        let snapshot = build_status_json().await.unwrap_or_else(|_| "[]".to_string());
+        let _ = tx.send(snapshot); // ignore Err (no receivers connected)
+    }
+
+    Ok(())
+}
+
 // ── Restart flow ──────────────────────────────────────────────────────────────
 
 async fn post_restart(
-    State(_lock): State<RollbackLock>,
+    State(_state): State<AppState>,
     Path(container): Path<String>,
 ) -> impl IntoResponse {
     match do_restart(&container).await {
@@ -277,9 +361,12 @@ mod tests {
     };
 
     async fn start_test_server() -> u16 {
+        let (tx, _) = tokio::sync::broadcast::channel::<String>(16);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move { axum::serve(listener, make_router()).await.unwrap() });
+        tokio::spawn(async move {
+            axum::serve(listener, make_router(Arc::new(tx))).await.unwrap()
+        });
         port
     }
 

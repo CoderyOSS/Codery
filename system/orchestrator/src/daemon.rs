@@ -1,4 +1,6 @@
 use anyhow::Result;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 use crate::{config, mcp, tcp_proxy, ui};
 
 /// Run MCP, UI, and TCP-proxy servers concurrently in a single process.
@@ -12,11 +14,16 @@ pub async fn serve() -> Result<()> {
         config::UI_PORT
     );
 
+    let (events_tx, _) = broadcast::channel::<String>(64);
+    let events_tx = Arc::new(events_tx);
+
+    tokio::spawn(ui::event_watcher(Arc::clone(&events_tx)));
+
     tokio::select! {
-        r = mcp::serve(config::MCP_PORT)  => r?,
-        r = ui::serve(config::UI_PORT)    => r?,
-        r = tcp_proxy::serve()            => r?,
-        _ = shutdown_signal()             => {
+        r = mcp::serve(config::MCP_PORT)              => r?,
+        r = ui::serve(config::UI_PORT, events_tx)     => r?,
+        r = tcp_proxy::serve()                        => r?,
+        _ = shutdown_signal()                         => {
             println!("[daemon] Received shutdown signal — stopping");
         }
     }

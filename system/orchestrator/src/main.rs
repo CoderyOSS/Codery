@@ -118,7 +118,8 @@ async fn main() -> Result<()> {
                 .find(|w| w[0] == "--port")
                 .and_then(|w| w[1].parse::<u16>().ok())
                 .unwrap_or(config::UI_PORT);
-            ui::serve(port).await?;
+            let (events_tx, _) = tokio::sync::broadcast::channel::<String>(64);
+            ui::serve(port, std::sync::Arc::new(events_tx)).await?;
         }
         Some("serve-tcp-proxy") => {
             tcp_proxy::serve().await?;
