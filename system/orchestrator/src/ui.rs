@@ -73,7 +73,10 @@ pub async fn serve(port: u16, events_tx: Arc<broadcast::Sender<String>>, ops: Op
 async fn serve_index() -> impl IntoResponse {
     let html = include_str!("../ui/dist/index.html");
     (
-        [(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))],
+        [
+            (header::CONTENT_TYPE,  HeaderValue::from_static("text/html; charset=utf-8")),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+        ],
         html,
     )
 }
