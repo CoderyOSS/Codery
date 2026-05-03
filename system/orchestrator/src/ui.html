@@ -87,55 +87,33 @@ function targetColorClass(color) {
   return color === 'green' ? 'target-green' : 'target-blue';
 }
 
-function renderCards(services) {
-  const container = document.getElementById('cards');
-  container.innerHTML = '';
-  for (const svc of services) {
-    container.appendChild(buildCard(svc));
+function renderCards(containers) {
+  const el = document.getElementById('cards');
+  el.innerHTML = '';
+  if (!containers.length) {
+    el.innerHTML = '<p style="color:#666">No running containers</p>';
+    return;
   }
-  // Re-apply in-progress state for any rollback still running
-  for (const svc of services) {
-    if (inFlight.has(svc.service)) {
-      setCardState(svc.service, 'progress', svc.prev_color);
-    }
+  for (const c of containers) {
+    el.appendChild(buildCard(c));
   }
 }
 
-function buildCard(svc) {
+function buildCard(c) {
   const card = document.createElement('div');
-  card.id = 'card-' + svc.service;
-  card.className = 'card' + (svc.rollback_available ? '' : ' unavailable');
-
-  const targetInfo = svc.rollback_available
-    ? `<div class="meta-row"><span class="lbl">target:</span> <span class="val ${escHtml(targetColorClass(svc.prev_color))}">${escHtml(svc.prev_container)}</span></div>
-       <div class="meta-row"><span class="lbl">sha:</span> <span class="val">${escHtml(svc.prev_sha || '—')}</span></div>`
-    : `<span class="first-deploy">no stopped container — first deploy</span>`;
-
-  const btnLabel = svc.rollback_available
-    ? `↩ Rollback to ${escHtml(svc.prev_color)}`
-    : '↩ Rollback unavailable';
-  const btnClass = svc.rollback_available ? 'btn btn-rollback' : 'btn btn-unavailable';
-  const btnDisabled = svc.rollback_available ? '' : 'disabled';
-
+  card.className = 'card';
+  const stateClass = c.state === 'running' ? 'badge-green' : 'badge-blue';
   card.innerHTML = `
     <div class="card-inner">
       <div class="card-left">
         <div class="service-row">
-          <span class="service-name">${escHtml(svc.service)}</span>
-          <span class="badge ${escHtml(colorClass(svc.active_color))}">● ${escHtml(svc.active_color.toUpperCase())} active</span>
+          <span class="service-name">${escHtml(c.name)}</span>
+          <span class="badge ${stateClass}">● ${escHtml(c.state.toUpperCase())}</span>
         </div>
         <div class="meta">
-          <div class="meta-row"><span class="lbl">sha:</span> <span class="val">${escHtml(svc.active_sha || '—')}</span></div>
-          <div class="meta-row"><span class="lbl">container:</span> <span class="val">${escHtml(svc.active_container)}</span></div>
+          <div class="meta-row"><span class="lbl">image:</span> <span class="val">${escHtml(c.image)}</span></div>
+          <div class="meta-row"><span class="lbl">status:</span> <span class="val">${escHtml(c.status)}</span></div>
         </div>
-      </div>
-      <div class="card-right">
-        <div class="rollback-target">${targetInfo}</div>
-        <div class="status-msg" id="status-${svc.service}"></div>
-        <button id="btn-${svc.service}" class="${btnClass}" ${btnDisabled}
-          onclick="handleRollback(${JSON.stringify(svc.service)}, ${JSON.stringify(svc.prev_color)})">
-          ${btnLabel}
-        </button>
       </div>
     </div>`;
   return card;

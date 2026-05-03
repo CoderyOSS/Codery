@@ -28,18 +28,20 @@ pub struct ServiceStatus {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub async fn serve(port: u16) -> Result<()> {
+pub fn make_router() -> Router {
     let lock: RollbackLock = Arc::new(Mutex::new(HashSet::new()));
-    let app = Router::new()
+    Router::new()
         .route("/", get(serve_index))
         .route("/api/status", get(get_status))
         .route("/api/rollback/{service}", post(post_rollback))
-        .with_state(lock);
+        .with_state(lock)
+}
 
+pub async fn serve(port: u16) -> Result<()> {
     let addr = format!("127.0.0.1:{}", port);
     println!("[ui] Listening on http://{}", addr);
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, make_router()).await?;
     Ok(())
 }
 
@@ -192,4 +194,85 @@ async fn run_rollback(service: &str) -> Result<()> {
 
     println!("[ui] Rollback complete: {} is now {}", service, prev_color);
     Ok(())
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bollard::container::{
+        Config, CreateContainerOptions, RemoveContainerOptions,
+        StartContainerOptions, StopContainerOptions,
+    };
+
+    async fn start_test_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, make_router()).await.unwrap() });
+        port
+    }
+
+    /// E2E: start a real Docker container, hit /api/status, verify it appears
+    /// with the correct flat shape {name, image, status, state}.
+    #[tokio::test]
+    async fn status_lists_running_containers() {
+        let docker = match Docker::connect_with_socket_defaults() {
+            Ok(d) => d,
+            Err(_) => return, // skip if Docker unavailable
+        };
+        if docker.ping().await.is_err() {
+            return;
+        }
+
+        let cname = "codery-test-ui-status";
+
+        // Clean up any leftover from a previous run
+        let _ = docker.remove_container(
+            cname,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        docker.create_container(
+            Some(CreateContainerOptions { name: cname, platform: None }),
+            Config {
+                image: Some("rust:latest"),
+                cmd: Some(vec!["sleep", "60"]),
+                ..Default::default()
+            },
+        ).await.expect("create test container");
+
+        docker.start_container(cname, None::<StartContainerOptions<String>>)
+            .await.expect("start test container");
+
+        let port = start_test_server().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let resp = reqwest::get(format!("http://127.0.0.1:{}/api/status", port))
+            .await.expect("GET /api/status");
+
+        assert!(resp.status().is_success(), "expected 200, got {}", resp.status());
+
+        let body: serde_json::Value = resp.json().await.expect("parse JSON");
+        let arr = body.as_array().expect("expected JSON array");
+
+        // Every element must carry the four fields the JS renders
+        for item in arr {
+            assert!(item["name"].as_str().is_some(),   "missing 'name' in {}", item);
+            assert!(item["image"].as_str().is_some(),  "missing 'image' in {}", item);
+            assert!(item["status"].as_str().is_some(), "missing 'status' in {}", item);
+            assert!(item["state"].as_str().is_some(),  "missing 'state' in {}", item);
+        }
+
+        // Our container must appear as running
+        let found = arr.iter().any(|c| {
+            c["name"].as_str() == Some(cname) && c["state"].as_str() == Some("running")
+        });
+
+        // Cleanup before asserting so we don't leave orphans on failure
+        let _ = docker.stop_container(cname, Some(StopContainerOptions { t: 0 })).await;
+        let _ = docker.remove_container(cname, None).await;
+
+        assert!(found, "container '{}' not in /api/status\ngot: {}", cname, body);
+    }
 }
