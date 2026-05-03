@@ -24,6 +24,7 @@ struct ServiceStatus {
     active_color: String,
     active_sha: Option<String>,
     container: String,
+    running: bool,
 }
 
 #[derive(Serialize)]
@@ -158,18 +159,38 @@ impl OrchestratorMcp {
     #[tool(description = "Get live system status: active color and deployed SHA for each service")]
     async fn get_status(&self) -> Result<CallToolResult, McpError> {
         let defs = ServiceDef::load_all().map_err(|e| tool_err(e.to_string()))?;
-        let statuses: Vec<ServiceStatus> = defs
-            .iter()
-            .map(|def| {
-                let color = state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string());
-                ServiceStatus {
-                    container: config::container_name(&def.service, &color),
-                    active_sha: state::read_active_sha(&def.service),
-                    active_color: color,
-                    service: def.service.clone(),
-                }
-            })
-            .collect();
+        let docker = bollard::Docker::connect_with_socket_defaults()
+            .map_err(|e| tool_err(format!("failed to connect to Docker: {}", e)))?;
+
+        let is_running = |info: Option<bollard::models::ContainerInspectResponse>| -> bool {
+            info.and_then(|i| i.state).and_then(|s| s.running).unwrap_or(false)
+        };
+
+        let mut statuses = Vec::new();
+        for def in &defs {
+            let blue = config::container_name(&def.service, "blue");
+            let green = config::container_name(&def.service, "green");
+            let blue_running = is_running(docker.inspect_container(&blue, None).await.ok());
+            let green_running = is_running(docker.inspect_container(&green, None).await.ok());
+
+            let color = if blue_running && !green_running {
+                "blue".to_string()
+            } else if green_running && !blue_running {
+                "green".to_string()
+            } else {
+                state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string())
+            };
+            let running = blue_running || green_running;
+
+            statuses.push(ServiceStatus {
+                container: config::container_name(&def.service, &color),
+                active_sha: state::read_active_sha(&def.service),
+                active_color: color,
+                service: def.service.clone(),
+                running,
+            });
+        }
+
         let json = serde_json::to_string_pretty(&statuses).map_err(|e| tool_err(e.to_string()))?;
         tool_ok(json)
     }
