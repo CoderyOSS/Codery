@@ -51,6 +51,9 @@ jobs:
 
           $SSH "/opt/codery/codery-ci --version"
 
+          # Stop old orchestrator-daemon if present (prevents port conflict on migration)
+          $SSH "supervisorctl -c /etc/supervisor/supervisord.conf stop orchestrator-daemon 2>/dev/null || true"
+
           $SCP proxy/supervisor/conf.d/codery-ci-daemon.conf \
             deploy@${DEPLOY_HOST}:/tmp/codery-ci-daemon.conf
           $SSH "sudo mv /tmp/codery-ci-daemon.conf \
