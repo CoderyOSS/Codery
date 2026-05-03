@@ -289,6 +289,9 @@ async fn do_restart(container: &str) -> Result<()> {
 // ── Rollback flow ─────────────────────────────────────────────────────────────
 
 async fn run_rollback(service: &str) -> Result<()> {
+    let _lock = crate::deploy_lock::DeployLock::try_acquire(service)
+        .map_err(|_| anyhow::anyhow!("deploy already in progress for {}", service))?;
+
     let def = ServiceDef::load(service)
         .map_err(|_| anyhow::anyhow!("unknown service: {}", service))?;
 
