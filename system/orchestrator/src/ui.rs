@@ -292,15 +292,19 @@ async fn post_restart(
     state.ops.lock().unwrap().insert(container.clone(), "restarting");
     broadcast_status(&state.events_tx, &state.ops).await;
 
-    let result = do_restart(&container).await;
+    // Spawn and return immediately — SSE drives the UI, no need to hold
+    // the HTTP connection open for the duration of the Docker restart.
+    let ops = Arc::clone(&state.ops);
+    let tx  = Arc::clone(&state.events_tx);
+    tokio::spawn(async move {
+        if let Err(e) = do_restart(&container).await {
+            eprintln!("[ui] restart {}: {}", container, e);
+        }
+        ops.lock().unwrap().remove(&container);
+        broadcast_status(&tx, &ops).await;
+    });
 
-    state.ops.lock().unwrap().remove(&container);
-    broadcast_status(&state.events_tx, &state.ops).await;
-
-    match result {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn do_restart(container: &str) -> Result<()> {
