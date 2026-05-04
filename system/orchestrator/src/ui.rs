@@ -292,8 +292,19 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
         }
 
         let ops_snap = ops.lock().unwrap().clone();
-        let snapshot = build_status_json(&ops_snap).await.unwrap_or_else(|_| "[]".to_string());
-        let _ = tx.send(snapshot); // ignore Err (no receivers connected)
+        let tx2 = tx.clone();
+        // Spawn the Docker query so the event loop isn't blocked if Docker is slow
+        // (e.g. while it's in the middle of restarting a container).
+        tokio::spawn(async move {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                build_status_json(&ops_snap),
+            ).await {
+                Ok(Ok(json)) => { let _ = tx2.send(json); }
+                Ok(Err(e))   => eprintln!("[ui] build_status: {}", e),
+                Err(_)       => {}  // Docker slow; next event will retry
+            }
+        });
     }
 
     Ok(())
@@ -308,13 +319,27 @@ async fn post_restart(
     println!("[ui] POST /api/restart/{}", container);
     state.ops.lock().unwrap().insert(container.clone(), "restarting");
 
+    // Push "restarting" op to connected clients before returning 204 so the SSE
+    // update lands before localOp is cleared on the browser side.  Use a short
+    // timeout so a slow Docker query doesn't delay the HTTP response.
+    {
+        let ops_snap = state.ops.lock().unwrap().clone();
+        let _ = tokio::time::timeout(
+            tokio::time::Duration::from_secs(2),
+            build_status_json(&ops_snap),
+        ).await
+            .ok()
+            .and_then(|r| r.ok())
+            .map(|json| state.events_tx.send(json));
+    }
+
     let ops = Arc::clone(&state.ops);
     let tx  = Arc::clone(&state.events_tx);
     tokio::spawn(async move {
-        // Notify connected clients about the pending restart before touching Docker.
-        broadcast_status(&tx, &ops).await;
-        let timeout = tokio::time::Duration::from_secs(30);
-        match tokio::time::timeout(timeout, do_restart(&container)).await {
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(30),
+            do_restart(&container),
+        ).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => eprintln!("[ui] restart {}: {}", container, e),
             Err(_)     => eprintln!("[ui] restart {}: timed out after 30s", container),
@@ -324,7 +349,6 @@ async fn post_restart(
         broadcast_status(&tx, &ops).await;
     });
 
-    // Return immediately — localOp on the client bridges until the SSE update lands.
     StatusCode::NO_CONTENT.into_response()
 }
 

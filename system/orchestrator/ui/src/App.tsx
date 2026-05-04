@@ -32,7 +32,7 @@ export function App() {
             title={connected ? 'Live' : 'Reconnecting…'}
           >●</span>
         </h1>
-        <span className="header-sub">v6</span>
+        <span className="header-sub">v7</span>
       </div>
       <div className="cards">
         {sorted.length === 0
