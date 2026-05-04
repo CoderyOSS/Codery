@@ -292,6 +292,7 @@ async fn post_restart(
     State(state): State<AppState>,
     Path(container): Path<String>,
 ) -> impl IntoResponse {
+    println!("[ui] POST /api/restart/{}", container);
     state.ops.lock().unwrap().insert(container.clone(), "restarting");
     broadcast_status(&state.events_tx, &state.ops).await;
 
@@ -300,8 +301,11 @@ async fn post_restart(
     let ops = Arc::clone(&state.ops);
     let tx  = Arc::clone(&state.events_tx);
     tokio::spawn(async move {
-        if let Err(e) = do_restart(&container).await {
-            eprintln!("[ui] restart {}: {}", container, e);
+        let timeout = tokio::time::Duration::from_secs(30);
+        match tokio::time::timeout(timeout, do_restart(&container)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => eprintln!("[ui] restart {}: {}", container, e),
+            Err(_)     => eprintln!("[ui] restart {}: timed out after 30s", container),
         }
         ops.lock().unwrap().remove(&container);
         broadcast_status(&tx, &ops).await;
