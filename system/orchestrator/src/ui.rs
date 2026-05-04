@@ -277,7 +277,20 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
     }));
 
     while let Some(event) = stream.next().await {
-        let _ = event?; // propagate Docker errors → outer loop reconnects
+        let event = event?; // propagate Docker errors → outer loop reconnects
+
+        // On "start", immediately clear any pending op for this container so
+        // the UI re-enables the button without waiting for do_restart to return.
+        if event.action.as_deref() == Some("start") {
+            if let Some(name) = event.actor
+                .as_ref()
+                .and_then(|a| a.attributes.as_ref())
+                .and_then(|attrs| attrs.get("name"))
+            {
+                ops.lock().unwrap().remove(name);
+            }
+        }
+
         let ops_snap = ops.lock().unwrap().clone();
         let snapshot = build_status_json(&ops_snap).await.unwrap_or_else(|_| "[]".to_string());
         let _ = tx.send(snapshot); // ignore Err (no receivers connected)
@@ -294,23 +307,24 @@ async fn post_restart(
 ) -> impl IntoResponse {
     println!("[ui] POST /api/restart/{}", container);
     state.ops.lock().unwrap().insert(container.clone(), "restarting");
-    broadcast_status(&state.events_tx, &state.ops).await;
 
-    // Spawn and return immediately — SSE drives the UI, no need to hold
-    // the HTTP connection open for the duration of the Docker restart.
     let ops = Arc::clone(&state.ops);
     let tx  = Arc::clone(&state.events_tx);
     tokio::spawn(async move {
+        // Notify connected clients about the pending restart before touching Docker.
+        broadcast_status(&tx, &ops).await;
         let timeout = tokio::time::Duration::from_secs(30);
         match tokio::time::timeout(timeout, do_restart(&container)).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => eprintln!("[ui] restart {}: {}", container, e),
             Err(_)     => eprintln!("[ui] restart {}: timed out after 30s", container),
         }
+        // event_watcher clears ops on the Docker "start" event; this is a safety net.
         ops.lock().unwrap().remove(&container);
         broadcast_status(&tx, &ops).await;
     });
 
+    // Return immediately — localOp on the client bridges until the SSE update lands.
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -318,7 +332,7 @@ async fn do_restart(container: &str) -> Result<()> {
     use bollard::container::RestartContainerOptions;
     let docker = Docker::connect_with_socket_defaults()?;
     docker
-        .restart_container(container, Some(RestartContainerOptions { t: 10 }))
+        .restart_container(container, Some(RestartContainerOptions { t: 3 }))
         .await
         .map_err(|e| anyhow::anyhow!("failed to restart {}: {}", container, e))
 }

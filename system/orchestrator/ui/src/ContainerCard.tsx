@@ -24,31 +24,40 @@ export function ContainerCard({ container: c }: Props) {
                 : operation === 'restarting'   ? '↺ Restarting…'
                 : null;
 
+  async function doFetch(url: string): Promise<{ ok: boolean; text: string }> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10_000);
+    try {
+      const resp = await fetch(url, { method: 'POST', signal: ctrl.signal });
+      const text = resp.ok ? '' : ((await resp.text()) || `HTTP ${resp.status}`);
+      return { ok: resp.ok, text };
+    } catch (err) {
+      const msg = err instanceof Error && err.name === 'AbortError'
+        ? 'timed out (no response after 10s)'
+        : 'network error';
+      return { ok: false, text: msg };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function handleRestart() {
+    console.log('[ui] restart clicked, container=', c.name);
     setErrorMsg(null);
     setLocalOp('restarting');
-    try {
-      const resp = await fetch(`/api/restart/${encodeURIComponent(c.name)}`, { method: 'POST' });
-      if (!resp.ok) setErrorMsg((await resp.text()) || 'restart failed');
-    } catch {
-      setErrorMsg('network error');
-    } finally {
-      setLocalOp(null);
-    }
+    const { ok, text } = await doFetch(`/api/restart/${encodeURIComponent(c.name)}`);
+    console.log('[ui] restart response ok=', ok, 'text=', text);
+    if (!ok) setErrorMsg(text || 'restart failed');
+    setLocalOp(null);
   }
 
   async function handleRollback() {
     if (!c.service) return;
     setErrorMsg(null);
     setLocalOp('rolling_back');
-    try {
-      const resp = await fetch(`/api/rollback/${encodeURIComponent(c.service)}`, { method: 'POST' });
-      if (!resp.ok) setErrorMsg((await resp.text()) || 'rollback failed');
-    } catch {
-      setErrorMsg('network error');
-    } finally {
-      setLocalOp(null);
-    }
+    const { ok, text } = await doFetch(`/api/rollback/${encodeURIComponent(c.service)}`);
+    if (!ok) setErrorMsg(text || 'rollback failed');
+    setLocalOp(null);
   }
 
   return (

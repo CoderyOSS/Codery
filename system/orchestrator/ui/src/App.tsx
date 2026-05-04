@@ -32,7 +32,7 @@ export function App() {
             title={connected ? 'Live' : 'Reconnecting…'}
           >●</span>
         </h1>
-        <span className="header-sub">Deploy Console</span>
+        <span className="header-sub">v6</span>
       </div>
       <div className="cards">
         {sorted.length === 0
