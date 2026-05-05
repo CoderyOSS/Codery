@@ -27,6 +27,7 @@ trait DeployDeps {
     async fn stop_container(&self, name: &str) -> Result<()>;
     async fn health_check(&self, def: &ServiceDef, color: &str) -> Result<()>;
     async fn prune_images(&self, service: &str) -> Result<()>;
+    fn ensure_nginx_config(&self) -> Result<()>;
 }
 
 // ── RealDeps (production implementation) ─────────────────────────────────────
@@ -75,6 +76,17 @@ impl DeployDeps for RealDeps {
     async fn prune_images(&self, service: &str) -> Result<()> {
         images::prune(service).await
     }
+    fn ensure_nginx_config(&self) -> Result<()> {
+        let path = std::path::Path::new(crate::config::NGINX_CONFIG);
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, "")?;
+            println!("[deploy] Created empty {}", crate::config::NGINX_CONFIG);
+        }
+        Ok(())
+    }
 }
 
 /// Entry point called by `main.rs`: load the service definition from YAML
@@ -112,6 +124,7 @@ async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) ->
 
     // ── Deploy inactive color ─────────────────────────────────────────────────
     deps.remove_container_if_exists(&config::container_name(&def.service, inactive)).await?;
+    deps.ensure_nginx_config()?;
     deps.start_container(def, sha, inactive).await?;
     println!("[deploy] Started {}", config::container_name(&def.service, inactive));
 
@@ -570,6 +583,7 @@ network: codery-net
             self.events.borrow_mut().push(format!("prune_images:{}", service));
             Ok(())
         }
+        fn ensure_nginx_config(&self) -> Result<()> { Ok(()) }
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
