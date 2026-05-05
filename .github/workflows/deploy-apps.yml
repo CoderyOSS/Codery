@@ -62,12 +62,12 @@ jobs:
           file: containers/apps/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:apps-latest
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:apps-${{ github.sha }}
+            ghcr.io/coderyoss/codery:apps-latest
+            ghcr.io/coderyoss/codery:apps-${{ github.sha }}
           provenance: false
           sbom: false
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:apps-buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:apps-buildcache,mode=max
+          cache-from: type=registry,ref=ghcr.io/coderyoss/codery:apps-buildcache
+          cache-to: type=registry,ref=ghcr.io/coderyoss/codery:apps-buildcache,mode=max
 
   deploy:
     name: Deploy apps to VPS
