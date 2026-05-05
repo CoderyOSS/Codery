@@ -2,7 +2,7 @@
 # Personalized sandbox image. Fork this and adapt it to install
 # whatever tools you want on top of codery-sandbox-base.
 ARG BASE_TAG=sandbox-base-latest
-FROM ghcr.io/codeross/codery:${BASE_TAG}
+FROM ghcr.io/coderyoss/codery:${BASE_TAG}
 
 # Node.js 20
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
