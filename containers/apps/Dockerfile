@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gettext-base \
     gnupg \
     jq \
+    nginx \
     python3 \
     supervisor \
     openssh-client \
@@ -39,6 +40,10 @@ RUN usermod -l gem -d /home/gem -m ubuntu && groupmod -n gem ubuntu
 COPY containers/apps/sshd_config /etc/ssh/sshd_config
 COPY containers/apps/scripts/sandbox-key-lookup /usr/local/bin/sandbox-key-lookup
 RUN chmod +x /usr/local/bin/sandbox-key-lookup && mkdir -p /run/sshd
+
+# Nginx internal reverse proxy (routes by Host header on port 8080).
+COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
+RUN mkdir -p /etc/nginx/conf.d
 
 RUN mkdir -p /etc/supervisor/projects.d
 
