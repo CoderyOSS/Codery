@@ -32,7 +32,7 @@ export function App() {
             title={connected ? 'Live' : 'Reconnecting…'}
           >●</span>
         </h1>
-        <span className="header-sub">v7</span>
+        <span className="header-sub">{import.meta.env.VITE_APP_VERSION ?? 'dev'}</span>
       </div>
       <div className="cards">
         {sorted.length === 0
@@ -40,7 +40,7 @@ export function App() {
           : sorted.map(c => <ContainerCard key={c.name} container={c} />)}
       </div>
       <div className="footer">
-        Restart: docker restart · Rollback: restarts stopped container · health-checks · flips Caddy routing
+        Rollback: restarts stopped container · health-checks · flips Caddy routing
       </div>
     </div>
   );

@@ -24,6 +24,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Extract version from tag
+        id: version
+        run: |
+          # Tag: codery-ci-v1.2.3  →  VERSION=v1.2.3  SEMVER=1.2.3
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#codery-ci-}"
+          SEMVER="${VERSION#v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "semver=${SEMVER}" >> $GITHUB_OUTPUT
+
+      - name: Stamp Cargo.toml version
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.semver }}"/' \
+            system/orchestrator/Cargo.toml
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -43,6 +58,8 @@ jobs:
 
       - name: Build frontend
         working-directory: system/orchestrator/ui
+        env:
+          VITE_APP_VERSION: ${{ steps.version.outputs.version }}
         run: npm ci && npm run build
 
       - name: Cache cargo
