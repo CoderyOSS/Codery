@@ -195,3 +195,71 @@ fn main() {
 
     println!("[launchy {}] exiting", ts());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_parse_minimal() {
+        let json = r#"{
+            "services": [
+                {"name": "test", "command": ["/bin/true"]}
+            ]
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.services.len(), 1);
+        assert_eq!(cfg.services[0].name, "test");
+        assert!(matches!(cfg.services[0].restart, RestartPolicy::Always));
+    }
+
+    #[test]
+    fn test_config_parse_full() {
+        let json = r#"{
+            "services": [
+                {
+                    "name": "web",
+                    "command": ["/usr/bin/env", "bash", "-c", "echo hi"],
+                    "user": "root",
+                    "directory": "/tmp",
+                    "env": {"FOO": "bar"},
+                    "restart": "never"
+                }
+            ]
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        let svc = &cfg.services[0];
+        assert_eq!(svc.command, vec!["/usr/bin/env", "bash", "-c", "echo hi"]);
+        assert_eq!(svc.env.get("FOO").map(|s| s.as_str()), Some("bar"));
+        assert!(matches!(svc.restart, RestartPolicy::Never));
+    }
+
+    #[test]
+    fn test_config_parse_on_failure() {
+        let json = r#"{"services": [{"name": "x", "command": ["/bin/true"], "restart": "on_failure"}]}"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert!(matches!(cfg.services[0].restart, RestartPolicy::OnFailure));
+    }
+
+    #[test]
+    fn test_spawn_and_reap() {
+        let cfg = ServiceConfig {
+            name: "sleep".into(),
+            command: vec!["sleep".into(), "0.1".into()],
+            user: None,
+            directory: None,
+            env: HashMap::new(),
+            restart: RestartPolicy::Never,
+        };
+
+        let child = spawn_service(&cfg).expect("spawn failed");
+        let pid = child.id();
+        std::mem::forget(child);
+
+        std::thread::sleep(Duration::from_millis(200));
+
+        let exited = reap_zombies();
+        assert!(!exited.is_empty(), "expected pid {} to be reaped", pid);
+        assert!(exited.iter().any(|(p, _)| *p == pid));
+    }
+}
