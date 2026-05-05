@@ -213,28 +213,21 @@ async fn build_status(ops: &HashMap<String, &'static str>) -> Result<Vec<Service
     Ok(out)
 }
 
-/// Parse `{prefix}-{service}-{color}` — supports both `codery-` and `willow-` prefixes.
+/// Parse `codery-{service}-{color}` container names.
 fn parse_service_container(name: &str) -> Option<(String, &'static str)> {
-    for prefix in ["codery-", "willow-"] {
-        if let Some(rest) = name.strip_prefix(prefix) {
-            if let Some(svc) = rest.strip_suffix("-blue") {
-                return Some((svc.to_string(), "blue"));
-            }
-            if let Some(svc) = rest.strip_suffix("-green") {
-                return Some((svc.to_string(), "green"));
-            }
+    if let Some(rest) = name.strip_prefix("codery-") {
+        if let Some(svc) = rest.strip_suffix("-blue") {
+            return Some((svc.to_string(), "blue"));
+        }
+        if let Some(svc) = rest.strip_suffix("-green") {
+            return Some((svc.to_string(), "green"));
         }
     }
     None
 }
 
-/// Build the peer container name using the same prefix as the running container.
-fn peer_container_name(name: &str, service: &str, peer_color: &str) -> String {
-    if name.starts_with("willow-") {
-        format!("willow-{}-{}", service, peer_color)
-    } else {
-        config::container_name(service, peer_color)
-    }
+fn peer_container_name(_name: &str, service: &str, peer_color: &str) -> String {
+    config::container_name(service, peer_color)
 }
 
 async fn is_container_stopped(docker: &Docker, container: &str) -> bool {
