@@ -1,0 +1,5 @@
+#!/bin/bash
+# Called by sshd AuthorizedKeysCommand with the connecting username as $1.
+# Reads sandbox's public key from the shared volume (generated at sandbox startup).
+# Returns empty if not yet written — sshd rejects connection cleanly.
+cat /home/gem/projects/.codery/sandbox-key.pub 2>/dev/null

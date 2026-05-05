@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     supervisor \
     openssh-client \
+    openssh-server \
     git \
     unzip \
     && rm -rf /var/lib/apt/lists/*
@@ -29,6 +30,15 @@ COPY containers/apps/scripts/ssh-agent-add-keys.sh /usr/local/bin/ssh-agent-add-
 RUN chmod +x /usr/local/bin/ssh-agent-add-keys.sh
 
 RUN ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null
+
+# gem user (uid 1000) — same uid as sandbox, owns the shared projects volume.
+# Ubuntu 24.04 ships an 'ubuntu' user at uid 1000; rename it to 'gem'.
+RUN usermod -l gem -d /home/gem -m ubuntu && groupmod -n gem ubuntu
+
+# sshd — accepts key from sandbox via AuthorizedKeysCommand on shared volume.
+COPY containers/apps/sshd_config /etc/ssh/sshd_config
+COPY containers/apps/scripts/sandbox-key-lookup /usr/local/bin/sandbox-key-lookup
+RUN chmod +x /usr/local/bin/sandbox-key-lookup && mkdir -p /run/sshd
 
 RUN mkdir -p /etc/supervisor/projects.d
 
