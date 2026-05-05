@@ -92,24 +92,18 @@ jobs:
           SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
           SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
 
-          $SSH "mkdir -p /opt/codery/services"
-          $SCP containers/sandbox/service.yml deploy@${DEPLOY_HOST}:/tmp/sandbox.yml
-          $SSH "sudo mv /tmp/sandbox.yml /opt/codery/services/sandbox.yml"
+          $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy"
+          cat containers/sandbox/service.yml | $SSH "sudo tee /opt/codery/services/sandbox.yml" > /dev/null
+          cat proxy/sandbox-routes.json | $SSH "sudo tee /opt/codery/proxy/sandbox-routes.json" > /dev/null
 
-          $SSH "mkdir -p /opt/codery/proxy"
-          $SCP proxy/sandbox-routes.json deploy@${DEPLOY_HOST}:/tmp/sandbox-routes.json
-          $SSH "sudo mv /tmp/sandbox-routes.json /opt/codery/proxy/sandbox-routes.json"
-
-          $SCP opencode.json deploy@${DEPLOY_HOST}:/tmp/opencode-codery.json
+          cat opencode.json | $SSH "tee /tmp/opencode-codery.json" > /dev/null
           $SSH "test -d /opt/codery/projects/codery && \
                 cp /tmp/opencode-codery.json /opt/codery/projects/codery/opencode.json && \
                 echo '[sync] opencode.json → /opt/codery/projects/codery/' || \
                 echo '[sync] /opt/codery/projects/codery not present, skipping'"
 
-          $SSH "grep -v '^GHCR_' /opt/codery/.env > /tmp/env.tmp 2>/dev/null || true"
-          $SSH "echo 'GHCR_USERNAME=${{ github.actor }}' >> /tmp/env.tmp"
-          $SSH "echo 'GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}' >> /tmp/env.tmp"
-          $SSH "sudo mv /tmp/env.tmp /opt/codery/.env"
+          $SSH "sudo sed -i '/^GHCR_/d' /opt/codery/.env 2>/dev/null || true"
+          $SSH "printf 'GHCR_USERNAME=${{ github.actor }}\nGHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}\n' | sudo tee -a /opt/codery/.env" > /dev/null
 
           $SSH "mkdir -p /opt/codery/state"
 
