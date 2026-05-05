@@ -2,7 +2,7 @@ name: Build Sandbox Base
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'containers/sandbox/Dockerfile.base'
       - 'containers/sandbox/bin/launchy'
@@ -43,8 +43,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          install: true
+
+      - name: Lowercase owner
+        id: owner
+        run: echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - name: Build and push sandbox-base
         uses: docker/build-push-action@v6
@@ -53,9 +55,9 @@ jobs:
           file: containers/sandbox/Dockerfile.base
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:sandbox-base-latest
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:sandbox-base-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/codery:sandbox-base-latest
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/codery:sandbox-base-${{ github.sha }}
           provenance: false
           sbom: false
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:sandbox-base-buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:sandbox-base-buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/codery:sandbox-base-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/codery:sandbox-base-buildcache,mode=max
