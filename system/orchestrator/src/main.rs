@@ -7,6 +7,7 @@ mod deploy;
 mod deploy_lock;
 mod images;
 mod mcp;
+mod nginx;
 mod preflight;
 mod service_def;
 mod state;
@@ -93,7 +94,8 @@ async fn main() -> Result<()> {
             // Regenerate Caddyfile from all service YAMLs and reload Caddy.
             // Use this when proxy/apps-routes.json changes without a container deploy.
             caddy::apply_all()?;
-            println!("[routes] Reloaded Caddyfile from all service definitions");
+            nginx::generate_and_reload().await?;
+            println!("[routes] Reloaded Caddyfile and Nginx");
         }
         Some("serve") => {
             // Start the MCP server. Reads --port N or defaults to MCP_PORT.

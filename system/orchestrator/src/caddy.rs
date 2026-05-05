@@ -13,6 +13,7 @@ use crate::state;
 pub struct AppRoute {
     pub subdomain: String,
     pub port: u16,
+    pub internal_port: Option<u16>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -74,7 +75,7 @@ pub fn generate_from_defs(
                 // Test path: use injected routes (avoid disk I/O).
                 overrides
                     .get(&def.service)
-                    .map(|v| v.iter().map(|r| AppRoute { subdomain: r.subdomain.clone(), port: r.port }).collect())
+                    .map(|v| v.iter().map(|r| AppRoute { subdomain: r.subdomain.clone(), port: r.port, internal_port: r.internal_port }).collect())
                     .unwrap_or_default()
             } else {
                 load_routes_file(routes_file)?
@@ -255,7 +256,7 @@ network: codery-net
         let mut route_overrides = HashMap::new();
         route_overrides.insert(
             "apps".to_string(),
-            vec![AppRoute { subdomain: "test.example.com".to_string(), port: 8000 }],
+            vec![AppRoute { subdomain: "test.example.com".to_string(), port: 8000, internal_port: None }],
         );
         let caddy = generate_from_defs(&defs, &colors("blue", "green"), Some(&route_overrides), "example.com").unwrap();
         assert!(caddy.contains("reverse_proxy localhost:13000")); // sandbox unaffected
@@ -268,7 +269,7 @@ network: codery-net
         let mut route_overrides = HashMap::new();
         route_overrides.insert(
             "apps".to_string(),
-            vec![AppRoute { subdomain: "test.example.com".to_string(), port: 8000 }],
+            vec![AppRoute { subdomain: "test.example.com".to_string(), port: 8000, internal_port: None }],
         );
         let caddy = generate_from_defs(&defs, &colors("blue", "blue"), Some(&route_overrides), "example.com").unwrap();
         assert!(caddy.contains("reverse_proxy localhost:8000")); // 8000 + 0 (blue offset)

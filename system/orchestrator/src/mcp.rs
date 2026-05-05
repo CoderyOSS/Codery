@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use schemars::JsonSchema;
 
-use crate::{caddy, config, deploy, images, preflight, service_def::ServiceDef, state};
+use crate::{caddy, config, deploy, images, nginx, preflight, service_def::ServiceDef, state};
 
 // ── Data shapes returned by tools ────────────────────────────────────────────
 
@@ -471,7 +471,8 @@ impl OrchestratorMcp {
     )]
     async fn reload_routes(&self) -> Result<CallToolResult, McpError> {
         caddy::apply_all().map_err(|e| tool_err(e.to_string()))?;
-        tool_ok("Routes reloaded from all service definitions".to_string())
+        nginx::generate_and_reload().await.map_err(|e| tool_err(e.to_string()))?;
+        tool_ok("Routes reloaded — Caddy and Nginx updated".to_string())
     }
 
     /// Run all preflight checks and return a structured report.

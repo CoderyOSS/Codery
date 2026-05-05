@@ -4,6 +4,7 @@ pub const CADDY_CONFIG: &str = "/etc/caddy/Caddyfile";
 /// Default routes_file path used by services/apps.yml. Referenced by YAML, not Rust.
 #[allow(dead_code)]
 pub const APPS_ROUTES: &str = "/opt/codery/proxy/apps-routes.json";
+pub const NGINX_CONFIG: &str = "/opt/codery/proxy/apps-nginx.conf";
 /// Default sandbox extra-routes path. Referenced by YAML, not Rust.
 #[allow(dead_code)]
 pub const SANDBOX_ROUTES: &str = "/opt/codery/proxy/sandbox-routes.json";
