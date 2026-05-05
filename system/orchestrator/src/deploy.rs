@@ -1,9 +1,9 @@
 use anyhow::{bail, Context, Result};
 use bollard::Docker;
 use bollard::container::{
-    Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
+    Config, CreateContainerOptions, NetworkingConfig, RemoveContainerOptions, StartContainerOptions,
 };
-use bollard::models::{HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum};
+use bollard::models::{EndpointSettings, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum};
 use bollard::network::CreateNetworkOptions;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -170,6 +170,16 @@ pub(crate) async fn start_container(docker: &Docker, def: &ServiceDef, sha: &str
     let exposed_ports = build_exposed_ports(&mappings);
     let binds = def.resolved_binds(&env_map)?;
 
+    let networking_config: Option<NetworkingConfig<String>> = if def.network_aliases.is_empty() {
+        None
+    } else {
+        let mut ep = EndpointSettings::default();
+        ep.aliases = Some(def.network_aliases.clone());
+        let mut endpoints = std::collections::HashMap::new();
+        endpoints.insert(def.network.clone(), ep);
+        Some(NetworkingConfig { endpoints_config: endpoints })
+    };
+
     docker
         .create_container(
             Some(CreateContainerOptions { name: &name, platform: None }),
@@ -189,6 +199,7 @@ pub(crate) async fn start_container(docker: &Docker, def: &ServiceDef, sha: &str
                     }),
                     ..Default::default()
                 }),
+                networking_config,
                 ..Default::default()
             },
         )

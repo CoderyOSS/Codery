@@ -37,6 +37,10 @@ pub struct ServiceDef {
     /// Use "host.docker.internal:host-gateway" to resolve the Docker host.
     #[serde(default)]
     pub extra_hosts: Vec<String>,
+    /// Optional Docker network aliases for this container.
+    /// E.g. ["apps"] makes `ssh gem@apps` resolvable from other containers on the same network.
+    #[serde(default)]
+    pub network_aliases: Vec<String>,
 }
 
 /// host_port = container_port + offset
@@ -498,6 +502,48 @@ network: codery-net
             interval_secs: 2,
         };
         assert!(def.health_port("blue").is_err());
+    }
+
+    #[test]
+    fn parse_network_aliases() {
+        let yaml = r#"
+service: apps
+image: ghcr.io/coderyoss/codery:apps-{sha}
+port_scheme:
+  blue_offset: 0
+  green_offset: 10000
+port_range:
+  container_start: 8000
+  container_end: 9000
+health_check:
+  type: docker
+  timeout_secs: 90
+volumes: []
+network: codery-net
+network_aliases:
+  - apps
+  - myalias
+"#;
+        let def: ServiceDef = serde_yaml::from_str(yaml).expect("parse failed");
+        assert_eq!(def.network_aliases, vec!["apps", "myalias"]);
+    }
+
+    #[test]
+    fn parse_network_aliases_default_empty() {
+        let yaml = r#"
+service: sandbox
+image: ghcr.io/coderyoss/codery:sandbox-{sha}
+port_scheme:
+  blue_offset: 10000
+  green_offset: 20000
+health_check:
+  type: docker
+  timeout_secs: 60
+volumes: []
+network: codery-net
+"#;
+        let def: ServiceDef = serde_yaml::from_str(yaml).expect("parse failed");
+        assert!(def.network_aliases.is_empty());
     }
 
     #[test]
