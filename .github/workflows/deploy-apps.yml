@@ -92,13 +92,16 @@ jobs:
           SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
           SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
 
-          $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy /opt/codery/apps-supervisor.d"
+          $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy /opt/codery/apps-supervisor.d /opt/codery/state"
           cat containers/apps/service.yml | $SSH "sudo tee /opt/codery/services/apps.yml"
           $SCP proxy/apps-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/apps-routes.json
 
           printf '%s\n' "${{ secrets.ENV_FILE }}" | $SSH "cat > /opt/codery/.env"
           $SSH "echo 'GHCR_USERNAME=${{ github.actor }}' >> /opt/codery/.env"
           $SSH "echo 'GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}' >> /opt/codery/.env"
+          # Ensure SSH_DIR is set — apps container mounts it for git operations.
+          $SSH "grep -q '^SSH_DIR=' /opt/codery/.env || echo 'SSH_DIR=/home/deploy/.ssh' >> /opt/codery/.env"
+          # Pre-create bind-mount files so Docker doesn't create directories in their place.
+          $SSH "touch /opt/codery/proxy/apps-nginx.conf"
 
-          $SSH "sudo mkdir -p /opt/codery/state"
           $SSH "sudo /opt/codery/codery-ci deploy apps ${{ github.sha }} 2>&1"
