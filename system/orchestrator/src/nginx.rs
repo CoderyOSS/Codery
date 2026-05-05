@@ -12,11 +12,17 @@ pub async fn generate_and_reload() -> Result<()> {
     let domain = config::load_domain();
     let content = generate_config(&routes, &domain);
 
+    let to_write = if content.is_empty() {
+        "server {\n    listen 8080 default_server;\n    return 503 \"No apps configured\";\n}\n".to_string()
+    } else {
+        content
+    };
+
     if let Some(parent) = std::path::Path::new(config::NGINX_CONFIG).parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent dir for {}", config::NGINX_CONFIG))?;
     }
-    fs::write(config::NGINX_CONFIG, &content)
+    fs::write(config::NGINX_CONFIG, &to_write)
         .with_context(|| format!("failed to write {}", config::NGINX_CONFIG))?;
 
     let count = routes.iter().filter(|r| r.internal_port.is_some()).count();
