@@ -49,7 +49,7 @@ fn ts() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    format!("{:02}:{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60, s % 60)
+    format!("{:02}:{:02}:{:02}", (s / 3600) % 24, (s % 3600) / 60, s % 60)
 }
 
 fn spawn_service(cfg: &ServiceConfig) -> std::io::Result<Child> {
@@ -67,14 +67,15 @@ fn spawn_service(cfg: &ServiceConfig) -> std::io::Result<Child> {
 
     if let Some(username) = &cfg.user {
         let user = User::from_name(username)
-            .expect("getpwnam failed")
-            .unwrap_or_else(|| panic!("user '{}' not found", username));
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("getpwnam failed: {}", e)))?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, format!("user '{}' not found", username)))?;
         let gid = user.gid;
         let uid = user.uid;
         unsafe {
             cmd.pre_exec(move || {
-                nix::unistd::setgid(gid).map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-                nix::unistd::setuid(uid).map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                nix::unistd::setgroups(&[gid]).map_err(std::io::Error::from)?;
+                nix::unistd::setgid(gid).map_err(std::io::Error::from)?;
+                nix::unistd::setuid(uid).map_err(std::io::Error::from)?;
                 Ok(())
             });
         }
@@ -85,7 +86,7 @@ fn spawn_service(cfg: &ServiceConfig) -> std::io::Result<Child> {
     Ok(child)
 }
 
-fn reap_zombies(running: &mut HashMap<u32, RunningService>) -> Vec<(u32, i32)> {
+fn reap_zombies() -> Vec<(u32, i32)> {
     let mut exited = Vec::new();
     loop {
         match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
@@ -121,7 +122,7 @@ fn shutdown_all(running: &mut HashMap<u32, RunningService>) {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while !running.is_empty() && Instant::now() < deadline {
-        let exited = reap_zombies(running);
+        let exited = reap_zombies();
         for (pid, _) in exited {
             running.remove(&pid);
         }
@@ -137,7 +138,7 @@ fn shutdown_all(running: &mut HashMap<u32, RunningService>) {
     }
 
     std::thread::sleep(Duration::from_millis(200));
-    reap_zombies(running);
+    reap_zombies();
 }
 
 fn main() {
@@ -166,12 +167,12 @@ fn main() {
     }
 
     loop {
-        if shutdown.load(Ordering::Relaxed) {
+        if shutdown.load(Ordering::Acquire) {
             shutdown_all(&mut running);
             break;
         }
 
-        let exited = reap_zombies(&mut running);
+        let exited = reap_zombies();
         for (pid, code) in exited {
             if let Some(svc) = running.remove(&pid) {
                 let should_restart = match svc.config.restart {
@@ -179,7 +180,7 @@ fn main() {
                     RestartPolicy::Never => false,
                     RestartPolicy::OnFailure => code != 0,
                 };
-                if should_restart && !shutdown.load(Ordering::Relaxed) {
+                if should_restart && !shutdown.load(Ordering::Acquire) {
                     std::thread::sleep(Duration::from_secs(1));
                     match spawn_service(&svc.config) {
                         Ok(child) => { running.insert(child.id(), RunningService { config: svc.config, pid: child.id() }); }
