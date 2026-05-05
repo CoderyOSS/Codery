@@ -1,0 +1,80 @@
+# examples/Dockerfile.sandbox
+# Personalized sandbox image. Fork this and adapt it to install
+# whatever tools you want on top of codery-sandbox-base.
+ARG BASE_TAG=sandbox-base-latest
+FROM ghcr.io/codeross/codery:${BASE_TAG}
+
+# Node.js 20
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# bun
+RUN curl -fsSL https://bun.sh/install | bash \
+    && mv /root/.bun/bin/bun /usr/local/bin/bun \
+    && ln -s /usr/local/bin/bun /usr/local/bin/bunx
+ENV BUN_INSTALL_BIN=/usr/local/bin
+
+# Rust
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+# GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# OpenCode + Claude Code
+RUN npm install -g opencode-ai @anthropic-ai/claude-code
+
+# GitHub App helpers
+COPY containers/sandbox/scripts/github-app-token.sh /usr/local/bin/github-app-token
+RUN chmod +x /usr/local/bin/github-app-token
+COPY containers/sandbox/scripts/github-push.sh /usr/local/bin/github-push
+RUN chmod +x /usr/local/bin/github-push
+RUN echo "gem ALL=(ALL) NOPASSWD: /usr/local/bin/github-push" > /etc/sudoers.d/github-push
+
+# Launchy config
+COPY containers/sandbox/launchy.json /etc/launchy.json
+
+# AGENTS.md (only if present)
+COPY AGENTS.md /home/gem/AGENTS.md
+RUN chown gem:gem /home/gem/AGENTS.md
+
+# OpenCode config
+RUN mkdir -p /home/gem/.config/opencode
+COPY opencode.json /home/gem/.config/opencode/config.json
+
+# OpenCode global AGENTS.md
+COPY containers/sandbox/opencode-global-agents.md /home/gem/.config/opencode/AGENTS.md
+
+# Vendored caveman skills
+COPY containers/sandbox/agents-skills/ /home/gem/.agents/skills/
+RUN chown -R gem:gem /home/gem/.config /home/gem/.agents
+
+# tmux config
+COPY containers/sandbox/tmux.conf /home/gem/.tmux.conf
+RUN chown gem:gem /home/gem/.tmux.conf
+
+# Entrypoint scripts
+COPY containers/sandbox/docker-entrypoint.d/ /docker-entrypoint.d/
+RUN chmod +x /docker-entrypoint.d/*.sh
+COPY containers/sandbox/scripts/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Persistent directories
+RUN mkdir -p /home/gem/projects \
+    /home/gem/.local/share/opencode \
+    /home/gem/.claude \
+    && chown -R gem:gem /home/gem
+
+# Security hardening
+RUN rm -rf /root/.ssh /root/.cache /root/.config 2>/dev/null || true
+
+WORKDIR /home/gem/projects
+ENTRYPOINT ["/entrypoint.sh"]

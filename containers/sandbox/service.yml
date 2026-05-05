@@ -2,8 +2,8 @@ service: sandbox
 image: ghcr.io/CoderyOSS/codery:sandbox-{sha}
 
 # Port formula: host_port = container_port + offset
-# blue:  opencode 3000+10000=13000, vscode 7000+10000=17000, ttyd 7681+10000=17681
-# green: opencode 3000+20000=23000, vscode 7000+20000=27000, ttyd 7681+20000=27681
+# blue:  opencode 3000+10000=13000
+# green: opencode 3000+20000=23000
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -12,15 +12,6 @@ ports:
   - name: opencode
     container_port: 3000
     subdomain: opencode
-  - name: vscode
-    container_port: 7000
-    subdomain: vscode
-  - name: ttyd
-    container_port: 7681
-    subdomain: cli
-  - name: archon
-    container_port: 3090
-    subdomain: ops
   - name: ssh
     container_port: 22
     fixed_port: 2222
