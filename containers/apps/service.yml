@@ -1,5 +1,5 @@
 service: apps
-image: ghcr.io/CoderyOSS/codery:apps-{sha}
+image: ghcr.io/coderyoss/codery:apps-{sha}
 
 port_scheme:
   blue_offset: 0
