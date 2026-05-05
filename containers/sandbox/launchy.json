@@ -1,0 +1,25 @@
+{
+  "services": [
+    {
+      "name": "opencode",
+      "command": [
+        "opencode", "serve",
+        "--hostname", "0.0.0.0",
+        "--port", "3000",
+        "--cors", "https://opencode.__DOMAIN_NAME__"
+      ],
+      "user": "gem",
+      "directory": "/home/gem/projects",
+      "env": { "HOME": "/home/gem" },
+      "restart": "always"
+    },
+    {
+      "name": "tmux",
+      "command": ["bash", "-c", "tmux new-session -d -s main 2>/dev/null || true; exec sleep infinity"],
+      "user": "gem",
+      "directory": "/home/gem/projects",
+      "env": { "HOME": "/home/gem" },
+      "restart": "always"
+    }
+  ]
+}
