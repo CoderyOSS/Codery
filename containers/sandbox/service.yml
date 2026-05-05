@@ -1,5 +1,5 @@
 service: sandbox
-image: ghcr.io/CoderyOSS/codery:sandbox-{sha}
+image: ghcr.io/coderyoss/codery:sandbox-{sha}
 
 # Port formula: host_port = container_port + offset
 # blue:  opencode 3000+10000=13000

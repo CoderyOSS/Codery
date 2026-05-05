@@ -106,9 +106,10 @@ jobs:
                 echo '[sync] opencode.json → /opt/codery/projects/codery/' || \
                 echo '[sync] /opt/codery/projects/codery not present, skipping'"
 
-          printf '%s\n' "${{ secrets.ENV_FILE }}" | $SSH "cat > /opt/codery/.env"
-          $SSH "echo 'GHCR_USERNAME=${{ github.actor }}' >> /opt/codery/.env"
-          $SSH "echo 'GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}' >> /opt/codery/.env"
+          $SSH "grep -v '^GHCR_' /opt/codery/.env > /tmp/env.tmp 2>/dev/null || true"
+          $SSH "echo 'GHCR_USERNAME=${{ github.actor }}' >> /tmp/env.tmp"
+          $SSH "echo 'GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}' >> /tmp/env.tmp"
+          $SSH "sudo mv /tmp/env.tmp /opt/codery/.env"
 
           $SSH "mkdir -p /opt/codery/state"
 
