@@ -96,7 +96,9 @@ jobs:
           cat containers/apps/service.yml | $SSH "sudo tee /opt/codery/services/apps.yml"
           $SCP proxy/apps-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/apps-routes.json
 
-          printf '%s\n' "${{ secrets.ENV_FILE }}" | $SSH "cat > /opt/codery/.env"
+          # Patch only GHCR credentials — leave all other VPS .env values intact.
+          $SSH "touch /opt/codery/.env"
+          $SSH "sed -i '/^GHCR_USERNAME=/d; /^GHCR_TOKEN=/d' /opt/codery/.env"
           $SSH "echo 'GHCR_USERNAME=${{ github.actor }}' >> /opt/codery/.env"
           $SSH "echo 'GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}' >> /opt/codery/.env"
           # Ensure SSH_DIR is set — apps container mounts it for git operations.
