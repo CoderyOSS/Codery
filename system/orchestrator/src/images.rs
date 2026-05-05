@@ -101,7 +101,7 @@ pub struct LocalImage {
 }
 
 /// List images available locally for a service, newest first.
-/// Extracts the git SHA from tags like `ghcr.io/CoderyOSS/codery:sandbox-abc123`.
+/// Extracts the git SHA from tags like `ghcr.io/coderyoss/codery:sandbox-abc123`.
 pub async fn list_local(service: &str) -> anyhow::Result<Vec<LocalImage>> {
     let docker = Docker::connect_with_socket_defaults()
         .context("failed to connect to Docker socket")?;

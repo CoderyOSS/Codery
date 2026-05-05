@@ -14,7 +14,7 @@ use crate::config;
 pub struct ServiceDef {
     pub service: String,
     /// Image template. `{sha}` is substituted at deploy time.
-    /// Example: "ghcr.io/CoderyOSS/codery:sandbox-{sha}"
+    /// Example: "ghcr.io/coderyoss/codery:sandbox-{sha}"
     pub image: String,
     /// Port formula: host_port = container_port + offset(color)
     pub port_scheme: PortScheme,
@@ -286,7 +286,7 @@ mod tests {
         serde_yaml::from_str(
             r#"
 service: sandbox
-image: ghcr.io/CoderyOSS/codery:sandbox-{sha}
+image: ghcr.io/coderyoss/codery:sandbox-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -323,7 +323,7 @@ network: codery-net
         serde_yaml::from_str(
             r#"
 service: apps
-image: ghcr.io/CoderyOSS/codery:apps-{sha}
+image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
   blue_offset: 0
   green_offset: 10000
@@ -418,7 +418,7 @@ network: codery-net
         let def = sandbox_def();
         assert_eq!(
             def.image_ref("abc123"),
-            "ghcr.io/CoderyOSS/codery:sandbox-abc123"
+            "ghcr.io/coderyoss/codery:sandbox-abc123"
         );
     }
 
@@ -435,7 +435,7 @@ network: codery-net
     fn resolved_binds_with_env_var() {
         let def: ServiceDef = serde_yaml::from_str(r#"
 service: apps
-image: ghcr.io/CoderyOSS/codery:apps-{sha}
+image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
   blue_offset: 0
   green_offset: 10000
@@ -463,7 +463,7 @@ network: codery-net
     fn resolved_env_applies_overrides() {
         let def: ServiceDef = serde_yaml::from_str(r#"
 service: apps
-image: ghcr.io/CoderyOSS/codery:apps-{sha}
+image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
   blue_offset: 0
   green_offset: 10000

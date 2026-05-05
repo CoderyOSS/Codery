@@ -12,7 +12,7 @@ pub const TAILSCALE_IP_FILE: &str = "/run/tailscale.ip";
 /// Shared projects directory. Declared in service YAMLs; kept here for documentation.
 #[allow(dead_code)]
 pub const PROJECTS_DIR: &str = "/opt/codery/projects";
-pub const REGISTRY: &str = "ghcr.io/CoderyOSS/codery";
+pub const REGISTRY: &str = "ghcr.io/coderyoss/codery";
 /// Default Docker network. Declared in service YAMLs; kept here for documentation.
 #[allow(dead_code)]
 pub const NETWORK: &str = "codery-net";
@@ -104,7 +104,7 @@ mod tests {
     fn image_refs() {
         assert_eq!(
             image_ref("sandbox", "abc123"),
-            "ghcr.io/CoderyOSS/codery:sandbox-abc123"
+            "ghcr.io/coderyoss/codery:sandbox-abc123"
         );
     }
 

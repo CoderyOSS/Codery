@@ -1033,7 +1033,7 @@ mod tests {
     fn upsert_rejects_name_service_mismatch() {
         let yaml = r#"
 service: sandbox
-image: ghcr.io/CoderyOSS/codery:sandbox-{sha}
+image: ghcr.io/coderyoss/codery:sandbox-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000

@@ -450,7 +450,7 @@ mod tests {
     fn sandbox_def() -> ServiceDef {
         serde_yaml::from_str(r#"
 service: sandbox
-image: ghcr.io/CoderyOSS/codery:sandbox-{sha}
+image: ghcr.io/coderyoss/codery:sandbox-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000

@@ -19,6 +19,14 @@ use bollard::container::ListContainersOptions;
 use crate::service_def::ServiceDef;
 use crate::{caddy, config, deploy, state};
 
+fn ts() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{:02}:{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60)
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 pub type RollbackLock = Arc<Mutex<HashSet<String>>>;
@@ -55,14 +63,16 @@ pub fn make_router(events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Route
         .route("/", get(serve_index))
         .route("/api/status", get(get_status))
         .route("/api/events", get(get_events))
+        .route("/api/stop/{container}",   post(post_stop))
+        .route("/api/start/{container}",  post(post_start))
+        .route("/api/kill/{container}",   post(post_kill))
         .route("/api/rollback/{service}", post(post_rollback))
-        .route("/api/restart/{container}", post(post_restart))
         .with_state(state)
 }
 
 pub async fn serve(port: u16, events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Result<()> {
     let addr = format!("127.0.0.1:{}", port);
-    println!("[ui] Listening on http://{}", addr);
+    println!("[ui {}] Listening on http://{}", ts(), addr);
     let listener = TcpListener::bind(&addr).await?;
     axum::serve(listener, make_router(events_tx, ops)).await?;
     Ok(())
@@ -233,7 +243,7 @@ async fn is_container_stopped(docker: &Docker, container: &str) -> bool {
     }
 }
 
-/// Extract short SHA from image tag `ghcr.io/CoderyOSS/codery:{service}-{sha}`.
+/// Extract short SHA from image tag `ghcr.io/coderyoss/codery:{service}-{sha}`.
 fn sha_from_image_tag(service: &str, image: &str) -> Option<String> {
     let prefix = format!("{}:{}-", config::REGISTRY, service);
     image.strip_prefix(&prefix).map(|s| s.to_string())
@@ -254,12 +264,12 @@ async fn broadcast_status(tx: &broadcast::Sender<String>, ops: &Ops) {
 pub async fn event_watcher(tx: Arc<broadcast::Sender<String>>, ops: Ops) {
     loop {
         if let Err(e) = run_event_watcher(&tx, &ops).await {
-            println!("[ui] Docker event stream error: {}", e);
+            println!("[ui {}] Docker event stream error: {}", ts(), e);
         } else {
-            println!("[ui] Docker event stream ended");
+            println!("[ui {}] Docker event stream ended", ts());
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        println!("[ui] Reconnecting to Docker event stream…");
+        println!("[ui {}] Reconnecting to Docker event stream…", ts());
     }
 }
 
@@ -279,30 +289,44 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
     while let Some(event) = stream.next().await {
         let event = event?; // propagate Docker errors → outer loop reconnects
 
-        // On "start", immediately clear any pending op for this container so
-        // the UI re-enables the button without waiting for do_restart to return.
-        if event.action.as_deref() == Some("start") {
-            if let Some(name) = event.actor
-                .as_ref()
-                .and_then(|a| a.attributes.as_ref())
-                .and_then(|attrs| attrs.get("name"))
-            {
-                ops.lock().unwrap().remove(name);
+        let action = event.action.as_deref().unwrap_or("?");
+        let cname  = event.actor.as_ref()
+            .and_then(|a| a.attributes.as_ref())
+            .and_then(|attrs| attrs.get("name"))
+            .map(String::as_str)
+            .unwrap_or("?");
+        println!("[ui {}] event action={} name={}", ts(), action, cname);
+
+        {
+            let mut ops = ops.lock().unwrap();
+            match action {
+                // Container came up — always clear op.
+                "start" => { ops.remove(cname); }
+                // Container process exited — if we were stopping it, clear op.
+                // If we sent kill, clear op. If stop is in flight, clear op too.
+                "die" | "stop" => {
+                    if matches!(ops.get(cname).map(|s| *s), Some("stopping") | Some("killing")) {
+                        ops.remove(cname);
+                    }
+                }
+                _ => {}
             }
         }
 
         let ops_snap = ops.lock().unwrap().clone();
         let tx2 = tx.clone();
-        // Spawn the Docker query so the event loop isn't blocked if Docker is slow
-        // (e.g. while it's in the middle of restarting a container).
         tokio::spawn(async move {
+            let t0 = std::time::Instant::now();
             match tokio::time::timeout(
                 tokio::time::Duration::from_secs(5),
                 build_status_json(&ops_snap),
             ).await {
-                Ok(Ok(json)) => { let _ = tx2.send(json); }
-                Ok(Err(e))   => eprintln!("[ui] build_status: {}", e),
-                Err(_)       => {}  // Docker slow; next event will retry
+                Ok(Ok(json)) => {
+                    println!("[ui {}] build_status ok ({:.1}s)", ts(), t0.elapsed().as_secs_f32());
+                    let _ = tx2.send(json);
+                }
+                Ok(Err(e)) => eprintln!("[ui {}] build_status err ({:.1}s): {}", ts(), t0.elapsed().as_secs_f32(), e),
+                Err(_)     => eprintln!("[ui {}] build_status TIMEOUT ({:.1}s)", ts(), t0.elapsed().as_secs_f32()),
             }
         });
     }
@@ -310,55 +334,62 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
     Ok(())
 }
 
-// ── Restart flow ──────────────────────────────────────────────────────────────
+// ── Stop / Start / Kill flows ─────────────────────────────────────────────────
 
-async fn post_restart(
+async fn post_stop(
     State(state): State<AppState>,
     Path(container): Path<String>,
 ) -> impl IntoResponse {
-    println!("[ui] POST /api/restart/{}", container);
-    state.ops.lock().unwrap().insert(container.clone(), "restarting");
+    println!("[ui {}] POST /api/stop/{}", ts(), container);
+    dispatch_container_op(container, "stopping", &["stop", "-t", "10"], state).await
+}
 
-    // Push "restarting" op to connected clients before returning 204 so the SSE
-    // update lands before localOp is cleared on the browser side.  Use a short
-    // timeout so a slow Docker query doesn't delay the HTTP response.
-    {
-        let ops_snap = state.ops.lock().unwrap().clone();
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            build_status_json(&ops_snap),
-        ).await
-            .ok()
-            .and_then(|r| r.ok())
-            .map(|json| state.events_tx.send(json));
-    }
+async fn post_start(
+    State(state): State<AppState>,
+    Path(container): Path<String>,
+) -> impl IntoResponse {
+    println!("[ui {}] POST /api/start/{}", ts(), container);
+    dispatch_container_op(container, "starting", &["start"], state).await
+}
+
+async fn post_kill(
+    State(state): State<AppState>,
+    Path(container): Path<String>,
+) -> impl IntoResponse {
+    println!("[ui {}] POST /api/kill/{}", ts(), container);
+    dispatch_container_op(container, "killing", &["kill"], state).await
+}
+
+async fn dispatch_container_op(
+    container: String,
+    op: &'static str,
+    docker_args: &'static [&'static str],
+    state: AppState,
+) -> impl IntoResponse {
+    state.ops.lock().unwrap().insert(container.clone(), op);
+    broadcast_status(&state.events_tx, &state.ops).await;
 
     let ops = Arc::clone(&state.ops);
     let tx  = Arc::clone(&state.events_tx);
     tokio::spawn(async move {
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(30),
-            do_restart(&container),
-        ).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => eprintln!("[ui] restart {}: {}", container, e),
-            Err(_)     => eprintln!("[ui] restart {}: timed out after 30s", container),
+        let mut cmd = tokio::process::Command::new("docker");
+        cmd.args(docker_args).arg(&container);
+        match cmd.spawn() {
+            Ok(_)  => println!("[ui {}] {} dispatched: {}", ts(), op, container),
+            Err(e) => {
+                eprintln!("[ui {}] {} failed to spawn: {}", ts(), op, e);
+                ops.lock().unwrap().remove(&container);
+                broadcast_status(&tx, &ops).await;
+                return;
+            }
         }
-        // event_watcher clears ops on the Docker "start" event; this is a safety net.
+        // Safety net: clear op after 5 minutes if Docker events never arrive.
+        tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
         ops.lock().unwrap().remove(&container);
         broadcast_status(&tx, &ops).await;
     });
 
     StatusCode::NO_CONTENT.into_response()
-}
-
-async fn do_restart(container: &str) -> Result<()> {
-    use bollard::container::RestartContainerOptions;
-    let docker = Docker::connect_with_socket_defaults()?;
-    docker
-        .restart_container(container, Some(RestartContainerOptions { t: 3 }))
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to restart {}: {}", container, e))
 }
 
 // ── Rollback flow ─────────────────────────────────────────────────────────────
@@ -416,7 +447,7 @@ async fn do_rollback(
     let prev_sha = sha_from_image_tag(service, image)
         .unwrap_or_else(|| "unknown".to_string());
 
-    println!("[ui] Rolling back {} to {} (sha={})", service, prev_color, prev_sha);
+    println!("[ui {}] Rolling back {} to {} (sha={})", ts(), service, prev_color, prev_sha);
 
     // Start the previous container
     use bollard::container::StartContainerOptions;
@@ -434,7 +465,7 @@ async fn do_rollback(
     // Flip state
     state::write_active(service, prev_color)?;
     state::write_active_sha(service, &prev_sha)?;
-    println!("[ui] State updated: {} is now {}", service, prev_color);
+    println!("[ui {}] State updated: {} is now {}", ts(), service, prev_color);
 
     // Reload Caddy
     caddy::apply_all()
@@ -443,7 +474,7 @@ async fn do_rollback(
     // Stop the now-old active container (only reached if Caddy reload succeeded)
     deploy::stop_container(docker, active_container).await?;
 
-    println!("[ui] Rollback complete: {} is now {}", service, prev_color);
+    println!("[ui {}] Rollback complete: {} is now {}", ts(), service, prev_color);
     Ok(())
 }
 
