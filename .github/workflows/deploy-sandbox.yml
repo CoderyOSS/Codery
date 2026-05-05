@@ -5,7 +5,7 @@ on:
     branches: [master]
     paths:
       - 'examples/Dockerfile.sandbox'
-      - 'containers/sandbox/launchy.json'
+      - '.devcontainer/devcontainer.json'
       - 'containers/sandbox/docker-entrypoint.d/**'
       - 'containers/sandbox/scripts/**'
       - 'containers/sandbox/service.yml'

@@ -39,6 +39,34 @@ struct Config {
     services: Vec<ServiceConfig>,
 }
 
+#[derive(Deserialize, Debug)]
+struct DevContainerFile {
+    customizations: DevContainerCustomizations,
+}
+
+#[derive(Deserialize, Debug)]
+struct DevContainerCustomizations {
+    codery: DevContainerCodery,
+}
+
+#[derive(Deserialize, Debug)]
+struct DevContainerCodery {
+    sandbox: Config,
+}
+
+fn parse_config(raw: &str) -> Result<Config, serde_json::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ConfigFile {
+        DevContainer(DevContainerFile),
+        Direct(Config),
+    }
+    match serde_json::from_str::<ConfigFile>(raw)? {
+        ConfigFile::DevContainer(dc) => Ok(dc.customizations.codery.sandbox),
+        ConfigFile::Direct(c) => Ok(c),
+    }
+}
+
 struct RunningService {
     config: ServiceConfig,
     pid: u32,
@@ -147,7 +175,7 @@ fn main() {
 
     let raw = std::fs::read_to_string(&config_path)
         .unwrap_or_else(|e| panic!("cannot read {}: {}", config_path, e));
-    let config: Config = serde_json::from_str(&raw)
+    let config = parse_config(&raw)
         .unwrap_or_else(|e| panic!("invalid {}: {}", config_path, e));
 
     println!("[launchy {}] starting with {} service(s)", ts(), config.services.len());
@@ -239,6 +267,40 @@ mod tests {
         let json = r#"{"services": [{"name": "x", "command": ["/bin/true"], "restart": "on_failure"}]}"#;
         let cfg: Config = serde_json::from_str(json).unwrap();
         assert!(matches!(cfg.services[0].restart, RestartPolicy::OnFailure));
+    }
+
+    #[test]
+    fn parse_devcontainer_json() {
+        let json = r#"{
+            "name": "Codery",
+            "customizations": {
+                "codery": {
+                    "sandbox": {
+                        "services": [
+                            {
+                                "name": "opencode",
+                                "command": ["opencode", "serve"],
+                                "user": "gem",
+                                "directory": "/home/gem/projects",
+                                "env": {},
+                                "restart": "always"
+                            }
+                        ]
+                    },
+                    "apps": []
+                }
+            }
+        }"#;
+        let config = parse_config(json).expect("should parse devcontainer.json");
+        assert_eq!(config.services.len(), 1);
+        assert_eq!(config.services[0].name, "opencode");
+    }
+
+    #[test]
+    fn parse_flat_launchy_json() {
+        let json = r#"{"services": [{"name": "svc", "command": ["sleep", "1"]}]}"#;
+        let config = parse_config(json).expect("should parse flat launchy.json");
+        assert_eq!(config.services.len(), 1);
     }
 
     #[test]

@@ -7,4 +7,4 @@ for script in /docker-entrypoint.d/*.sh; do
   fi
 done
 echo "[sandbox] Handing off to launchy"
-exec /sbin/launchy /etc/launchy.json
+exec /sbin/launchy /etc/devcontainer.json

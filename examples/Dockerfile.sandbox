@@ -40,7 +40,7 @@ RUN chmod +x /usr/local/bin/github-push
 RUN echo "gem ALL=(ALL) NOPASSWD: /usr/local/bin/github-push" > /etc/sudoers.d/github-push
 
 # Launchy config
-COPY containers/sandbox/launchy.json /etc/launchy.json
+COPY .devcontainer/devcontainer.json /etc/devcontainer.json
 
 # AGENTS.md (only if present)
 COPY AGENTS.md /home/gem/AGENTS.md
