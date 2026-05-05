@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
@@ -9,7 +9,7 @@ use crate::service_def::ServiceDef;
 use crate::state;
 
 /// Per-app subdomain→container-port route loaded from apps-routes.json (or test fixtures).
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct AppRoute {
     pub subdomain: String,
     pub port: u16,

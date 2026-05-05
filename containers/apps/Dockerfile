@@ -46,7 +46,6 @@ COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /etc/nginx/conf.d
 
 RUN mkdir -p /etc/supervisor/projects.d
-COPY containers/apps/supervisor/projects.d/ /etc/supervisor/projects.d/
 
 COPY containers/apps/supervisor/supervisord.conf /etc/supervisor/supervisord.conf
 COPY containers/apps/supervisor/projects.conf /etc/supervisor/projects.conf

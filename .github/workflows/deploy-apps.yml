@@ -92,7 +92,7 @@ jobs:
           SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
           SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
 
-          $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy"
+          $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy /opt/codery/apps-supervisor.d"
           cat containers/apps/service.yml | $SSH "sudo tee /opt/codery/services/apps.yml"
           $SCP proxy/apps-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/apps-routes.json
 

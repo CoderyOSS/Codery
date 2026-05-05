@@ -98,6 +98,30 @@ struct PortParam {
     port: u16,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AddAppParams {
+    #[schemars(description = "Unique app name — used as supervisord program name and conf filename (no spaces or slashes)")]
+    name: String,
+    #[schemars(description = "Subdomain to serve this app at (e.g. 'myapp' for myapp.example.com, or a full FQDN)")]
+    subdomain: String,
+    #[schemars(description = "Port the app process listens on inside the apps container (must be free)")]
+    internal_port: u16,
+    #[schemars(description = "Shell command to start the app (e.g. 'bun run start')")]
+    command: String,
+    #[schemars(description = "Working directory inside the container (e.g. '/home/gem/projects/myapp')")]
+    directory: String,
+    #[schemars(description = "Optional environment variables for the process")]
+    env: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RemoveAppParams {
+    #[schemars(description = "App name as given to add_app")]
+    name: String,
+    #[schemars(description = "Subdomain as given to add_app (defaults to name if omitted)")]
+    subdomain: Option<String>,
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Run a subprocess and return combined stdout+stderr. Returns Ok regardless of
@@ -815,6 +839,165 @@ impl OrchestratorMcp {
         .map_err(|e| tool_err(e))?;
         tool_ok(output)
     }
+
+    /// Register a new app in the apps container without rebuilding the image.
+    /// Writes a supervisord conf to the bind-mounted projects.d directory,
+    /// adds a Caddy+Nginx route, then reloads both so the app is immediately live.
+    /// The app's code must already exist at `directory` in the shared volume.
+    #[tool(description = "Add an app to the apps container: write supervisord conf, register \
+                          subdomain→port route, reload Nginx and Caddy. The app process starts \
+                          immediately. Code must already exist in /home/gem/projects.")]
+    async fn add_app(
+        &self,
+        Parameters(p): Parameters<AddAppParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.name.contains(' ') || p.name.contains('/') || p.name.contains('.') {
+            return Err(tool_err("app name must not contain spaces, slashes, or dots"));
+        }
+
+        // Write supervisord conf to the bind-mounted host directory.
+        let supervisor_dir = std::path::Path::new(config::APPS_SUPERVISOR_DIR);
+        std::fs::create_dir_all(supervisor_dir)
+            .map_err(|e| tool_err(format!("failed to create {}: {}", config::APPS_SUPERVISOR_DIR, e)))?;
+
+        let mut conf = format!(
+            "# codery-subdomain: {}\n[program:{}]\ncommand={}\ndirectory={}\nautostart=true\nautorestart=true\nstdout_logfile=/var/log/supervisor/{}.log\nstderr_logfile=/var/log/supervisor/{}.log\n",
+            p.subdomain, p.name, p.command, p.directory, p.name, p.name
+        );
+        if let Some(env) = &p.env {
+            if !env.is_empty() {
+                let env_str: String = env.iter()
+                    .map(|(k, v)| format!("{}=\"{}\"", k, v.replace('"', "\\\"")))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                conf.push_str(&format!("environment={}\n", env_str));
+            }
+        }
+
+        let conf_path = supervisor_dir.join(format!("{}.conf", p.name));
+        std::fs::write(&conf_path, &conf)
+            .map_err(|e| tool_err(format!("failed to write supervisord conf: {}", e)))?;
+
+        // Add route to apps-routes.json.
+        apps_routes_upsert(caddy::AppRoute {
+            subdomain: p.subdomain.clone(),
+            port: 8080,
+            internal_port: Some(p.internal_port),
+        }).map_err(|e| tool_err(e.to_string()))?;
+
+        // Reload Caddy and Nginx.
+        caddy::apply_all().map_err(|e| tool_err(e.to_string()))?;
+        nginx::generate_and_reload().await.map_err(|e| tool_err(e.to_string()))?;
+
+        // Tell supervisord to pick up the new conf and start the program.
+        let reread = container_exec("apps", &["supervisorctl", "-c", "/etc/supervisor/supervisord.conf", "reread"]).await
+            .unwrap_or_else(|e| format!("(reread failed: {})", e));
+        let update = container_exec("apps", &["supervisorctl", "-c", "/etc/supervisor/supervisord.conf", "update"]).await
+            .unwrap_or_else(|e| format!("(update failed: {})", e));
+
+        tool_ok(format!(
+            "App '{}' added — serving at {}\nsupervisord reread: {}\nsupervisord update: {}",
+            p.name, p.subdomain, reread.trim(), update.trim()
+        ))
+    }
+
+    /// Remove an app added via add_app. Stops the process, deletes the supervisord
+    /// conf, removes the route, and reloads Nginx and Caddy.
+    #[tool(description = "Remove an app from the apps container: stop process, delete supervisord \
+                          conf, remove subdomain route, reload Nginx and Caddy.")]
+    async fn remove_app(
+        &self,
+        Parameters(p): Parameters<RemoveAppParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Resolve subdomain: use explicit param, or read from conf comment, or fall back to name.
+        let subdomain = p.subdomain.unwrap_or_else(|| {
+            let conf_path = format!("{}/{}.conf", config::APPS_SUPERVISOR_DIR, p.name);
+            std::fs::read_to_string(&conf_path)
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("# codery-subdomain:"))
+                        .and_then(|l| l.splitn(2, ':').nth(1))
+                        .map(|s| s.trim().to_string())
+                })
+                .unwrap_or_else(|| p.name.clone())
+        });
+
+        // Stop and remove from supervisord (best-effort — container may not be running).
+        let stop = container_exec("apps", &["supervisorctl", "-c", "/etc/supervisor/supervisord.conf", "stop", &p.name]).await
+            .unwrap_or_else(|e| format!("(stop failed: {})", e));
+        let remove = container_exec("apps", &["supervisorctl", "-c", "/etc/supervisor/supervisord.conf", "remove", &p.name]).await
+            .unwrap_or_else(|e| format!("(remove failed: {})", e));
+
+        // Delete the supervisord conf.
+        let conf_path = format!("{}/{}.conf", config::APPS_SUPERVISOR_DIR, p.name);
+        if std::path::Path::new(&conf_path).exists() {
+            std::fs::remove_file(&conf_path)
+                .map_err(|e| tool_err(format!("failed to delete conf: {}", e)))?;
+        }
+
+        // Remove route from apps-routes.json.
+        apps_routes_remove(&subdomain).map_err(|e| tool_err(e.to_string()))?;
+
+        // Reload Caddy and Nginx.
+        caddy::apply_all().map_err(|e| tool_err(e.to_string()))?;
+        nginx::generate_and_reload().await.map_err(|e| tool_err(e.to_string()))?;
+
+        tool_ok(format!(
+            "App '{}' removed.\nsupervisord stop: {}\nsupervisord remove: {}",
+            p.name, stop.trim(), remove.trim()
+        ))
+    }
+
+    /// List all apps currently registered in apps-routes.json.
+    #[tool(description = "List all apps registered in the apps container (reads apps-routes.json). \
+                          Returns subdomain, external port (always 8080 → Nginx), and internal_port.")]
+    async fn list_apps(&self) -> Result<CallToolResult, McpError> {
+        let path = std::path::Path::new(config::APPS_ROUTES);
+        if !path.exists() {
+            return tool_ok("[]".to_string());
+        }
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| tool_err(format!("failed to read apps-routes.json: {}", e)))?;
+        let routes: Vec<caddy::AppRoute> = serde_json::from_str(&data)
+            .map_err(|e| tool_err(format!("failed to parse apps-routes.json: {}", e)))?;
+        let json = serde_json::to_string_pretty(&routes)
+            .map_err(|e| tool_err(e.to_string()))?;
+        tool_ok(json)
+    }
+}
+
+/// Add or replace a route in apps-routes.json (upsert by subdomain).
+fn apps_routes_upsert(route: caddy::AppRoute) -> anyhow::Result<()> {
+    let path = config::APPS_ROUTES;
+    let mut routes: Vec<caddy::AppRoute> = if std::path::Path::new(path).exists() {
+        let data = std::fs::read_to_string(path)?;
+        serde_json::from_str(&data)?
+    } else {
+        vec![]
+    };
+    routes.retain(|r| r.subdomain != route.subdomain);
+    routes.push(route);
+    let content = serde_json::to_string_pretty(&routes)? + "\n";
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+/// Remove a route from apps-routes.json by subdomain.
+fn apps_routes_remove(subdomain: &str) -> anyhow::Result<()> {
+    let path = config::APPS_ROUTES;
+    if !std::path::Path::new(path).exists() {
+        return Ok(());
+    }
+    let data = std::fs::read_to_string(path)?;
+    let mut routes: Vec<caddy::AppRoute> = serde_json::from_str(&data)?;
+    routes.retain(|r| r.subdomain != subdomain);
+    let content = serde_json::to_string_pretty(&routes)? + "\n";
+    std::fs::write(path, content)?;
+    Ok(())
 }
 
 fn run_check(name: &'static str, f: fn() -> anyhow::Result<()>) -> PreflightCheck {
