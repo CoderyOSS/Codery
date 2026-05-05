@@ -23,5 +23,5 @@ fi
 
 # Start sshd as a daemon. Must run as root (entrypoint context) for privilege
 # separation. supervisord runs as gem so it can't own this process.
-/usr/sbin/sshd
+/usr/sbin/sshd || { echo "[sandbox] WARNING: sshd failed to start (exit $?)"; exit 0; }
 echo "[sandbox] sshd started on port 22"
