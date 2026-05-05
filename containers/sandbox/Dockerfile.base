@@ -1,0 +1,57 @@
+# containers/sandbox/Dockerfile.base
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    gnupg \
+    jq \
+    locales \
+    nano \
+    openssh-client \
+    openssh-server \
+    sudo \
+    tmux \
+    unzip \
+    vim \
+    && locale-gen en_US.UTF-8 \
+    && update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+
+# gem user (uid 1000)
+RUN (groupadd -f -g 1000 gem || true) && \
+    (useradd -m -u 1000 -g 1000 -s /bin/bash gem || \
+     useradd -m -u 1000 -o -g 1000 -s /bin/bash gem) && \
+    usermod -p '*' gem
+
+# Pre-trust GitHub host key
+RUN ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null
+
+# sshd config — key auth only, gem user only, no PAM
+RUN mkdir -p /var/run/sshd && \
+    printf '%s\n' \
+        'Port 22' \
+        'Protocol 2' \
+        'PasswordAuthentication no' \
+        'ChallengeResponseAuthentication no' \
+        'PubkeyAuthentication yes' \
+        'AuthorizedKeysFile .ssh/authorized_keys /run/secrets/authorized_keys' \
+        'AllowUsers gem' \
+        'UsePAM no' \
+        'PrintMotd no' \
+        'PrintLastLog no' \
+        'Subsystem sftp /usr/lib/openssh/sftp-server' \
+    > /etc/ssh/sshd_config.d/sandbox.conf
+
+# Launchy — PID 1 process supervisor (replaces supervisord)
+COPY containers/sandbox/bin/launchy /sbin/launchy
+RUN chmod +x /sbin/launchy
+
+RUN mkdir -p /home/gem/projects \
+    && chown -R gem:gem /home/gem
+
+WORKDIR /home/gem/projects
