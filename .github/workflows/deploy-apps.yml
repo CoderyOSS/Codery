@@ -1,6 +1,11 @@
 name: Build Apps
 
 on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'containers/apps/**'
+      - '.devcontainer/devcontainer.json'
   workflow_dispatch:
 
 env:
@@ -43,6 +48,12 @@ jobs:
         with:
           install: true
 
+      - name: Generate supervisord confs from devcontainer.json
+        run: python3 containers/apps/scripts/gen-supervisor-conf.py containers/apps/supervisor/projects.d
+
+      - name: Generate apps-routes.json from devcontainer.json
+        run: python3 containers/apps/scripts/gen-apps-routes.py proxy/apps-routes.json
+
       - name: Build and push apps image
         uses: docker/build-push-action@v6
         with:
@@ -68,6 +79,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Generate apps-routes.json from devcontainer.json
+        run: python3 containers/apps/scripts/gen-apps-routes.py proxy/apps-routes.json
+
       - name: Deploy apps via codery-ci
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -78,12 +92,13 @@ jobs:
           SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
           SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
 
-          $SSH "mkdir -p /opt/codery/proxy"
+          $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy"
+          cat containers/apps/service.yml | $SSH "sudo tee /opt/codery/services/apps.yml"
           $SCP proxy/apps-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/apps-routes.json
 
           printf '%s\n' "${{ secrets.ENV_FILE }}" | $SSH "cat > /opt/codery/.env"
           $SSH "echo 'GHCR_USERNAME=${{ github.actor }}' >> /opt/codery/.env"
           $SSH "echo 'GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}' >> /opt/codery/.env"
 
-          $SSH "mkdir -p /opt/codery/state"
+          $SSH "sudo mkdir -p /opt/codery/state"
           $SSH "sudo /opt/codery/codery-ci deploy apps ${{ github.sha }} 2>&1"
