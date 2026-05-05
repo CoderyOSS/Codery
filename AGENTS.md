@@ -215,6 +215,67 @@ Apps container code lives in same repos under `/home/gem/projects/` — projects
 
 ---
 
+## SSH to Apps Container
+
+From inside the sandbox, SSH into the apps container with no password or key setup required:
+
+```bash
+ssh gem@apps
+```
+
+- `apps` is a Docker network alias — resolves automatically inside codery-net
+- Sandbox generates a keypair at startup; apps sshd reads it on-demand from the shared volume
+- Only works from inside the sandbox (Docker network = security boundary)
+
+Useful commands:
+```bash
+ssh gem@apps supervisorctl -c /etc/supervisor/projects.conf status
+ssh gem@apps tail -f /var/log/supervisor/myapp.log
+ssh gem@apps "ps aux | grep bun"
+```
+
+---
+
+## Adding a New App
+
+Declare apps in `.devcontainer/devcontainer.json` under `customizations.codery.apps`:
+
+```json
+{
+  "customizations": {
+    "codery": {
+      "apps": [
+        {
+          "name": "myapp",
+          "subdomain": "myapp",
+          "internal_port": 3001,
+          "command": "bun run start",
+          "directory": "/home/gem/projects/myapp",
+          "env": {}
+        }
+      ]
+    }
+  }
+}
+```
+
+Push to `main` → `Build Apps` workflow runs (~8 min):
+- Bakes supervisord conf into image (starts the process)
+- Syncs `apps-routes.json` to VPS (Caddy subdomain)
+- Orchestrator reloads Nginx (internal routing to port 3001)
+- App is live at `myapp.{DOMAIN_NAME}`
+
+**Fields:**
+- `name` — supervisord program name (no spaces)
+- `subdomain` — DNS subdomain prefix (or full FQDN)
+- `internal_port` — port the app process listens on (any free port inside the container)
+- `command` — start command run from `directory`
+- `env` — extra env vars (merged on top of `.env`)
+
+**Route-only change (no rebuild):** edit `proxy/apps-routes.json` directly → push → Sync Routes (~30s).
+
+---
+
 ## Cutting Releases
 
 All components follow [semver](https://semver.org). Pre-1.0: minor bumps for features, patch for fixes.

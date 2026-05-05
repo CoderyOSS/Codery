@@ -48,7 +48,11 @@ Route and image changes must go through this repo.
 
 **Runs:** Any number of Bun/Node/etc. servers, each managed by a supervisord program config.
 
-**User:** root (supervisord + processes run as root inside the container)
+**User:** `gem` (uid 1000) — same as sandbox, owns the shared projects volume. supervisord runs as root and drops to `gem` for app processes.
+
+**Also runs:**
+- sshd on port 22 — accepts connections from sandbox only (Docker network boundary)
+- Nginx on port 8080 — internal reverse proxy routing by Host header to per-app processes
 
 **Key mounts:**
 - `/opt/codery/projects` → `/home/gem/projects` — same project files as sandbox
@@ -199,13 +203,18 @@ before committing.
 
 ### Adding a new web app to the apps container
 
-Route-only change (no container rebuild needed):
+Declare in `.devcontainer/devcontainer.json` (`customizations.codery.apps` array). Push triggers `Build Apps`:
+1. CI runs `gen-supervisor-conf.py` → supervisord conf baked into image (manages the process)
+2. CI runs `gen-apps-routes.py` → `proxy/apps-routes.json` synced to VPS
+3. CoderyCI deploys new apps image; `reload-routes` generates Nginx config + reloads
 
-1. Edit `proxy/apps-routes.json` — add `{"subdomain": "foo.example.com", "port": 8080}`
-2. Push to `main` — triggers **Sync Routes** workflow (~30s, no container restart)
+**Route-only change** (app process already running, just updating subdomain/port): edit `proxy/apps-routes.json` directly → push → `Sync Routes` workflow (~30s, no image rebuild).
 
-If you also need a new supervisor config or code: push changes under `containers/apps/` instead.
-The route file is always synced as part of that deploy.
+---
+
+### SSH from sandbox to apps
+
+`ssh gem@apps` from inside the sandbox — no flags, no credentials needed. Works via Docker network alias `apps` on `codery-net`. Security: only reachable from inside the Docker network.
 
 ---
 
