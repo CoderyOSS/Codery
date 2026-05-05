@@ -29,8 +29,14 @@ h1 { font-size: 1.4rem; font-weight: 600; color: #e0e0e0; }
 .btn-rollback { background: #7c3aed; color: #fff; }
 .btn-rollback:hover:not(:disabled) { background: #6d28d9; }
 .btn-in-progress { background: #4c1d95; color: #a78bfa; border: 1px solid #7c3aed; cursor: not-allowed; opacity: 0.8; }
-.btn-restart { background: #374151; color: #d1d5db; }
-.btn-restart:hover:not(:disabled) { background: #4b5563; }
+.btn-stop { background: #374151; color: #d1d5db; }
+.btn-stop:hover:not(:disabled) { background: #4b5563; }
+.btn-start { background: #14532d; color: #86efac; }
+.btn-start:hover:not(:disabled) { background: #166534; }
+.btn-kill { background: #7f1d1d; color: #fca5a5; }
+.btn-kill:hover:not(:disabled) { background: #991b1b; }
+.btn-restart { background: #1e3a5f; color: #93c5fd; }
+.btn-restart:hover:not(:disabled) { background: #1d4ed8; }
 .btn-row { display: grid; grid-template-columns: auto auto; gap: 8px; justify-content: end; }
 .footer { margin-top: 16px; font-size: 0.75rem; color: #555; max-width: 860px; text-align: right; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

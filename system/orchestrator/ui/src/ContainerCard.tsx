@@ -9,7 +9,6 @@ export function ContainerCard({ container: c }: Props) {
   const [localOp,  setLocalOp]  = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Server operation takes precedence; localOp bridges the gap before SSE responds.
   const operation = c.operation ?? localOp;
   const inOp      = Boolean(operation);
 
@@ -21,6 +20,9 @@ export function ContainerCard({ container: c }: Props) {
   ].filter(Boolean).join(' ');
 
   const opLabel = operation === 'rolling_back' ? '↩ Rolling back…'
+                : operation === 'stopping'     ? '◼ Stopping…'
+                : operation === 'starting'     ? '▶ Starting…'
+                : operation === 'killing'      ? '⚡ Killing…'
                 : operation === 'restarting'   ? '↺ Restarting…'
                 : null;
 
@@ -41,12 +43,34 @@ export function ContainerCard({ container: c }: Props) {
     }
   }
 
+  async function handleStop() {
+    setErrorMsg(null);
+    setLocalOp('stopping');
+    const { ok, text } = await doFetch(`/api/stop/${encodeURIComponent(c.name)}`);
+    if (!ok) setErrorMsg(text || 'stop failed');
+    setLocalOp(null);
+  }
+
+  async function handleStart() {
+    setErrorMsg(null);
+    setLocalOp('starting');
+    const { ok, text } = await doFetch(`/api/start/${encodeURIComponent(c.name)}`);
+    if (!ok) setErrorMsg(text || 'start failed');
+    setLocalOp(null);
+  }
+
+  async function handleKill() {
+    setErrorMsg(null);
+    setLocalOp('killing');
+    const { ok, text } = await doFetch(`/api/kill/${encodeURIComponent(c.name)}`);
+    if (!ok) setErrorMsg(text || 'kill failed');
+    setLocalOp(null);
+  }
+
   async function handleRestart() {
-    console.log('[ui] restart clicked, container=', c.name);
     setErrorMsg(null);
     setLocalOp('restarting');
     const { ok, text } = await doFetch(`/api/restart/${encodeURIComponent(c.name)}`);
-    console.log('[ui] restart response ok=', ok, 'text=', text);
     if (!ok) setErrorMsg(text || 'restart failed');
     setLocalOp(null);
   }
@@ -60,13 +84,15 @@ export function ContainerCard({ container: c }: Props) {
     setLocalOp(null);
   }
 
+  const isRunning = c.state === 'running';
+
   return (
     <div className={cardClasses}>
       <div className="card-inner">
         <div className="card-left">
           <div className="service-row">
             <span className="service-name">{c.name}</span>
-            <span className={`badge ${c.state === 'running' ? 'badge-green' : 'badge-blue'}`}>
+            <span className={`badge ${isRunning ? 'badge-green' : 'badge-blue'}`}>
               ● {c.state.toUpperCase()}
             </span>
           </div>
@@ -93,13 +119,40 @@ export function ContainerCard({ container: c }: Props) {
             {errorMsg && <>✗ {errorMsg}</>}
           </div>
           <div className="btn-row">
-            <button
-              className={`btn ${inOp ? 'btn-in-progress' : 'btn-restart'}`}
-              onClick={handleRestart}
-              disabled={inOp}
-            >
-              {operation === 'restarting' ? '↺ Restarting…' : '↺ Restart'}
-            </button>
+            {isRunning && (
+              <>
+                <button
+                  className={`btn ${inOp ? 'btn-in-progress' : 'btn-stop'}`}
+                  onClick={handleStop}
+                  disabled={inOp}
+                >
+                  {operation === 'stopping' ? '◼ Stopping…' : '◼ Stop'}
+                </button>
+                <button
+                  className={`btn ${operation === 'killing' ? 'btn-in-progress' : 'btn-kill'}`}
+                  onClick={handleKill}
+                  disabled={operation === 'killing'}
+                >
+                  {operation === 'killing' ? '⚡ Killing…' : '⚡ Kill'}
+                </button>
+                <button
+                  className={`btn ${inOp ? 'btn-in-progress' : 'btn-restart'}`}
+                  onClick={handleRestart}
+                  disabled={inOp}
+                >
+                  {operation === 'restarting' ? '↺ Restarting…' : '↺ Restart'}
+                </button>
+              </>
+            )}
+            {!isRunning && (
+              <button
+                className={`btn ${inOp ? 'btn-in-progress' : 'btn-start'}`}
+                onClick={handleStart}
+                disabled={inOp}
+              >
+                {operation === 'starting' ? '▶ Starting…' : '▶ Start'}
+              </button>
+            )}
             {c.rollback_available && (
               <button
                 className={`btn ${inOp ? 'btn-in-progress' : 'btn-rollback'}`}

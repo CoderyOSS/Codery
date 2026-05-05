@@ -63,9 +63,10 @@ pub fn make_router(events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Route
         .route("/", get(serve_index))
         .route("/api/status", get(get_status))
         .route("/api/events", get(get_events))
-        .route("/api/stop/{container}",   post(post_stop))
+        .route("/api/stop/{container}",    post(post_stop))
         .route("/api/start/{container}",  post(post_start))
         .route("/api/kill/{container}",   post(post_kill))
+        .route("/api/restart/{container}", post(post_restart))
         .route("/api/rollback/{service}", post(post_rollback))
         .with_state(state)
 }
@@ -358,6 +359,14 @@ async fn post_kill(
 ) -> impl IntoResponse {
     println!("[ui {}] POST /api/kill/{}", ts(), container);
     dispatch_container_op(container, "killing", &["kill"], state).await
+}
+
+async fn post_restart(
+    State(state): State<AppState>,
+    Path(container): Path<String>,
+) -> impl IntoResponse {
+    println!("[ui {}] POST /api/restart/{}", ts(), container);
+    dispatch_container_op(container, "restarting", &["restart", "-t", "10"], state).await
 }
 
 async fn dispatch_container_op(
