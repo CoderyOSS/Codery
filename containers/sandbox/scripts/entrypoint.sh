@@ -7,5 +7,4 @@ for script in /docker-entrypoint.d/*.sh; do
     "$script"
   fi
 done
-mkdir -p /var/log/supervisor
-exec /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
+exec /sbin/launchy /etc/launchy.json
