@@ -94,8 +94,6 @@ jobs:
 
           $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy"
           cat containers/sandbox/service.yml | $SSH "sudo tee /opt/codery/services/sandbox.yml"
-          echo "[sync] service.yml written, verifying image line:"
-          $SSH "head -2 /opt/codery/services/sandbox.yml"
           cat proxy/sandbox-routes.json | $SSH "sudo tee /opt/codery/proxy/sandbox-routes.json" > /dev/null
 
           cat opencode.json | $SSH "tee /tmp/opencode-codery.json" > /dev/null
