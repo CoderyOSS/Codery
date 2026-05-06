@@ -30,15 +30,18 @@ sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$PEM_FIL
 
 JWT="${header}.${payload}.${sig}"
 
-# Resolve installation ID
+INSTALLATIONS=$(curl -sf \
+  -H "Authorization: Bearer ${JWT}" \
+  -H "Accept: application/vnd.github+json" \
+  -H "X-GitHub-Api-Version: 2022-11-28" \
+  "https://api.github.com/app/installations")
+
 if [ -n "${1:-}" ]; then
   INSTALLATION_ID="$1"
+elif [ -n "${2:-}" ]; then
+  INSTALLATION_ID=$(echo "$INSTALLATIONS" | jq -r ".[] | select(.account.login == \"$2\") | .id")
 else
-  INSTALLATION_ID=$(curl -sf \
-    -H "Authorization: Bearer ${JWT}" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/app/installations" | jq -r '.[0].id')
+  INSTALLATION_ID=$(echo "$INSTALLATIONS" | jq -r '.[0].id')
 fi
 
 if [ -z "$INSTALLATION_ID" ] || [ "$INSTALLATION_ID" = "null" ]; then

@@ -15,7 +15,9 @@ if [ -z "$REPO" ]; then
   exit 1
 fi
 
-TOKEN=$(github-app-token)
+REPO_OWNER=$(echo "$REPO" | cut -d'/' -f1)
+
+TOKEN=$(github-app-token "" "$REPO_OWNER")
 
 if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
   echo "Error: Could not generate GitHub App token" >&2
@@ -24,3 +26,4 @@ fi
 
 git remote set-url origin "https://x-access-token:${TOKEN}@github.com/${REPO}.git"
 git push origin "$BRANCH"
+git remote set-url origin "https://github.com/${REPO}.git"
