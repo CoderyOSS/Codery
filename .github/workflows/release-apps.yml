@@ -17,6 +17,17 @@ jobs:
       packages: write
 
     steps:
+      - name: Prevent semver regression
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#apps-v}"
+          LATEST=$(gh release list --repo ${{ github.repository }} --limit 50 --json tagName -q '.[].tagName' | grep '^apps-v' | head -1 | sed 's/apps-v//')
+          if [ -n "$LATEST" ] && [ "$(printf '%s\n%s' "$LATEST" "$TAG_VERSION" | sort -V | tail -1)" != "$TAG_VERSION" ]; then
+            echo "::error::Tag v$TAG_VERSION is not newer than latest release v$LATEST"
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Checkout
         uses: actions/checkout@v4
 
