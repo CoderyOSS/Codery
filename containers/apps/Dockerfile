@@ -34,7 +34,8 @@ RUN ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null
 
 # gem user (uid 1000) — same uid as sandbox, owns the shared projects volume.
 # Ubuntu 24.04 ships an 'ubuntu' user at uid 1000; rename it to 'gem'.
-RUN usermod -l gem -d /home/gem -m ubuntu && groupmod -n gem ubuntu
+RUN usermod -l gem -d /home/gem -m ubuntu && groupmod -n gem ubuntu \
+    && passwd -u gem 2>/dev/null || usermod -p '*' gem
 
 # sshd — accepts key from sandbox via AuthorizedKeysCommand on shared volume.
 COPY containers/apps/sshd_config /etc/ssh/sshd_config
