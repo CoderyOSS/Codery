@@ -15,10 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-server \
     git \
     unzip \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
-
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
@@ -40,7 +38,9 @@ RUN ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null
 # gem user (uid 1000) — same uid as sandbox, owns the shared projects volume.
 # Ubuntu 24.04 ships an 'ubuntu' user at uid 1000; rename it to 'gem'.
 RUN usermod -l gem -d /home/gem -m ubuntu && groupmod -n gem ubuntu \
-    && passwd -u gem 2>/dev/null || usermod -p '*' gem
+    && passwd -u gem 2>/dev/null || usermod -p '*' gem \
+    && echo "gem ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gem \
+    && chmod 440 /etc/sudoers.d/gem
 
 # sshd — accepts key from sandbox via AuthorizedKeysCommand on shared volume.
 COPY containers/apps/sshd_config /etc/ssh/sshd_config
