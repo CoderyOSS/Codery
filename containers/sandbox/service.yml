@@ -46,10 +46,7 @@ volumes:
     readonly: true
 
 env_overrides:
-  # The PEM is bind-mounted at /run/secrets/github-app.pem inside the container.
-  # Override whatever host path .env has so github-app-token finds the key.
   GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
-  GITHUB_APP_SLUG: ${GITHUB_APP_SLUG}
 
 required_env:
   - GHCR_USERNAME
