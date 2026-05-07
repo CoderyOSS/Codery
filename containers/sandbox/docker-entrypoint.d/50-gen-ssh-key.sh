@@ -13,7 +13,13 @@ rm -f "$KEY" "$KEY.pub"
 ssh-keygen -t ed25519 -f "$KEY" -N "" -C "codery-sandbox" -q
 chown gem:gem "$KEY" "$KEY.pub"
 chmod 600 "$KEY"
-chmod 644 "$KEY.pub"   # world-readable: sshd AuthorizedKeysCommandUser=nobody reads this
+chmod 644 "$KEY.pub"   # world-readable: apps sshd reads this via AuthorizedKeysFile
+
+# Copy pubkey to authorized_keys in shared volume for apps sshd AuthorizedKeysFile.
+mkdir -p /home/gem/projects/.ssh
+cp "$KEY.pub" /home/gem/projects/.ssh/authorized_keys
+chmod 700 /home/gem/projects/.ssh
+chmod 600 /home/gem/projects/.ssh/authorized_keys
 
 echo "[sandbox] Generated sandbox→apps SSH keypair"
 
