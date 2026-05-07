@@ -41,6 +41,9 @@ pub struct ServiceDef {
     /// E.g. ["apps"] makes `ssh gem@apps` resolvable from other containers on the same network.
     #[serde(default)]
     pub network_aliases: Vec<String>,
+    /// If true, do NOT set "no-new-privileges" — allows sudo inside the container.
+    #[serde(default)]
+    pub allow_privilege_escalation: bool,
 }
 
 /// host_port = container_port + offset

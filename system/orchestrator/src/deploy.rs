@@ -205,7 +205,7 @@ pub(crate) async fn start_container(docker: &Docker, def: &ServiceDef, sha: &str
                     network_mode: Some(def.network.clone()),
                     binds: Some(binds),
                     extra_hosts: if def.extra_hosts.is_empty() { None } else { Some(def.extra_hosts.clone()) },
-                    security_opt: Some(vec!["no-new-privileges:true".to_string()]),
+                    security_opt: if def.allow_privilege_escalation { None } else { Some(vec!["no-new-privileges:true".to_string()]) },
                     restart_policy: Some(RestartPolicy {
                         name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
                         maximum_retry_count: None,

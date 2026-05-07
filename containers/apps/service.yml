@@ -48,3 +48,6 @@ network: codery-net
 # Docker alias so `ssh gem@apps` resolves from sandbox inside codery-net.
 network_aliases:
   - apps
+
+# Allow sudo inside container (general-purpose dev environment).
+allow_privilege_escalation: true
