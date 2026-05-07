@@ -338,10 +338,8 @@ containers/
       entrypoint.sh         # Runs entrypoint.d/ scripts, then exec supervisord
       github-app-token.sh   # Generates a GitHub App installation token
       github-push.sh        # Wraps git push with App auth
-    archon/
-      config.yaml           # Archon config
     agents-skills/           # Vendored caveman skills
-    bin/                     # Archon binary (downloaded by CI)
+    bin/                     # launchy process supervisor
 
   apps/
     Dockerfile              # Apps image (project web servers)
