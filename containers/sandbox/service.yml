@@ -57,6 +57,7 @@ required_env:
   - ANTHROPIC_API_KEY
   - ZAI_API_KEY
   - GITHUB_APP_ID
+  - GITHUB_APP_SLUG
 
 network: codery-net
 
