@@ -10,7 +10,8 @@ PubkeyAuthentication yes
 
 AuthorizedKeysFile /home/gem/projects/.ssh/authorized_keys
 
-LogLevel DEBUG
+StrictModes no
+LogLevel DEBUG2
 
 PasswordAuthentication no
 ChallengeResponseAuthentication no
