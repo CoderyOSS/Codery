@@ -30,7 +30,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && rm -rf /var/lib/apt/lists/*
 
 # OpenCode + Claude Code
-RUN npm install -g opencode-ai@1.14.41 @anthropic-ai/claude-code
+RUN npm install -g opencode-ai@1.14.41 @anthropic-ai/claude-code openspec-extensions
 
 # GitHub App helpers
 COPY containers/sandbox/scripts/github-app-token.sh /usr/local/bin/github-app-token

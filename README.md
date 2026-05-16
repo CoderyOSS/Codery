@@ -1,6 +1,15 @@
+```
+   ______          __               
+  / ____/___  ____/ /__  _______  __
+ / /   / __ \/ __  / _ \/ ___/ / / /
+/ /___/ /_/ / /_/ /  __/ /  / /_/ / 
+\____/\____/\__,_/\___/_/   \__, /  
+                            /____/   
+```
+
 # Codery
 
-[![Project Status: Pre-Alpha](https://img.shields.io/badge/status-pre--alpha-orange)](https://github.com/CoderyOSS/Codery)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)] [![GitHub Release](https://img.shields.io/github/v/release/CoderyOSS/Codery)] [![Status](https://img.shields.io/badge/status-pre--alpha-orange)] [![Coverage](https://img.shields.io/badge/coverage-pending-lightgrey)]
 
 Infrastructure for a VPS-hosted AI development environment. Two Docker containers — a sandbox (OpenCode + VS Code) and an apps container (project web servers) — deployed via CoderyCI with blue/green zero-downtime deployments.
 
@@ -91,3 +100,9 @@ git push origin apps-v0.1.0
 ```
 
 CI builds and publishes artifacts automatically. See [CLAUDE.md](CLAUDE.md) for full release instructions.
+
+## Support
+
+[![GitHub Sponsors](https://img.shields.io/badge/GitHub-Sponsors-ea4aaa?logo=github)](https://github.com/sponsors/rm-rf-etc)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buymeacoffee)](https://buymeacoffee.com/coldfusioncoder)
+[![Patreon](https://img.shields.io/badge/Patreon-ff424d?logo=patreon)](https://www.patreon.com/c/climatechangeanswer)
