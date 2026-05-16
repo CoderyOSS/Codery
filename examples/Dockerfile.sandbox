@@ -33,8 +33,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 RUN npm install -g opencode-ai@1.14.41 @anthropic-ai/claude-code openspec-extensions
 
 # OpenSpec skills & commands for OpenCode
-RUN openspec init --tools opencode --force /home/gem/.opencode \
-    && chown -R gem:gem /home/gem/.opencode
+RUN openspec init --tools opencode --force /home/gem/ \
+    && chown -R gem:gem /home/gem/.opencode/skills /home/gem/.opencode/commands
 
 # GitHub App helpers
 COPY containers/sandbox/scripts/github-app-token.sh /usr/local/bin/github-app-token
