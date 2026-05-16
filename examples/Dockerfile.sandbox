@@ -32,6 +32,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # OpenCode + Claude Code
 RUN npm install -g opencode-ai@1.14.41 @anthropic-ai/claude-code openspec-extensions
 
+# OpenSpec skills & commands for OpenCode
+RUN openspec init --tools opencode --force /home/gem/.opencode \
+    && chown -R gem:gem /home/gem/.opencode
+
 # GitHub App helpers
 COPY containers/sandbox/scripts/github-app-token.sh /usr/local/bin/github-app-token
 RUN chmod +x /usr/local/bin/github-app-token
