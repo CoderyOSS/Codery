@@ -11,6 +11,14 @@
     "codery": {
       "type": "remote",
       "url": "http://host.docker.internal:4040/sse"
+    },
+    "github-app": {
+      "type": "local",
+      "command": ["bun", "/usr/local/bin/github-app-permissions-mcp.ts"]
+    },
+    "trailhead": {
+      "type": "remote",
+      "url": "http://host.docker.internal:4050/mcp/sse"
     }
   },
   "permission": {
