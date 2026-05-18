@@ -40,12 +40,13 @@ function generateJWT(): string {
 async function githubAPI(
   path: string,
   options: RequestInit = {},
+  token?: string,
 ): Promise<unknown> {
-  const jwt = generateJWT();
+  const authToken = token || generateJWT();
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
-      Authorization: `Bearer ${jwt}`,
+      Authorization: `Bearer ${authToken}`,
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
       ...(options.headers as Record<string, string> | undefined),
@@ -102,6 +103,75 @@ async function checkPermission(account: string, permission: string) {
     permission,
     has_permission: level != null,
     level: level || null,
+    note:
+      level != null
+        ? "Permission exists. To use it: generate an org-scoped token via generate_token({account}), then auth your client with it. GitHub App installation tokens are scoped to ONE installation — cross-org operations need explicit per-org token generation."
+        : null,
+  };
+}
+
+async function generateInstallationToken(account: string): Promise<{
+  token: string;
+  expires_at: string;
+  account: string;
+  installation_id: number;
+}> {
+  const inst = await getInstallation(account);
+  if (!inst) {
+    throw new Error(`No installation found for account '${account}'`);
+  }
+
+  const jwt = generateJWT();
+  const data = (await githubAPI(
+    `/app/installations/${inst.id}/access_tokens`,
+    { method: "POST" },
+  )) as { token: string; expires_at: string };
+
+  return {
+    token: data.token,
+    expires_at: data.expires_at,
+    account: inst.account.login,
+    installation_id: inst.id,
+  };
+}
+
+async function createRepo(
+  org: string,
+  name: string,
+  options: { private?: boolean; description?: string; auto_init?: boolean } = {},
+) {
+  const inst = await getInstallation(org);
+  if (!inst) {
+    throw new Error(`No installation found for org '${org}'`);
+  }
+
+  const jwt = generateJWT();
+  const tokenData = (await githubAPI(
+    `/app/installations/${inst.id}/access_tokens`,
+    { method: "POST" },
+  )) as { token: string; expires_at: string };
+
+  const repo = (await githubAPI(
+    `/orgs/${org}/repos`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        private: options.private ?? false,
+        description: options.description,
+        auto_init: options.auto_init ?? false,
+      }),
+    },
+    tokenData.token,
+  )) as { full_name: string; html_url: string; clone_url: string; ssh_url: string };
+
+  return {
+    full_name: repo.full_name,
+    html_url: repo.html_url,
+    clone_url: repo.clone_url,
+    ssh_url: repo.ssh_url,
+    created: true,
   };
 }
 
@@ -142,7 +212,7 @@ const TOOLS = [
   {
     name: "check_permission",
     description:
-      "Check if the GitHub App has a specific permission on an account. Use this before making claims about what the bot can or cannot do.",
+      "Check if the GitHub App has a specific permission on an account. Returns a note about token scoping — see generate_token to get an org-specific token.",
     inputSchema: {
       type: "object",
       properties: {
@@ -157,6 +227,52 @@ const TOOLS = [
         },
       },
       required: ["account", "permission"],
+    },
+  },
+  {
+    name: "generate_token",
+    description:
+      "Generate an installation access token scoped to a specific account (org or user). Use this before making API calls or gh CLI operations targeting a specific org. Token expires in ~1 hour. Each GitHub App installation is separate — cross-org operations need per-org tokens.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: {
+          type: "string",
+          description: "Org or user login name to generate a token for",
+        },
+      },
+      required: ["account"],
+    },
+  },
+  {
+    name: "create_repo",
+    description:
+      "Create a new repository under an organization. Uses the GitHub App to create the repo — generates an org-scoped token automatically. Use this instead of gh repo create, which may use a token for the wrong installation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        org: {
+          type: "string",
+          description: "Organization name to create the repo under",
+        },
+        name: {
+          type: "string",
+          description: "Repository name",
+        },
+        private: {
+          type: "boolean",
+          description: "Make the repository private (default: false)",
+        },
+        description: {
+          type: "string",
+          description: "Short description of the repository",
+        },
+        auto_init: {
+          type: "boolean",
+          description: "Create an initial commit with empty README (default: false)",
+        },
+      },
+      required: ["org", "name"],
     },
   },
 ];
@@ -193,6 +309,16 @@ async function handleMessage(msg: any) {
           break;
         case "check_permission":
           result = await checkPermission(args.account, args.permission);
+          break;
+        case "generate_token":
+          result = await generateInstallationToken(args.account);
+          break;
+        case "create_repo":
+          result = await createRepo(args.org, args.name, {
+            private: args.private,
+            description: args.description,
+            auto_init: args.auto_init,
+          });
           break;
         default:
           return sendError(id, -32601, `Unknown tool: ${name}`);
