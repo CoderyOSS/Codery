@@ -41,6 +41,7 @@ COPY containers/sandbox/scripts/github-app-token.sh /usr/local/bin/github-app-to
 RUN chmod +x /usr/local/bin/github-app-token
 COPY containers/sandbox/scripts/github-push.sh /usr/local/bin/github-push
 RUN chmod +x /usr/local/bin/github-push
+COPY containers/sandbox/scripts/github-app-permissions-mcp.ts /usr/local/bin/github-app-permissions-mcp.ts
 RUN echo "gem ALL=(ALL) NOPASSWD: /usr/local/bin/github-push" > /etc/sudoers.d/github-push
 
 # Launchy config
