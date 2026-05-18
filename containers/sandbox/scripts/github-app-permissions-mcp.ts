@@ -107,8 +107,7 @@ async function checkPermission(account: string, permission: string) {
 
 function send(id: number | string, payload: Record<string, unknown>) {
   const msg = JSON.stringify({ jsonrpc: "2.0", id, ...payload });
-  const output = `Content-Length: ${Buffer.byteLength(msg, "utf-8")}\r\n\r\n${msg}`;
-  process.stdout.write(output);
+  process.stdout.write(msg + "\n");
 }
 
 function sendResult(id: number | string, result: unknown) {
@@ -225,24 +224,40 @@ async function main() {
     buf += new TextDecoder().decode(value);
 
     while (true) {
+      // Content-Length framing (MCP spec standard)
       const m = buf.match(/Content-Length: (\d+)\r\n\r\n/);
-      if (!m) break;
-
-      const length = parseInt(m[1]);
-      const headerEnd = m.index! + m[0].length;
-
-      if (buf.length < headerEnd + length) break;
-
-      const body = buf.slice(headerEnd, headerEnd + length);
-      buf = buf.slice(headerEnd + length);
-
-      try {
-        const msg = JSON.parse(body);
-        await handleMessage(msg);
-      } catch (err: any) {
-        console.error("[github-app-mcp] Parse error:", err.message);
+      if (m) {
+        const length = parseInt(m[1]);
+        const headerEnd = m.index! + m[0].length;
+        if (buf.length < headerEnd + length) break;
+        const body = buf.slice(headerEnd, headerEnd + length);
+        buf = buf.slice(headerEnd + length);
+        await processMessage(body);
+        continue;
       }
+
+      // Newline-delimited JSON (opencode format)
+      const nl = buf.indexOf("\n");
+      if (nl >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line.length > 0) {
+          await processMessage(line);
+        }
+        continue;
+      }
+
+      break;
     }
+  }
+}
+
+async function processMessage(raw: string) {
+  try {
+    const msg = JSON.parse(raw);
+    await handleMessage(msg);
+  } catch (err: any) {
+    console.error("[github-app-mcp] Parse error:", err.message);
   }
 }
 
