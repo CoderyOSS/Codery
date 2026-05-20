@@ -1,0 +1,22 @@
+{
+  "projects": {
+    "/home/gem/projects": {
+      "mcpServers": {
+        "codery": {
+          "type": "http",
+          "url": "http://host.docker.internal:4040/sse"
+        },
+        "github-app": {
+          "type": "stdio",
+          "command": "bun",
+          "args": ["/usr/local/bin/github-app-permissions-mcp.ts"],
+          "env": {}
+        },
+        "trailhead": {
+          "type": "http",
+          "url": "http://host.docker.internal:4050/mcp/sse"
+        }
+      }
+    }
+  }
+}

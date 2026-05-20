@@ -54,4 +54,9 @@ RUN chmod +x /sbin/launchy
 RUN mkdir -p /home/gem/projects \
     && chown -R gem:gem /home/gem
 
+# Default Claude Code MCP configuration
+COPY containers/sandbox/scripts/default-claude-mcp.json /usr/local/share/claude/
+COPY containers/sandbox/docker-entrypoint.d/35-init-claude-mcp.sh /docker-entrypoint.d/35-init-claude-mcp.sh
+RUN chmod +x /docker-entrypoint.d/35-init-claude-mcp.sh
+
 WORKDIR /home/gem/projects
