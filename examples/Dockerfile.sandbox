@@ -78,6 +78,14 @@ RUN mkdir -p /home/gem/projects \
     /home/gem/.claude \
     && chown -R gem:gem /home/gem
 
+# Claude Code MCP: github-app (merge with existing settings.json if present)
+RUN mkdir -p /home/gem/.claude
+COPY containers/sandbox/scripts/claude-mcp-github-app.json /tmp/github-app-mcp.json
+RUN echo '{}' > /home/gem/.claude/settings.json.tmp \
+    && jq -s '.[0] * .[1]' /home/gem/.claude/settings.json.tmp /tmp/github-app-mcp.json > /home/gem/.claude/settings.json \
+    && rm -f /home/gem/.claude/settings.json.tmp /tmp/github-app-mcp.json \
+    && chown gem:gem /home/gem/.claude/settings.json
+
 # Security hardening
 RUN rm -rf /root/.ssh /root/.cache /root/.config 2>/dev/null || true
 

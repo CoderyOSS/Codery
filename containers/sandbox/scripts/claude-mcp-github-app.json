@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "github-app": {
+      "command": "bun",
+      "args": ["/usr/local/bin/github-app-permissions-mcp.ts"],
+      "env": {
+        "GITHUB_APP_ID": "${GITHUB_APP_ID}"
+      }
+    }
+  }
+}

@@ -14,7 +14,10 @@
     },
     "github-app": {
       "type": "local",
-      "command": ["bun", "/usr/local/bin/github-app-permissions-mcp.ts"]
+      "command": ["bun", "/usr/local/bin/github-app-permissions-mcp.ts"],
+      "env": {
+        "GITHUB_APP_ID": "${GITHUB_APP_ID}"
+      }
     },
     "trailhead": {
       "type": "remote",
