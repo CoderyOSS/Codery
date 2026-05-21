@@ -11,7 +11,7 @@ on:
       - 'containers/sandbox/service.yml'
       - 'containers/sandbox/tmux.conf'
       - 'opencode.json'
-      - 'AGENTS.md'
+      - 'containers/sandbox/agents_file'
       - 'containers/sandbox/agents-skills/**'
       - 'containers/sandbox/opencode-global-agents.md'
   workflow_dispatch:
