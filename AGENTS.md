@@ -1,6 +1,6 @@
 # Codery — Infrastructure Reference
 
-This file is loaded automatically by Claude Code and compatible agents. Read it before making
+This file is loaded automatically by Claude Code and compatible agents (as AGENTS.md). Read it before making
 any changes to this repo.
 
 ---
@@ -9,7 +9,7 @@ any changes to this repo.
 
 Codery is the complete infrastructure for a VPS-hosted developer environment. It manages:
 
-- A **sandbox container** — the AI coding workspace (OpenCode + VS Code)
+- A **sandbox container** — the AI coding workspace (OpenCode)
 - An **apps container** — project web servers (Bun/Node apps)
 - A **host layer** — Caddy (reverse proxy + TLS), Tailscale (VPN), supervisord, and CoderyCI
 - **CoderyCI** — Rust binary that runs on the host, handles blue/green container deployments
@@ -21,20 +21,20 @@ of whichever container serves that subdomain.
 
 ## Container Roles
 
-### Sandbox (`containers/sandbox/Dockerfile`)
+### Sandbox (`containers/sandbox/Dockerfile.base` + `examples/Dockerfile.sandbox`)
 
 **Purpose:** AI-assisted development environment. Not a production server.
 
 **Runs:**
 - `opencode serve` on container port **3000** — the AI coding assistant (accessible externally)
-- `code-server` on container port **7000** — VS Code in the browser (accessible externally)
+- `sshd` on container port **22** — SSH access from host (stable proxy port 2222 via CoderyCI TCP proxy)
 
-**User:** Starts as root (entrypoint reads root-owned PEM for GitHub auth), then supervisord
+**User:** Starts as root (entrypoint reads root-owned PEM for GitHub auth), then `launchy`
 drops to `gem` (uid 1000) for all processes.
 
 **Key mounts:**
 - `/opt/codery/projects` → `/home/gem/projects` — shared project files
-- `codery_opencode-data` → `/home/gem/.local/share/opencode` — OpenCode persistent data
+- `/opt/codery/data/opencode` → `/home/gem/.local/share/opencode` — OpenCode persistent data (bind mount)
 - `/opt/codery/github-app.pem` → `/run/secrets/github-app.pem:ro` — GitHub App key
 
 **What it cannot do:** No Docker socket, no Caddy/Tailscale access, no host supervisor.
@@ -72,16 +72,16 @@ This is critical to understand before adding any service.
 
 The port formula is: `host_port = offset + container_port` where offset is 10000 (blue) or 20000 (green).
 
-| Color | Service      | Host port | Container port |
-|-------|-------------|-----------|---------------|
-| blue  | OpenCode    | 13000     | 3000          |
-| blue  | code-server | 17000     | 7000          |
-| blue  | ttyd        | 17681     | 7681          |
-| green | OpenCode    | 23000     | 3000          |
-| green | code-server | 27000     | 7000          |
-| green | ttyd        | 27681     | 7681          |
+| Color | Service  | Host port | Container port | Notes |
+|-------|----------|-----------|----------------|-------|
+| blue  | OpenCode | 13000     | 3000           | |
+| blue  | ttyd     | 17681     | 7681           | via sandbox-routes.json |
+| blue  | SSH      | 10022     | 22             | stable proxy: 2222 |
+| green | OpenCode | 23000     | 3000           | |
+| green | ttyd     | 27681     | 7681           | via sandbox-routes.json |
+| green | SSH      | 20022     | 22             | stable proxy: 2222 |
 
-Extra sandbox services (beyond OpenCode and code-server) are declared in `proxy/sandbox-routes.json`
+Extra sandbox services (beyond OpenCode) are declared in `proxy/sandbox-routes.json`
 and do not require CoderyCI code changes — see "Adding a New Sandbox Service" below.
 
 ### Apps ports
@@ -264,12 +264,12 @@ investigate manually.
 
 ## CI/CD Triggers
 
-| Workflow | Triggers on push to `main` when... | What it does |
-|----------|--------------------------------------|--------------|
-| Build Sandbox | `containers/sandbox/**`, `AGENTS.md`, `opencode.json`, `proxy/sandbox-routes.json` | Builds image, deploys via CoderyCI |
-| Build Apps | `containers/apps/**` | Builds image, deploys via CoderyCI |
+| Workflow | Triggers on push to `master` when... | What it does |
+|----------|---------------------------------------|--------------|
+| Build Sandbox | `containers/sandbox/**`, `opencode.json`, `examples/Dockerfile.sandbox`, `.devcontainer/devcontainer.json` | Builds image, deploys via CoderyCI |
+| Build Apps | `containers/apps/**`, `.devcontainer/devcontainer.json` | Builds image, deploys via CoderyCI |
 | Sync Routes | `proxy/apps-routes.json` | Syncs route file, runs `codery-ci reload-routes` (~30s, no container rebuild) |
-| Build Orchestrator | `system/orchestrator/**` | Compiles musl binary, uploads to `/opt/codery/codery-ci`, restarts codery-mcp |
+| Build Orchestrator | `workflow_dispatch` only | Compiles musl binary, uploads to `/opt/codery/codery-ci`, restarts codery-mcp |
 
 All workflows also have `workflow_dispatch` for manual triggering.
 
@@ -317,29 +317,31 @@ All components follow [semantic versioning](https://semver.org). Pre-1.0: minor 
 ## Project Structure
 
 ```
-AGENTS.md                   # Copied INTO the sandbox — OpenCode reads this
-opencode.json               # OpenCode config — copied into sandbox image
-CLAUDE.md                   # This file — for LLMs working on the infrastructure
+AGENTS.md                   # This file — for agents working on the infrastructure
+opencode.json               # OpenCode config — synced into sandbox projects dir on deploy
 
 containers/
   sandbox/
-    Dockerfile              # Sandbox image (OpenCode + code-server)
+    Dockerfile.base         # Base sandbox image (tools, deps)
     service.yml             # Declarative config for the sandbox container
-    supervisor/
-      supervisord.conf      # Runs as gem (drops from root via user=gem)
-      conf.d/
-        opencode.conf       # Starts `opencode serve` on port 3000
-        code-server.conf    # Starts code-server on port 7000
+    agents_file             # Copied INTO the sandbox as AGENTS.md — OpenCode reads this
+    opencode-global-agents.md  # OpenCode global agents config — copied into sandbox image
     docker-entrypoint.d/
       10-fix-home.sh        # Fixes /home/gem ownership
+      15-render-domain.sh   # Renders domain into config
       20-github-auth.sh     # Authenticates gh CLI via GitHub App
+      25-openrouter-auth.sh # Configures OpenRouter API key
       30-init-projects.sh   # Ensures /home/gem/projects exists
+      40-start-sshd.sh      # Starts sshd
+      50-gen-ssh-key.sh     # Generates SSH host keys if missing
+      60-claude-mcp.sh      # Installs Claude MCP servers
     scripts/
-      entrypoint.sh         # Runs entrypoint.d/ scripts, then exec supervisord
+      entrypoint.sh         # Runs entrypoint.d/ scripts, then exec launchy
       github-app-token.sh   # Generates a GitHub App installation token
       github-push.sh        # Wraps git push with App auth
-    agents-skills/           # Vendored caveman skills
-    bin/                     # launchy process supervisor
+    agents-skills/          # Vendored caveman skills
+    bin/
+      launchy               # Process supervisor (replaces supervisord in sandbox)
 
   apps/
     Dockerfile              # Apps image (project web servers)
@@ -376,6 +378,14 @@ system/orchestrator/        # CoderyCI source (Rust)
     images.rs               # GHCR pull and prune
     state.rs                # Read/write active color
     preflight.rs            # Pre-deploy checks
+    daemon.rs               # Daemon / service-runner mode
+    deploy_lock.rs          # Exclusive deploy lock
+    mcp.rs                  # MCP server (CoderyCI MCP tool handlers)
+    nginx.rs                # Nginx config generation for apps container
+    service_def.rs          # Service YAML parsing and validation
+    tcp_proxy.rs            # TCP proxy for stable SSH port (2222 → active color)
+    ui.rs                   # Terminal UI for deploy progress
+    validate.rs             # `codery-ci validate` subcommand
 
 hosting/
   cloud-init.yaml           # Cloud-init for VPS provisioning
@@ -417,7 +427,7 @@ The host is an Ubuntu VPS (any provider — see `hosting/examples/`). Key paths:
 | `/opt/codery/state/` | Active color per service |
 | `/opt/codery/projects/` | Shared project files |
 | `/opt/codery/proxy/apps-routes.json` | Live app routing table (read by CoderyCI at deploy time) |
-| `/opt/codery/proxy/sandbox-routes.json` | Live sandbox routing table (extra services beyond OpenCode+code-server) |
+| `/opt/codery/proxy/sandbox-routes.json` | Live sandbox routing table (extra services beyond OpenCode) |
 | `/opt/codery/github-app.pem` | GitHub App private key (root-owned, 600) |
 | `/opt/codery/codery-ci` | The CoderyCI binary |
 | `/opt/codery/services/` | Synced service YAML definitions |
