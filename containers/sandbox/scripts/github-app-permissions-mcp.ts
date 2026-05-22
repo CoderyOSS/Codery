@@ -275,7 +275,112 @@ const TOOLS = [
       required: ["org", "name"],
     },
   },
+  {
+    name: "cut_release",
+    description:
+      "Bump the version in Cargo.toml, commit+push to main, then trigger the build workflow.\n\n" +
+      "BEFORE calling this tool: review git commits since the last release tag (trailhead-service-v*) " +
+      "to determine the correct semver bump type. Use the GitHub API or git log to inspect recent changes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: {
+          type: "string",
+          description: "GitHub org or user owning the repo (e.g. 'CoderyOSS')",
+        },
+        repo: {
+          type: "string",
+          description: "Repository name (e.g. 'Trailhead')",
+        },
+        bump: {
+          type: "string",
+          description:
+            "Semver bump type. Choose based on changes since the last release:\n" +
+            "- 'patch': bug fixes, docs, config changes, dependency updates — no new user-visible features\n" +
+            "- 'minor': new features, new API endpoints, new MCP tools — backward compatible\n" +
+            "- 'major': breaking changes, removed endpoints, incompatible schema/API changes",
+        },
+        message: {
+          type: "string",
+          description: "Short commit message summarising what is being released (used as the git commit message)",
+        },
+      },
+      required: ["account", "repo", "bump", "message"],
+    },
+  },
 ];
+
+async function cutRelease(
+  account: string,
+  repo: string,
+  bump: string,
+  message: string,
+): Promise<{
+  old_version: string;
+  new_version: string;
+  commit_sha: string;
+  triggered: boolean;
+}> {
+  const { token } = await generateInstallationToken(account);
+  const owner = account;
+
+  const filePath = "crates/trailhead-service/Cargo.toml";
+  const fileData = (await githubAPI(
+    `/repos/${owner}/${repo}/contents/${filePath}`,
+    {},
+    token,
+  )) as { content: string; sha: string };
+
+  const content = Buffer.from(fileData.content.replace(/\n/g, ""), "base64").toString("utf-8");
+  const sha = fileData.sha;
+
+  const match = content.match(/^version = "(\d+)\.(\d+)\.(\d+)"/m);
+  if (!match) {
+    throw new Error('Could not find version = "X.Y.Z" in Cargo.toml');
+  }
+  let [, major, minor, patch] = match.map(Number);
+  const oldVersion = `${major}.${minor}.${patch}`;
+
+  if (bump === "major") { major++; minor = 0; patch = 0; }
+  else if (bump === "minor") { minor++; patch = 0; }
+  else if (bump === "patch") { patch++; }
+  else { throw new Error(`Unknown bump type: ${bump}. Must be major, minor, or patch`); }
+
+  const newVersion = `${major}.${minor}.${patch}`;
+  const newContent = content.replace(
+    /^version = "\d+\.\d+\.\d+"/m,
+    `version = "${newVersion}"`,
+  );
+
+  const updateData = (await githubAPI(
+    `/repos/${owner}/${repo}/contents/${filePath}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: `${message}\n\nBumps version ${oldVersion} → ${newVersion}`,
+        content: Buffer.from(newContent, "utf-8").toString("base64"),
+        sha,
+        branch: "main",
+      }),
+    },
+    token,
+  )) as { commit: { sha: string } };
+
+  const commitSha = updateData.commit.sha;
+
+  await githubAPI(
+    `/repos/${owner}/${repo}/actions/workflows/build.yml/dispatches`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ref: "main" }),
+    },
+    token,
+  );
+
+  return { old_version: oldVersion, new_version: newVersion, commit_sha: commitSha, triggered: true };
+}
 
 async function handleMessage(msg: any) {
   const { id, method, params } = msg;
@@ -319,6 +424,9 @@ async function handleMessage(msg: any) {
             description: args.description,
             auto_init: args.auto_init,
           });
+          break;
+        case "cut_release":
+          result = await cutRelease(args.account, args.repo, args.bump, args.message);
           break;
         default:
           return sendError(id, -32601, `Unknown tool: ${name}`);
