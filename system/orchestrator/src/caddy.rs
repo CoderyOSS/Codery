@@ -140,7 +140,7 @@ fn load_routes_file(path: &str) -> Result<Vec<AppRoute>> {
 
 /// Load host-level routes from HOST_ROUTES JSON. If the file doesn't exist,
 /// returns a default set (MCP + CI UI) so existing installs keep working.
-fn load_host_routes() -> Result<Vec<HostRoute>> {
+pub fn load_host_routes() -> Result<Vec<HostRoute>> {
     let path = config::HOST_ROUTES;
     if !std::path::Path::new(path).exists() {
         return Ok(vec![

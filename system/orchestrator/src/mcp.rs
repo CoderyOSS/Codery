@@ -283,37 +283,21 @@ impl OrchestratorMcp {
             }
         }
 
-        // Host-level routes from host-routes.json.
-        let host_path = config::HOST_ROUTES;
-        if std::path::Path::new(host_path).exists() {
-            let host_routes_data = std::fs::read_to_string(host_path)
-                .map_err(|e| tool_err(format!("failed to read {}: {}", host_path, e)))?;
-            let host_routes: Vec<caddy::HostRoute> = serde_json::from_str(&host_routes_data)
-                .map_err(|e| tool_err(format!("failed to parse {}: {}", host_path, e)))?;
-            for route in host_routes {
-                let fqdn = if route.subdomain.contains('.') {
-                    route.subdomain
-                } else {
-                    format!("{}.{}", route.subdomain, domain)
-                };
-                routes.push(RouteEntry {
-                    subdomain: fqdn,
-                    host_port: route.port,
-                    container_port: None,
-                    service: "host".to_string(),
-                    color: None,
-                    note: None,
-                });
-            }
-        } else {
-            // Defaults — keep existing installs working without host-routes.json.
+        // Host-level routes — shared loader with caddy.rs (consistent defaults).
+        let host_routes = caddy::load_host_routes().map_err(|e| tool_err(e.to_string()))?;
+        for route in &host_routes {
+            let fqdn = if route.subdomain.contains('.') {
+                route.subdomain.clone()
+            } else {
+                format!("{}.{}", route.subdomain, domain)
+            };
             routes.push(RouteEntry {
-                subdomain: config::mcp_host(&domain),
-                host_port: config::MCP_PORT,
+                subdomain: fqdn,
+                host_port: route.port,
                 container_port: None,
                 service: "host".to_string(),
                 color: None,
-                note: Some("CoderyCI MCP API (this server)".to_string()),
+                note: None,
             });
         }
 
