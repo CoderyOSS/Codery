@@ -3,7 +3,7 @@ name: Sync Routes
 on:
   push:
     branches: [main]
-    paths: ['proxy/apps-routes.json']
+    paths: ['proxy/apps-routes.json', 'proxy/host-routes.json']
   workflow_dispatch:
 
 jobs:
@@ -28,4 +28,5 @@ jobs:
 
           $SSH "mkdir -p /opt/codery/proxy"
           $SCP proxy/apps-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/apps-routes.json
+          $SCP proxy/host-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/host-routes.json
           $SSH "/opt/codery/codery-ci reload-routes 2>&1"

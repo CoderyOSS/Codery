@@ -36,6 +36,9 @@ pub const CADDY_ADMIN_PORT: u16 = 2019;
 
 pub const MCP_PORT: u16 = 4040;
 pub const UI_PORT: u16 = 4041;
+/// Host-level route definitions: subdomain → host_port.
+/// Read by caddy.rs and mcp.rs. Added to Caddyfile without container/color context.
+pub const HOST_ROUTES: &str = "/opt/codery/proxy/host-routes.json";
 const DEFAULT_DOMAIN: &str = "example.com";
 
 /// Read DOMAIN_NAME from /opt/codery/.env. Returns DEFAULT_DOMAIN if not set.
@@ -63,6 +66,7 @@ pub fn mcp_host(domain: &str) -> String {
     format!("mcp.{}", domain)
 }
 
+#[allow(dead_code)]
 pub fn ui_host(domain: &str) -> String {
     format!("ci.{}", domain)
 }

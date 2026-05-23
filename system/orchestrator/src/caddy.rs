@@ -16,6 +16,14 @@ pub struct AppRoute {
     pub internal_port: Option<u16>,
 }
 
+/// Host-level route loaded from host-routes.json. Simple reverse-proxy to a
+/// host process — no container, no port scheme, no color.
+#[derive(Deserialize, Serialize)]
+pub struct HostRoute {
+    pub subdomain: String,
+    pub port: u16,
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Regenerate /etc/caddy/Caddyfile from all service YAMLs and reload Caddy.
@@ -93,10 +101,18 @@ pub fn generate_from_defs(
         }
     }
 
-    // MCP server — fixed host process, not a container, no color formula.
-    caddy.push_str(&caddy_block(&config::mcp_host(domain), config::MCP_PORT));
-    // Rollback UI server — fixed host process, not a container, no color formula.
-    caddy.push_str(&caddy_block(&config::ui_host(domain), config::UI_PORT));
+    // Host-level routes — reverse-proxy to fixed host ports (no container/color scheme).
+    // Defaults to MCP + CI UI if host-routes.json doesn't exist, so existing
+    // installs don't break when upgrading to this version of codery-ci.
+    let host_routes = load_host_routes()?;
+    for route in &host_routes {
+        let fqdn = if route.subdomain.contains('.') {
+            route.subdomain.clone()
+        } else {
+            format!("{}.{}", route.subdomain, domain)
+        };
+        caddy.push_str(&caddy_block(&fqdn, route.port));
+    }
 
     Ok(caddy)
 }
@@ -120,6 +136,22 @@ fn load_routes_file(path: &str) -> Result<Vec<AppRoute>> {
     }
     let data = fs::read_to_string(path).with_context(|| format!("failed to read {}", path))?;
     serde_json::from_str(&data).with_context(|| format!("failed to parse {}", path))
+}
+
+/// Load host-level routes from HOST_ROUTES JSON. If the file doesn't exist,
+/// returns a default set (MCP + CI UI) so existing installs keep working.
+fn load_host_routes() -> Result<Vec<HostRoute>> {
+    let path = config::HOST_ROUTES;
+    if !std::path::Path::new(path).exists() {
+        return Ok(vec![
+            HostRoute { subdomain: "mcp".to_string(), port: config::MCP_PORT },
+            HostRoute { subdomain: "ci".to_string(), port: config::UI_PORT },
+        ]);
+    }
+    let data = fs::read_to_string(path).with_context(|| format!("failed to read {}", path))?;
+    let routes: Vec<HostRoute> = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse {}", path))?;
+    Ok(routes)
 }
 
 // ── Caddy process management ──────────────────────────────────────────────────
