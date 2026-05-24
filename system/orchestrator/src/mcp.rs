@@ -1137,8 +1137,8 @@ impl OrchestratorMcp {
             "status": "running",
             "guidance": {
                 "what": "App started instantly via Launchy. No container rebuild.",
-                "warning": "Runtime apps survive container restarts but are LOST on blue/green deploys unless also in devcontainer.json",
-                "to_make_permanent": "Add to .devcontainer/devcontainer.json under customizations.codery.apps, then push to main",
+                "persistence": "Runtime apps persist across container restarts AND blue/green redeploys (configs stored on host bind mounts)",
+                "to_remove": "remove_app name='{}' — stops process, deletes config, removes route",
                 "to_check": "get_app_status shows per-app process state",
                 "to_read_logs": "read_container_file service='apps' path='/var/log/launchy/{name}.log'"
             }
@@ -1292,8 +1292,7 @@ impl OrchestratorMcp {
         let response = json!({
             "services": services,
             "guidance": {
-                "build_vs_runtime": "build = baked into image (survives deploys). runtime = added via add_app (lost on deploys).",
-                "to_make_permanent": "Add runtime apps to .devcontainer/devcontainer.json, push to main",
+                "build_vs_runtime": "build = baked into image. runtime = added via add_app (persists across redeploys on host bind mounts).",
                 "to_read_logs": "read_container_file service='apps' path='/var/log/launchy/{name}.log'",
                 "to_add": "add_app name='myapp' subdomain='myapp' internal_port=3001 command='...' directory='...'"
             }
@@ -1445,16 +1444,10 @@ add_app name='myapp' subdomain='myapp' internal_port=3001 command='bun run start
 Pre-flight checks: directory must exist, port must be free, name must be unique.
 The app starts immediately. No container rebuild needed.
 
-**Warning:** Runtime apps (added via `add_app`) survive container restarts but are **lost on blue/green deploys** unless also declared in devcontainer.json.
-
-### Make an app permanent (survives deploys)
-
-Add to `.devcontainer/devcontainer.json` under `customizations.codery.apps`:
-```json
-{"name": "myapp", "subdomain": "myapp", "internal_port": 3001, "command": "bun run start", "directory": "/home/gem/projects/myapp"}
-```
-
-Push to `main` — triggers Build Apps workflow (~8 min). App is baked into the image.
+**Runtime apps persist across container restarts and blue/green redeploys.**
+Configs are stored on host bind mounts (`/opt/codery/apps-launchy.d/` for Launchy,
+`/opt/codery/proxy/apps-routes.json` for routing, `/opt/codery/proxy/apps-nginx.conf`
+for Nginx). Launchy reads `include_dirs` on startup, so runtime apps auto-restore.
 
 ### Remove an app
 
