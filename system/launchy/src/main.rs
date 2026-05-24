@@ -43,6 +43,7 @@ struct Config {
     #[serde(default)]
     include_dirs: Vec<String>,
     status_file: Option<String>,
+    #[serde(default)]
     services: Vec<ServiceConfig>,
 }
 
