@@ -7,4 +7,5 @@ for script in /docker-entrypoint.d/*.sh; do
     "$script"
   fi
 done
-exec /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
+echo "[apps] Starting Launchy process manager"
+exec /sbin/launchy /etc/launchy/config.json

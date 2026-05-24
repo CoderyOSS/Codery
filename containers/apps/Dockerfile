@@ -10,7 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx \
     pkg-config \
     python3 \
-    supervisor \
     openssh-client \
     openssh-server \
     git \
@@ -41,27 +40,21 @@ RUN chmod +x /usr/local/bin/ssh-agent-add-keys.sh
 
 RUN ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null
 
-# gem user (uid 1000) — same uid as sandbox, owns the shared projects volume.
-# Ubuntu 24.04 ships an 'ubuntu' user at uid 1000; rename it to 'gem'.
 RUN usermod -l gem -d /home/gem -m ubuntu && groupmod -n gem ubuntu \
     && passwd -u gem 2>/dev/null || usermod -p '*' gem \
     && echo "gem ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gem \
     && chmod 440 /etc/sudoers.d/gem
 
-# sshd — accepts key from sandbox via AuthorizedKeysCommand on shared volume.
 COPY containers/apps/sshd_config /etc/ssh/sshd_config
 COPY containers/apps/scripts/sandbox-key-lookup /usr/local/bin/sandbox-key-lookup
 RUN chmod +x /usr/local/bin/sandbox-key-lookup && mkdir -p /run/sshd
 
-# Nginx internal reverse proxy (routes by Host header on port 8080).
 COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /etc/nginx/conf.d
 
-RUN mkdir -p /etc/supervisor/projects.d
-
-COPY containers/apps/supervisor/supervisord.conf /etc/supervisor/supervisord.conf
-COPY containers/apps/supervisor/projects.conf /etc/supervisor/projects.conf
-COPY containers/apps/supervisor/conf.d/ /etc/supervisor/conf.d/
+COPY containers/apps/launchy/config.json /etc/launchy/config.json
+COPY containers/apps/launchy/built-in/ /etc/launchy/built-in/
+RUN mkdir -p /etc/launchy/apps.d /var/log/launchy /run
 
 COPY containers/apps/docker-entrypoint.d/ /docker-entrypoint.d/
 RUN chmod +x /docker-entrypoint.d/*.sh
@@ -72,7 +65,8 @@ RUN chmod +x /entrypoint.sh
 COPY containers/apps/scripts/healthcheck.sh /usr/local/bin/healthcheck
 RUN chmod +x /usr/local/bin/healthcheck
 
-RUN mkdir -p /var/log/supervisor
+COPY target/launchy /sbin/launchy
+RUN chmod +x /sbin/launchy
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
     CMD /usr/local/bin/healthcheck
