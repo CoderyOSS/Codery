@@ -48,8 +48,24 @@ jobs:
         with:
           install: true
 
-      - name: Generate supervisord confs from devcontainer.json
-        run: python3 containers/apps/scripts/gen-supervisor-conf.py containers/apps/supervisor/projects.d
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get install -y musl-tools
+
+      - name: Build Launchy for musl
+        run: cargo build --manifest-path system/launchy/Cargo.toml --release --target x86_64-unknown-linux-musl
+
+      - name: Copy Launchy binary for Docker build
+        run: |
+          mkdir -p target
+          cp system/launchy/target/x86_64-unknown-linux-musl/release/launchy target/launchy
+
+      - name: Generate Launchy configs from devcontainer.json
+        run: python3 containers/apps/scripts/gen-launchy-conf.py containers/apps/launchy/built-in
 
       - name: Generate apps-routes.json from devcontainer.json
         run: python3 containers/apps/scripts/gen-apps-routes.py proxy/apps-routes.json
@@ -92,7 +108,7 @@ jobs:
           SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
           SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
 
-          $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy /opt/codery/apps-supervisor.d /opt/codery/state"
+          $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy /opt/codery/apps-launchy.d /opt/codery/state"
           cat containers/apps/service.yml | $SSH "sudo tee /opt/codery/services/apps.yml"
           $SCP proxy/apps-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/apps-routes.json
 
