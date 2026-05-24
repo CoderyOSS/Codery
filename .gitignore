@@ -6,6 +6,7 @@ workspace/
 .worktrees/
 .opencode/plans/
 system/orchestrator/target/
+system/launchy/target/
 *.pem
 *.key
 debug/
