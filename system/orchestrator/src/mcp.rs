@@ -32,6 +32,7 @@ struct RouteEntry {
     subdomain: String,
     host_port: u16,
     container_port: Option<u16>,
+    internal_port: Option<u16>,
     service: String,
     color: Option<String>,
     note: Option<String>,
@@ -249,6 +250,7 @@ impl OrchestratorMcp {
                         subdomain: fqdn,
                         host_port,
                         container_port: Some(port.container_port),
+                        internal_port: None,
                         service: def.service.clone(),
                         color: Some(color.clone()),
                         note: None,
@@ -260,7 +262,7 @@ impl OrchestratorMcp {
             if let Some(routes_file) = &def.routes_file {
                 if let Ok(data) = std::fs::read_to_string(routes_file) {
                     #[derive(serde::Deserialize)]
-                    struct Row { subdomain: String, port: u16 }
+                    struct Row { subdomain: String, port: u16, internal_port: Option<u16> }
                     if let Ok(rows) = serde_json::from_str::<Vec<Row>>(&data) {
                         for row in rows {
                             let fqdn = if row.subdomain.contains('.') {
@@ -273,6 +275,7 @@ impl OrchestratorMcp {
                                 subdomain: fqdn,
                                 host_port,
                                 container_port: Some(row.port),
+                                internal_port: row.internal_port,
                                 service: def.service.clone(),
                                 color: Some(color.clone()),
                                 note: None,
@@ -295,6 +298,7 @@ impl OrchestratorMcp {
                 subdomain: fqdn,
                 host_port: route.port,
                 container_port: None,
+                internal_port: None,
                 service: "host".to_string(),
                 color: None,
                 note: None,
