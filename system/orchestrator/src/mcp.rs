@@ -870,7 +870,7 @@ impl OrchestratorMcp {
             tool_ok(format!(
                 "{}\n\n---\nGuidance: Launchy status for apps container. Use get_app_status for structured output.",
                 output
-            ));
+            ))
         } else {
             let output = container_exec(&service, &["supervisorctl", "status"])
                 .await
@@ -878,7 +878,7 @@ impl OrchestratorMcp {
             tool_ok(format!(
                 "{}\n\n---\nGuidance: Process status inside {} container.",
                 output, service
-            ));
+            ))
         }
     }
 
