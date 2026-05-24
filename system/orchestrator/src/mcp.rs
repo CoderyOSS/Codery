@@ -854,24 +854,33 @@ impl OrchestratorMcp {
 
     // ── Diagnostic tools ──────────────────────────────────────────────────────
 
-    /// Run `supervisorctl status` inside the active container for a service.
-    /// Shows whether each managed process (opencode, code-server, ttyd, etc.)
-    /// is RUNNING, STOPPED, FATAL, or EXITED, with uptime or exit info.
+    /// Read Launchy status file or run `supervisorctl status` inside a container.
     #[tool(
-        description = "Run 'supervisorctl status' inside the active container for a service. \
-                        Shows process state (RUNNING/STOPPED/FATAL) and uptime for each program \
-                        managed by supervisord inside the container."
+        description = "Get process status inside a container. For apps: reads Launchy status file. \
+                        For other services: falls back to supervisorctl. Shows process state and uptime."
     )]
     async fn get_supervisor_status(
         &self,
         Parameters(ServiceParam { service }): Parameters<ServiceParam>,
     ) -> Result<CallToolResult, McpError> {
-        let output = container_exec(&service, &["supervisorctl", "status"])
-            .await
-            .map_err(|e| tool_err(e))?;
-        tool_ok(format!(
-            "{}\n\n---\nGuidance: Shows processes inside the container managed by Launchy.",
-            output
+        if service == "apps" {
+            let output = container_exec(&service, &["cat", "/run/launchy-status.json"])
+                .await
+                .map_err(|e| tool_err(e))?;
+            tool_ok(format!(
+                "{}\n\n---\nGuidance: Launchy status for apps container. Use get_app_status for structured output.",
+                output
+            ));
+        } else {
+            let output = container_exec(&service, &["supervisorctl", "status"])
+                .await
+                .map_err(|e| tool_err(e))?;
+            tool_ok(format!(
+                "{}\n\n---\nGuidance: Process status inside {} container.",
+                output, service
+            ));
+        }
+    }
         ))
     }
 
