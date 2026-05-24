@@ -881,8 +881,6 @@ impl OrchestratorMcp {
             ));
         }
     }
-        ))
-    }
 
     /// Show the Docker port mappings for the active container of a service.
     /// Confirms which host ports are bound and to which container ports.
