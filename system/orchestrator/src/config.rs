@@ -8,6 +8,9 @@ pub const NGINX_CONFIG: &str = "/opt/codery/proxy/apps-nginx.conf";
 /// Host directory bind-mounted into apps container at /etc/supervisor/projects.d/.
 /// MCP add_app/remove_app write .conf files here; supervisorctl picks them up.
 pub const APPS_SUPERVISOR_DIR: &str = "/opt/codery/apps-supervisor.d";
+/// Host directory bind-mounted into apps container at /etc/launchy/apps.d/.
+/// MCP add_app/remove_app write JSON service configs here; Launchy picks them up on SIGHUP.
+pub const APPS_LAUNCHY_DIR: &str = "/opt/codery/apps-launchy.d";
 /// Default sandbox extra-routes path. Referenced by YAML, not Rust.
 #[allow(dead_code)]
 pub const SANDBOX_ROUTES: &str = "/opt/codery/proxy/sandbox-routes.json";
