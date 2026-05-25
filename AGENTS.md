@@ -212,9 +212,17 @@ Declare in `.devcontainer/devcontainer.json` (`customizations.codery.apps` array
 
 ---
 
-### SSH from sandbox to apps
+### SSH Access
 
-`ssh gem@apps` from inside the sandbox — no flags, no credentials needed. Works via Docker network alias `apps` on `codery-net`. Security: only reachable from inside the Docker network.
+**External → sandbox:** `ssh -p 2222 gem@<host>` from any machine on the tailnet.
+
+Connection chain: `client → :2222 (codery-ci TCP proxy) → :10xx2 (docker) → :22 (sshd)`. The TCP proxy reads the active color from state and forwards to the correct host port (blue=10022, green=20022).
+
+Prerequisite: `ufw allow 2222/tcp` on the host. Port 2222 is not in the default `cloud-init.yaml` firewall rules.
+
+sshd runs as a launchy-managed service (`devcontainer.json`, `user: "root"`, `restart: "always"`, `priority: 10`, flags `-D -e`). The entrypoint script `40-start-sshd.sh` only prepares host keys and authorized_keys — it does not start sshd.
+
+**Sandbox → apps:** `ssh gem@apps` from inside the sandbox — no flags, no credentials needed. Works via Docker network alias `apps` on `codery-net`. Security: only reachable from inside the Docker network.
 
 ---
 
@@ -267,7 +275,7 @@ investigate manually.
 | Workflow | Triggers on push to `master` when... | What it does |
 |----------|---------------------------------------|--------------|
 | Build Sandbox | `containers/sandbox/**`, `opencode.json`, `examples/Dockerfile.sandbox`, `.devcontainer/devcontainer.json` | Builds image, deploys via CoderyCI |
-| Build Apps | `containers/apps/**`, `.devcontainer/devcontainer.json` | Builds image, deploys via CoderyCI |
+| Build Apps | `workflow_dispatch` only | Builds image, deploys via CoderyCI |
 | Sync Routes | `proxy/apps-routes.json` | Syncs route file, runs `codery-ci reload-routes` (~30s, no container rebuild) |
 | Build Orchestrator | `workflow_dispatch` only | Compiles musl binary, uploads to `/opt/codery/codery-ci`, restarts codery-mcp |
 
@@ -332,7 +340,7 @@ containers/
       20-github-auth.sh     # Authenticates gh CLI via GitHub App
       25-openrouter-auth.sh # Configures OpenRouter API key
       30-init-projects.sh   # Ensures /home/gem/projects exists
-      40-start-sshd.sh      # Starts sshd
+      40-start-sshd.sh      # Prepares sshd host keys and authorized_keys (sshd managed by launchy)
       50-gen-ssh-key.sh     # Generates SSH host keys if missing
       60-claude-mcp.sh      # Installs Claude MCP servers
     scripts/
@@ -393,6 +401,8 @@ hosting/
 
 docs/
   customizing.md            # Customization guide (GitHub App setup, etc.)
+
+SETUP.md                      # VPS installation guide — start here for new installs
 
 .github/workflows/
   deploy-sandbox.yml        # Sandbox CI/CD

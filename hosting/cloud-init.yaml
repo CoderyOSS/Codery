@@ -40,6 +40,7 @@ runcmd:
   - ufw allow ssh
   - ufw allow 80/tcp
   - ufw allow 443/tcp
+  - ufw allow 2222/tcp
   - ufw --force enable
 
   # Create app directory owned by deploy user
