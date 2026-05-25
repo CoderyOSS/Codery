@@ -17,6 +17,13 @@
             "restart": "always"
           },
           {
+            "name": "sshd",
+            "command": ["/usr/sbin/sshd", "-D", "-e"],
+            "user": "root",
+            "restart": "always",
+            "priority": 10
+          },
+          {
             "name": "tmux",
             "command": ["bash", "-c", "tmux new-session -d -s main 2>/dev/null || true; exec sleep infinity"],
             "user": "gem",
