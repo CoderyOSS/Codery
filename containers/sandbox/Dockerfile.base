@@ -44,7 +44,6 @@ RUN mkdir -p /var/run/sshd && \
         'UsePAM no' \
         'PrintMotd no' \
         'PrintLastLog no' \
-        'Subsystem sftp /usr/lib/openssh/sftp-server' \
     > /etc/ssh/sshd_config.d/sandbox.conf
 
 # Launchy — PID 1 process supervisor (replaces supervisord)

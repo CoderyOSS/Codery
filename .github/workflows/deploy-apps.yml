@@ -1,11 +1,6 @@
 name: Build Apps
 
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - 'containers/apps/**'
-      - '.devcontainer/devcontainer.json'
   workflow_dispatch:
 
 env:
