@@ -49,8 +49,6 @@ vim.opt.rtp:prepend(lazypath)
 require("lazy").setup({
   { "catppuccin/nvim", name = "catppuccin", priority = 1000 },
 
-  { "neovim/nvim-lspconfig" },
-
   {
     "saghen/blink.cmp",
     version = "*",
@@ -67,18 +65,8 @@ require("lazy").setup({
 
   {
     "nvim-treesitter/nvim-treesitter",
+    lazy = false,
     build = ":TSUpdate",
-    config = function()
-      require("nvim-treesitter.configs").setup({
-        ensure_installed = {
-          "typescript", "tsx", "rust", "python",
-          "json", "yaml", "toml", "bash", "markdown", "lua",
-        },
-        auto_install = true,
-        highlight = { enable = true },
-        indent = { enable = true },
-      })
-    end,
   },
 
   {
@@ -181,13 +169,18 @@ vim.api.nvim_create_autocmd("LspAttach", {
   end,
 })
 
-local capabilities = require("blink.cmp").get_lsp_capabilities()
-local lspconfig = require("lspconfig")
+vim.api.nvim_create_autocmd("FileType", {
+  callback = function()
+    pcall(vim.treesitter.start)
+  end,
+})
 
-lspconfig.ts_ls.setup({ capabilities = capabilities })
-lspconfig.rust_analyzer.setup({ capabilities = capabilities })
-lspconfig.basedpyright.setup({ capabilities = capabilities })
-lspconfig.lua_ls.setup({
+local capabilities = require("blink.cmp").get_lsp_capabilities()
+
+vim.lsp.config("ts_ls", { capabilities = capabilities })
+vim.lsp.config("rust_analyzer", { capabilities = capabilities })
+vim.lsp.config("basedpyright", { capabilities = capabilities })
+vim.lsp.config("lua_ls", {
   capabilities = capabilities,
   settings = {
     Lua = {
@@ -197,11 +190,14 @@ lspconfig.lua_ls.setup({
   },
 })
 
+vim.lsp.enable({ "ts_ls", "rust_analyzer", "basedpyright", "lua_ls" })
+
 vim.cmd.colorscheme("catppuccin-mocha")
 NVIMEOF
 
 chown -R gem:gem /home/gem/.config
 
-su - gem -c 'nvim --headless "+Lazy! sync" "+TSInstallSync! typescript tsx rust python json yaml toml bash markdown lua" +qa 2>&1 || true'
+su - gem -c 'nvim --headless "+Lazy! sync" +qa 2>&1 || true'
+su - gem -c 'nvim --headless -c "lua require(\"nvim-treesitter\").install({\"typescript\",\"tsx\",\"rust\",\"python\",\"json\",\"yaml\",\"toml\",\"bash\",\"markdown\",\"lua\"}):wait(300000)" +qa 2>&1 || true'
 
 chown -R gem:gem /home/gem/.local/share/nvim /home/gem/.cache/nvim 2>/dev/null || true
