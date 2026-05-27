@@ -1,5 +1,0 @@
-[
-  {"subdomain": "trailhead", "port": 4050},
-  {"subdomain": "mcp", "port": 4040},
-  {"subdomain": "ci", "port": 4041}
-]

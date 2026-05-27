@@ -3,6 +3,7 @@ use anyhow::Result;
 mod caddy;
 mod config;
 mod daemon;
+mod db;
 mod deploy;
 mod deploy_lock;
 mod images;
@@ -91,8 +92,9 @@ async fn main() -> Result<()> {
             println!("[validate] Passed — safe to deploy {} @ {}", service, sha);
         }
         Some("reload-routes") => {
-            // Regenerate Caddyfile from all service YAMLs and reload Caddy.
-            // Use this when proxy/apps-routes.json changes without a container deploy.
+            let conn = db::open()?;
+            db::init(&conn)?;
+            db::sync_launchy(&conn)?;
             caddy::apply_all()?;
             nginx::generate_and_reload().await?;
             println!("[routes] Reloaded Caddyfile and Nginx");

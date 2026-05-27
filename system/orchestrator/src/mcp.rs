@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{caddy, config, deploy, images, nginx, preflight, service_def::ServiceDef, state};
+use crate::{caddy, config, db, deploy, images, nginx, preflight, service_def::ServiceDef, state};
 
 // ── Data shapes returned by tools ────────────────────────────────────────────
 
@@ -249,87 +249,52 @@ impl OrchestratorMcp {
         let domain = config::load_domain();
 
         let mut services_map = HashMap::new();
-        let mut routes: Vec<RouteEntry> = Vec::new();
-
         for def in &defs {
             let color = state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string());
-            services_map.insert(def.service.clone(), color.clone());
-
-            // Named ports with subdomains (sandbox-style).
-            for port in &def.ports {
-                if let Some(subdomain) = &port.subdomain {
-                    let fqdn = if subdomain.contains('.') {
-                        subdomain.clone()
-                    } else {
-                        format!("{}.{}", subdomain, domain)
-                    };
-                    let host_port = def.port_scheme.host_port(&color, port.container_port);
-                    routes.push(RouteEntry {
-                        subdomain: fqdn,
-                        host_port,
-                        container_port: Some(port.container_port),
-                        internal_port: None,
-                        service: def.service.clone(),
-                        color: Some(color.clone()),
-                        note: None,
-                    });
-                }
-            }
-
-            // Routes file (apps-style).
-            if let Some(routes_file) = &def.routes_file {
-                if let Ok(data) = std::fs::read_to_string(routes_file) {
-                    #[derive(serde::Deserialize)]
-                    struct Row {
-                        subdomain: String,
-                        port: u16,
-                        internal_port: Option<u16>,
-                    }
-                    if let Ok(rows) = serde_json::from_str::<Vec<Row>>(&data) {
-                        for row in rows {
-                            let fqdn = if row.subdomain.contains('.') {
-                                row.subdomain
-                            } else {
-                                format!("{}.{}", row.subdomain, domain)
-                            };
-                            let host_port = def.port_scheme.host_port(&color, row.port);
-                            routes.push(RouteEntry {
-                                subdomain: fqdn,
-                                host_port,
-                                container_port: Some(row.port),
-                                internal_port: row.internal_port,
-                                service: def.service.clone(),
-                                color: Some(color.clone()),
-                                note: None,
-                            });
-                        }
-                    }
-                }
-            }
+            services_map.insert(def.service.clone(), color);
         }
 
-        // Host-level routes — shared loader with caddy.rs (consistent defaults).
-        let host_routes = caddy::load_host_routes().map_err(|e| tool_err(e.to_string()))?;
-        for route in &host_routes {
-            let fqdn = if route.subdomain.contains('.') {
-                route.subdomain.clone()
+        let conn = db::open().map_err(|e| tool_err(e.to_string()))?;
+        db::init(&conn).map_err(|e| tool_err(e.to_string()))?;
+        let unified = db::build_route_map(&conn).map_err(|e| tool_err(e.to_string()))?;
+
+        let route_entries: Vec<RouteEntry> = unified.iter().map(|r| {
+            let fqdn = if r.subdomain.contains('.') {
+                r.subdomain.clone()
             } else {
-                format!("{}.{}", route.subdomain, domain)
+                format!("{}.{}", r.subdomain, domain)
             };
-            routes.push(RouteEntry {
+            let color = services_map.get(&r.target).map(|s| s.as_str());
+            let host_port = match r.target.as_str() {
+                "host" => r.port,
+                "sandbox" => {
+                    let c = color.unwrap_or("blue");
+                    r.port + if c == "blue" { 10000 } else { 20000 }
+                }
+                _ => {
+                    let c = color.unwrap_or("blue");
+                    let def = ServiceDef::load(&r.target).ok();
+                    if let Some(def) = def {
+                        def.port_scheme.host_port(c, r.port)
+                    } else {
+                        r.port
+                    }
+                }
+            };
+            RouteEntry {
                 subdomain: fqdn,
-                host_port: route.port,
-                container_port: None,
-                internal_port: None,
-                service: "host".to_string(),
-                color: None,
+                host_port,
+                container_port: Some(r.port),
+                internal_port: r.internal_port,
+                service: r.target.clone(),
+                color: color.map(|s| s.to_string()),
                 note: None,
-            });
-        }
+            }
+        }).collect();
 
         let table = RoutingTable {
             services: services_map,
-            routes,
+            routes: route_entries,
         };
         let response = json!({
             "routing": table,
@@ -594,12 +559,12 @@ impl OrchestratorMcp {
         tool_ok(json)
     }
 
-    /// Regenerate the Caddyfile from all service YAMLs and reload Caddy.
-    /// No container restart needed.
+    /// Regenerate the Caddyfile from all service YAMLs, routes.yaml,
+    /// and SQLite runtime apps. No container restart needed.
     #[tool(
-        description = "Reload Caddy routing from all service definitions and route JSON files \
-                        (including host-routes.json) without restarting containers. Use after \
-                        editing proxy/apps-routes.json or proxy/host-routes.json."
+        description = "Reload Caddy routing from all service definitions, routes.yaml, and \
+                        SQLite runtime apps without restarting containers. Use after \
+                        editing proxy/routes.yaml."
     )]
     async fn reload_routes(&self) -> Result<CallToolResult, McpError> {
         caddy::apply_all().map_err(|e| tool_err(e.to_string()))?;
@@ -610,7 +575,7 @@ impl OrchestratorMcp {
             "status": "ok",
             "guidance": {
                 "what": "Caddy and Nginx reloaded. No container restart.",
-                "when_to_use": "After editing apps-routes.json or host-routes.json",
+                "when_to_use": "After editing routes.yaml or service YAMLs",
                 "when_not_to_use": "For Dockerfile/service.yml changes — push to main"
             }
         });
@@ -826,9 +791,10 @@ impl OrchestratorMcp {
 
         let mut archive = tar::Archive::new(std::io::Cursor::new(&tar_bytes));
         let mut content = String::new();
-        for entry in archive
+        if let Some(entry) = archive
             .entries()
             .map_err(|e| tool_err(format!("failed to read tar: {}", e)))?
+            .next()
         {
             let mut entry =
                 entry.map_err(|e| tool_err(format!("failed to read tar entry: {}", e)))?;
@@ -836,7 +802,6 @@ impl OrchestratorMcp {
             entry
                 .read_to_string(&mut content)
                 .map_err(|e| tool_err(format!("failed to read file content: {}", e)))?;
-            break;
         }
 
         if content.is_empty() {
@@ -1033,76 +998,48 @@ impl OrchestratorMcp {
             )));
         }
 
-        let routes_path = std::path::Path::new(config::APPS_ROUTES);
-        if routes_path.exists() {
-            let data = std::fs::read_to_string(routes_path)
-                .map_err(|e| tool_err(format!("failed to read apps-routes.json: {}", e)))?;
-            #[derive(serde::Deserialize)]
-            struct Row {
-                internal_port: Option<u16>,
-            }
-            if let Ok(rows) = serde_json::from_str::<Vec<Row>>(&data) {
-                if rows
-                    .iter()
-                    .any(|r| r.internal_port == Some(p.internal_port))
-                {
-                    return Err(tool_err(format!(
-                        "port {} already claimed in apps-routes.json",
-                        p.internal_port
-                    )));
-                }
-            }
-        }
+        let conn = db::open().map_err(|e| tool_err(e.to_string()))?;
+        db::init(&conn).map_err(|e| tool_err(e.to_string()))?;
 
-        let config_path = format!("{}/{}.json", config::APPS_LAUNCHY_DIR, p.name);
-        if std::path::Path::new(&config_path).exists() {
+        if db::port_claimed(&conn, p.internal_port).map_err(|e| tool_err(e.to_string()))? {
             return Err(tool_err(format!(
-                "app '{}' already exists (config at {})",
-                p.name, config_path
+                "port {} already claimed by another app",
+                p.internal_port
             )));
         }
 
-        let launchy_dir = std::path::Path::new(config::APPS_LAUNCHY_DIR);
-        std::fs::create_dir_all(launchy_dir).map_err(|e| {
-            tool_err(format!(
-                "failed to create {}: {}",
-                config::APPS_LAUNCHY_DIR,
-                e
-            ))
-        })?;
-
-        let mut svc = json!({
-            "name": p.name,
-            "command": ["bash", "-c", &p.command],
-            "directory": p.directory,
-            "user": "gem",
-            "restart": "always",
-            "priority": 100
-        });
-        if let Some(env) = &p.env {
-            if !env.is_empty() {
-                svc.as_object_mut()
-                    .unwrap()
-                    .insert("env".to_string(), json!(env));
-            }
+        if db::find_app_by_name(&conn, &p.name).map_err(|e| tool_err(e.to_string()))?.is_some() {
+            return Err(tool_err(format!(
+                "app '{}' already exists",
+                p.name
+            )));
         }
-        let conf_path = launchy_dir.join(format!("{}.json", p.name));
-        let conf_content = serde_json::to_string_pretty(&svc).unwrap() + "\n";
-        std::fs::write(&conf_path, &conf_content)
-            .map_err(|e| tool_err(format!("failed to write Launchy config: {}", e)))?;
+
+        let env_json = p.env.as_ref().and_then(|e| {
+            if e.is_empty() { None } else { Some(serde_json::to_string(e).unwrap()) }
+        });
+
+        let app = db::AppRecord {
+            name: p.name.clone(),
+            subdomain: p.subdomain.clone(),
+            internal_port: p.internal_port,
+            command: p.command.clone(),
+            directory: p.directory.clone(),
+            env: env_json,
+            priority: 100,
+            user: "gem".to_string(),
+            restart: "always".to_string(),
+            created_at: String::new(),
+        };
+
+        db::insert_app(&conn, &app).map_err(|e| tool_err(e.to_string()))?;
+        db::sync_launchy(&conn).map_err(|e| tool_err(e.to_string()))?;
 
         container_exec("apps", &["kill", "-HUP", "1"])
             .await
             .map_err(|e| tool_err(format!("failed to signal Launchy: {}", e)))?;
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        apps_routes_upsert(caddy::AppRoute {
-            subdomain: p.subdomain.clone(),
-            port: 8080,
-            internal_port: Some(p.internal_port),
-        })
-        .map_err(|e| tool_err(e.to_string()))?;
 
         caddy::apply_all().map_err(|e| tool_err(e.to_string()))?;
         nginx::generate_and_reload()
@@ -1135,7 +1072,7 @@ impl OrchestratorMcp {
             "status": "running",
             "guidance": {
                 "what": "App started instantly via Launchy. No container rebuild.",
-                "persistence": "Runtime apps persist across container restarts AND blue/green redeploys (configs stored on host bind mounts)",
+                "persistence": "Runtime apps persist across container restarts AND blue/green redeploys (stored in SQLite)",
                 "to_remove": "remove_app name='{}' — stops process, deletes config, removes route",
                 "to_check": "get_app_status shows per-app process state",
                 "to_read_logs": "read_container_file service='apps' path='/var/log/launchy/{name}.log'"
@@ -1155,25 +1092,26 @@ impl OrchestratorMcp {
         &self,
         Parameters(p): Parameters<RemoveAppParams>,
     ) -> Result<CallToolResult, McpError> {
+        let conn = db::open().map_err(|e| tool_err(e.to_string()))?;
+        db::init(&conn).map_err(|e| tool_err(e.to_string()))?;
+
         let subdomain = p.subdomain.unwrap_or_else(|| p.name.clone());
 
-        let config_path = format!("{}/{}.json", config::APPS_LAUNCHY_DIR, p.name);
-        if !std::path::Path::new(&config_path).exists() {
+        let deleted = db::delete_app(&conn, &p.name).map_err(|e| tool_err(e.to_string()))?;
+        if !deleted {
             return Err(tool_err(format!(
-                "app '{}' not found (no config at {})",
-                p.name, config_path
+                "app '{}' not found in database",
+                p.name
             )));
         }
-        std::fs::remove_file(&config_path)
-            .map_err(|e| tool_err(format!("failed to delete config: {}", e)))?;
+
+        db::sync_launchy(&conn).map_err(|e| tool_err(e.to_string()))?;
 
         container_exec("apps", &["kill", "-HUP", "1"])
             .await
             .map_err(|e| tool_err(format!("failed to signal Launchy: {}", e)))?;
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-        apps_routes_remove(&subdomain).map_err(|e| tool_err(e.to_string()))?;
 
         caddy::apply_all().map_err(|e| tool_err(e.to_string()))?;
         nginx::generate_and_reload()
@@ -1186,7 +1124,6 @@ impl OrchestratorMcp {
             "status": "removed",
             "guidance": {
                 "what": "App stopped, config deleted, route removed.",
-                "note": "If this was a build-time app (in devcontainer.json), it will reappear on next deploy",
                 "to_verify": "list_apps shows remaining apps"
             }
         });
@@ -1194,33 +1131,17 @@ impl OrchestratorMcp {
         tool_ok(json)
     }
 
-    /// List all apps currently registered in apps-routes.json.
+    /// List all apps currently registered in SQLite.
     #[tool(
-        description = "List all apps registered in the apps container (reads apps-routes.json). \
+        description = "List all apps registered in the apps container (reads SQLite). \
                           Returns subdomain, external port (always 8080 → Nginx), and internal_port."
     )]
     async fn list_apps(&self) -> Result<CallToolResult, McpError> {
-        let path = std::path::Path::new(config::APPS_ROUTES);
-        if !path.exists() {
-            let response = json!({
-                "apps": [],
-                "guidance": {
-                    "to_add": "add_app name='myapp' subdomain='myapp' internal_port=3001 command='...' directory='...'",
-                    "to_remove": "remove_app name='myapp'",
-                    "to_check_status": "get_app_status shows per-app process state",
-                    "routing": "Caddy → Nginx (8080) → app process (internal_port)"
-                }
-            });
-            let json =
-                serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
-            return tool_ok(json);
-        }
-        let data = std::fs::read_to_string(path)
-            .map_err(|e| tool_err(format!("failed to read apps-routes.json: {}", e)))?;
-        let routes: Vec<caddy::AppRoute> = serde_json::from_str(&data)
-            .map_err(|e| tool_err(format!("failed to parse apps-routes.json: {}", e)))?;
+        let conn = db::open().map_err(|e| tool_err(e.to_string()))?;
+        db::init(&conn).map_err(|e| tool_err(e.to_string()))?;
+        let apps = db::list_apps(&conn).map_err(|e| tool_err(e.to_string()))?;
         let response = json!({
-            "apps": routes,
+            "apps": apps,
             "guidance": {
                 "to_add": "add_app name='myapp' subdomain='myapp' internal_port=3001 command='...' directory='...'",
                 "to_remove": "remove_app name='myapp'",
@@ -1300,39 +1221,6 @@ impl OrchestratorMcp {
     }
 }
 
-/// Add or replace a route in apps-routes.json (upsert by subdomain).
-fn apps_routes_upsert(route: caddy::AppRoute) -> anyhow::Result<()> {
-    let path = config::APPS_ROUTES;
-    let mut routes: Vec<caddy::AppRoute> = if std::path::Path::new(path).exists() {
-        let data = std::fs::read_to_string(path)?;
-        serde_json::from_str(&data)?
-    } else {
-        vec![]
-    };
-    routes.retain(|r| r.subdomain != route.subdomain);
-    routes.push(route);
-    let content = serde_json::to_string_pretty(&routes)? + "\n";
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, content)?;
-    Ok(())
-}
-
-/// Remove a route from apps-routes.json by subdomain.
-fn apps_routes_remove(subdomain: &str) -> anyhow::Result<()> {
-    let path = config::APPS_ROUTES;
-    if !std::path::Path::new(path).exists() {
-        return Ok(());
-    }
-    let data = std::fs::read_to_string(path)?;
-    let mut routes: Vec<caddy::AppRoute> = serde_json::from_str(&data)?;
-    routes.retain(|r| r.subdomain != subdomain);
-    let content = serde_json::to_string_pretty(&routes)? + "\n";
-    std::fs::write(path, content)?;
-    Ok(())
-}
-
 fn run_check(name: &'static str, f: fn() -> anyhow::Result<()>) -> PreflightCheck {
     match f() {
         Ok(()) => PreflightCheck {
@@ -1407,7 +1295,7 @@ Both containers use **Launchy** (Rust binary) as PID 1:
 |---|---|
 | `add_app` | Hot-add an app: writes Launchy config, registers route, starts process (instant) |
 | `remove_app` | Hot-remove an app: stops process, deletes config, removes route |
-| `list_apps` | List all apps from apps-routes.json |
+| `list_apps` | List all apps from SQLite |
 | `get_app_status` | Per-app status from Launchy (pid, uptime, build vs runtime) |
 
 ### Deploy/Rollback
@@ -1443,9 +1331,9 @@ Pre-flight checks: directory must exist, port must be free, name must be unique.
 The app starts immediately. No container rebuild needed.
 
 **Runtime apps persist across container restarts and blue/green redeploys.**
-Configs are stored on host bind mounts (`/opt/codery/apps-launchy.d/` for Launchy,
-`/opt/codery/proxy/apps-routes.json` for routing, `/opt/codery/proxy/apps-nginx.conf`
-for Nginx). Launchy reads `include_dirs` on startup, so runtime apps auto-restore.
+Configs are stored in SQLite at `/opt/codery/codery.db` and regenerated as
+Launchy JSON files and route configs on every mutation.
+Launchy reads `include_dirs` on startup, so runtime apps auto-restore.
 
 ### Remove an app
 
@@ -1495,7 +1383,7 @@ To add a new container service:
 
 ## When to use reload_routes vs full redeploy
 
-- **Route change only** (new subdomain, edited apps-routes.json) → `reload_routes` (instant)
+- **Route change only** (new subdomain, edited routes.yaml) → `reload_routes` (instant)
 - **Container code, Dockerfile, service YAML, volume change** → push to main (~8 min)
 
 ## This MCP server
@@ -1520,7 +1408,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
     let ct = CancellationToken::new();
 
     let service = StreamableHttpService::new(
-        || Ok(OrchestratorMcp::default()),
+        || Ok(OrchestratorMcp),
         // Stateless mode: no in-memory sessions. Each POST is handled independently.
         // This avoids 404 "session not found" errors when the server restarts and
         // OpenCode tries to reuse a session ID from before the restart. Our server

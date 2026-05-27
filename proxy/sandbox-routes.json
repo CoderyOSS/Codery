@@ -1,4 +1,0 @@
-[
-  {"subdomain": "cli", "port": 7681},
-  {"subdomain": "ops", "port": 3090}
-]

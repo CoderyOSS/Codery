@@ -1,35 +1,13 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
 
 use crate::config;
+use crate::db::{self, UnifiedRoute};
 use crate::service_def::ServiceDef;
 use crate::state;
 
-/// Per-app subdomain→container-port route loaded from apps-routes.json (or test fixtures).
-#[derive(Deserialize, Serialize)]
-pub struct AppRoute {
-    pub subdomain: String,
-    pub port: u16,
-    pub internal_port: Option<u16>,
-}
-
-/// Host-level route loaded from host-routes.json. Simple reverse-proxy to a
-/// host process — no container, no port scheme, no color.
-#[derive(Deserialize, Serialize)]
-pub struct HostRoute {
-    pub subdomain: String,
-    pub port: u16,
-}
-
-// ── Public API ────────────────────────────────────────────────────────────────
-
-/// Regenerate /etc/caddy/Caddyfile from all service YAMLs and reload Caddy.
-///
-/// Each service's active color is read from its state file. If a state file
-/// is missing the service defaults to "blue".
 pub fn apply_all() -> Result<()> {
     let defs = ServiceDef::load_all()?;
     let domain = config::load_domain();
@@ -41,7 +19,10 @@ pub fn apply_all() -> Result<()> {
         })
         .collect();
 
-    let content = generate_from_defs(&defs, &colors, None, &domain)?;
+    let conn = db::open()?;
+    let routes = db::build_route_map(&conn)?;
+
+    let content = generate_from_routes(&routes, &colors, &domain)?;
     fs::write(config::CADDY_CONFIG, &content)
         .with_context(|| format!("failed to write {}", config::CADDY_CONFIG))?;
     reload_caddy()?;
@@ -49,72 +30,52 @@ pub fn apply_all() -> Result<()> {
     Ok(())
 }
 
-// ── Generation ────────────────────────────────────────────────────────────────
-
-/// Generate Caddyfile content from a slice of `ServiceDef` values.
-///
-/// `route_overrides` lets tests inject pre-loaded routes instead of reading
-/// from disk. Pass `None` in production to load from each service's `routes_file`.
-pub fn generate_from_defs(
-    defs: &[ServiceDef],
+pub fn generate_from_routes(
+    routes: &[UnifiedRoute],
     colors: &HashMap<String, String>,
-    route_overrides: Option<&HashMap<String, Vec<AppRoute>>>,
     domain: &str,
 ) -> Result<String> {
     let mut caddy = String::from(
         "{\n    acme_dns cloudflare {$CLOUDFLARE_API_TOKEN}\n}\n",
     );
 
-    for def in defs {
-        let color = colors.get(&def.service).map(|s| s.as_str()).unwrap_or("blue");
-
-        // Named ports with subdomains (sandbox-style services).
-        for port in &def.ports {
-            if let Some(subdomain) = &port.subdomain {
-                let host_port = def.port_scheme.host_port(color, port.container_port);
-                let fqdn = format!("{}.{}", subdomain, domain);
-                caddy.push_str(&caddy_block(&fqdn, host_port));
-            }
-        }
-
-        // Routes file (apps-style services): load JSON routes, apply port_scheme offset.
-        if let Some(routes_file) = &def.routes_file {
-            let routes: Vec<AppRoute> = if let Some(overrides) = route_overrides {
-                // Test path: use injected routes (avoid disk I/O).
-                overrides
-                    .get(&def.service)
-                    .map(|v| v.iter().map(|r| AppRoute { subdomain: r.subdomain.clone(), port: r.port, internal_port: r.internal_port }).collect())
-                    .unwrap_or_default()
-            } else {
-                load_routes_file(routes_file)?
-            };
-
-            for route in &routes {
-                let fqdn = if route.subdomain.contains('.') {
-                    route.subdomain.clone()
-                } else {
-                    format!("{}.{}", route.subdomain, domain)
-                };
-                let host_port = def.port_scheme.host_port(color, route.port);
-                caddy.push_str(&caddy_block(&fqdn, host_port));
-            }
-        }
-    }
-
-    // Host-level routes — reverse-proxy to fixed host ports (no container/color scheme).
-    // Defaults to MCP + CI UI if host-routes.json doesn't exist, so existing
-    // installs don't break when upgrading to this version of codery-ci.
-    let host_routes = load_host_routes()?;
-    for route in &host_routes {
+    for route in routes {
         let fqdn = if route.subdomain.contains('.') {
             route.subdomain.clone()
         } else {
             format!("{}.{}", route.subdomain, domain)
         };
-        caddy.push_str(&caddy_block(&fqdn, route.port));
+
+        let host_port = match route.target.as_str() {
+            "host" => route.port,
+            "sandbox" => {
+                let color = colors.get("sandbox").map(|s| s.as_str()).unwrap_or("blue");
+                sandbox_host_port(color, route.port)
+            }
+            "apps" => {
+                let color = colors.get("apps").map(|s| s.as_str()).unwrap_or("blue");
+                let offset: u16 = if color == "blue" { 0 } else { 10000 };
+                route.port + offset
+            }
+            target => {
+                let c = colors.get(target).map(|s| s.as_str()).unwrap_or("blue");
+                let def = ServiceDef::load(target).ok();
+                if let Some(def) = def {
+                    def.port_scheme.host_port(c, route.port)
+                } else {
+                    route.port
+                }
+            }
+        };
+        caddy.push_str(&caddy_block(&fqdn, host_port));
     }
 
     Ok(caddy)
+}
+
+fn sandbox_host_port(color: &str, container_port: u16) -> u16 {
+    let offset: u16 = if color == "blue" { 10000 } else { 20000 };
+    container_port + offset
 }
 
 fn caddy_block(host: &str, port: u16) -> String {
@@ -129,32 +90,6 @@ fn caddy_block(host: &str, port: u16) -> String {
         port = port
     )
 }
-
-fn load_routes_file(path: &str) -> Result<Vec<AppRoute>> {
-    if !std::path::Path::new(path).exists() {
-        return Ok(vec![]);
-    }
-    let data = fs::read_to_string(path).with_context(|| format!("failed to read {}", path))?;
-    serde_json::from_str(&data).with_context(|| format!("failed to parse {}", path))
-}
-
-/// Load host-level routes from HOST_ROUTES JSON. If the file doesn't exist,
-/// returns a default set (MCP + CI UI) so existing installs keep working.
-pub fn load_host_routes() -> Result<Vec<HostRoute>> {
-    let path = config::HOST_ROUTES;
-    if !std::path::Path::new(path).exists() {
-        return Ok(vec![
-            HostRoute { subdomain: "mcp".to_string(), port: config::MCP_PORT },
-            HostRoute { subdomain: "ci".to_string(), port: config::UI_PORT },
-        ]);
-    }
-    let data = fs::read_to_string(path).with_context(|| format!("failed to read {}", path))?;
-    let routes: Vec<HostRoute> = serde_json::from_str(&data)
-        .with_context(|| format!("failed to parse {}", path))?;
-    Ok(routes)
-}
-
-// ── Caddy process management ──────────────────────────────────────────────────
 
 fn reload_caddy() -> Result<()> {
     let env_pairs = load_env_pairs();
@@ -174,8 +109,6 @@ fn reload_caddy() -> Result<()> {
     Ok(())
 }
 
-/// Parse /opt/codery/.env into (key, value) pairs for subprocess environments.
-/// Also injects TAILSCALE_IP from /run/tailscale.ip if not already present in .env.
 fn load_env_pairs() -> Vec<(String, String)> {
     let content = match std::fs::read_to_string(config::ENV_FILE) {
         Ok(c) => c,
@@ -202,58 +135,35 @@ fn load_env_pairs() -> Vec<(String, String)> {
     pairs
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn sandbox_def() -> ServiceDef {
-        serde_yaml::from_str(r#"
-service: sandbox
-image: ghcr.io/coderyoss/codery:sandbox-{sha}
-port_scheme:
-  blue_offset: 10000
-  green_offset: 20000
-ports:
-  - name: opencode
-    container_port: 3000
-    subdomain: opencode
-  - name: vscode
-    container_port: 7000
-    subdomain: vscode
-  - name: ttyd
-    container_port: 7681
-    subdomain: cli
-health_check:
-  type: tcp
-  port: opencode
-  timeout_secs: 60
-  interval_secs: 2
-volumes: []
-required_env: []
-network: codery-net
-"#).unwrap()
+    fn sandbox_route(subdomain: &str, port: u16) -> UnifiedRoute {
+        UnifiedRoute {
+            subdomain: subdomain.to_string(),
+            port,
+            target: "sandbox".to_string(),
+            internal_port: None,
+        }
     }
 
-    fn apps_def() -> ServiceDef {
-        serde_yaml::from_str(r#"
-service: apps
-image: ghcr.io/coderyoss/codery:apps-{sha}
-port_scheme:
-  blue_offset: 0
-  green_offset: 10000
-port_range:
-  container_start: 8000
-  container_end: 9000
-routes_file: /nonexistent/path.json
-health_check:
-  type: docker
-  timeout_secs: 90
-volumes: []
-required_env: []
-network: codery-net
-"#).unwrap()
+    fn apps_route(subdomain: &str, internal_port: u16) -> UnifiedRoute {
+        UnifiedRoute {
+            subdomain: subdomain.to_string(),
+            port: 8080,
+            target: "apps".to_string(),
+            internal_port: Some(internal_port),
+        }
+    }
+
+    fn host_route(subdomain: &str, port: u16) -> UnifiedRoute {
+        UnifiedRoute {
+            subdomain: subdomain.to_string(),
+            port,
+            target: "host".to_string(),
+            internal_port: None,
+        }
     }
 
     fn colors(sandbox: &str, apps: &str) -> HashMap<String, String> {
@@ -264,62 +174,64 @@ network: codery-net
     }
 
     #[test]
-    fn generate_blue_sandbox_no_extras() {
-        let defs = vec![sandbox_def()];
-        let caddy = generate_from_defs(&defs, &colors("blue", "blue"), None, "example.com").unwrap();
-        assert!(caddy.contains("reverse_proxy localhost:13000")); // opencode
-        assert!(caddy.contains("reverse_proxy localhost:17000")); // vscode
-        assert!(caddy.contains("reverse_proxy localhost:17681")); // ttyd
-        assert!(caddy.contains(&format!("reverse_proxy localhost:{}", config::MCP_PORT)));
+    fn sandbox_blue_uses_10k_offset() {
+        let routes = vec![
+            sandbox_route("opencode", 3000),
+            sandbox_route("cli", 7681),
+        ];
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        assert!(caddy.contains("reverse_proxy localhost:13000"));
+        assert!(caddy.contains("reverse_proxy localhost:17681"));
     }
 
     #[test]
-    fn generate_green_sandbox_no_extras() {
-        let defs = vec![sandbox_def()];
-        let caddy = generate_from_defs(&defs, &colors("green", "blue"), None, "example.com").unwrap();
-        assert!(caddy.contains("reverse_proxy localhost:23000")); // opencode green
-        assert!(caddy.contains("reverse_proxy localhost:27000")); // vscode green
-        assert!(caddy.contains("reverse_proxy localhost:27681")); // ttyd green
+    fn sandbox_green_uses_20k_offset() {
+        let routes = vec![
+            sandbox_route("opencode", 3000),
+        ];
+        let caddy = generate_from_routes(&routes, &colors("green", "blue"), "example.com").unwrap();
+        assert!(caddy.contains("reverse_proxy localhost:23000"));
     }
 
     #[test]
-    fn apps_offset_for_green() {
-        let defs = vec![sandbox_def(), apps_def()];
-        let mut route_overrides = HashMap::new();
-        route_overrides.insert(
-            "apps".to_string(),
-            vec![AppRoute { subdomain: "test.example.com".to_string(), port: 8000, internal_port: None }],
-        );
-        let caddy = generate_from_defs(&defs, &colors("blue", "green"), Some(&route_overrides), "example.com").unwrap();
-        assert!(caddy.contains("reverse_proxy localhost:13000")); // sandbox unaffected
-        assert!(caddy.contains("reverse_proxy localhost:18000")); // 8000 + 10000 (green offset)
+    fn apps_green_uses_10k_offset() {
+        let routes = vec![
+            apps_route("myapp", 3001),
+        ];
+        let caddy = generate_from_routes(&routes, &colors("blue", "green"), "example.com").unwrap();
+        assert!(caddy.contains("reverse_proxy localhost:18080"));
     }
 
     #[test]
-    fn apps_offset_for_blue() {
-        let defs = vec![sandbox_def(), apps_def()];
-        let mut route_overrides = HashMap::new();
-        route_overrides.insert(
-            "apps".to_string(),
-            vec![AppRoute { subdomain: "test.example.com".to_string(), port: 8000, internal_port: None }],
-        );
-        let caddy = generate_from_defs(&defs, &colors("blue", "blue"), Some(&route_overrides), "example.com").unwrap();
-        assert!(caddy.contains("reverse_proxy localhost:8000")); // 8000 + 0 (blue offset)
+    fn apps_blue_no_offset() {
+        let routes = vec![
+            apps_route("myapp", 3001),
+        ];
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        assert!(caddy.contains("reverse_proxy localhost:8080"));
     }
 
     #[test]
-    fn mcp_block_always_present() {
-        let defs = vec![sandbox_def()];
-        let caddy = generate_from_defs(&defs, &colors("blue", "blue"), None, "example.com").unwrap();
-        assert!(caddy.contains(&config::mcp_host("example.com")));
-        assert!(caddy.contains(&format!("localhost:{}", config::MCP_PORT)));
+    fn host_routes_no_offset() {
+        let routes = vec![
+            host_route("mcp", 4040),
+        ];
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        assert!(caddy.contains("reverse_proxy localhost:4040"));
     }
 
     #[test]
-    fn ui_block_always_present() {
-        let defs = vec![sandbox_def()];
-        let caddy = generate_from_defs(&defs, &colors("blue", "blue"), None, "example.com").unwrap();
-        assert!(caddy.contains(&config::ui_host("example.com")));
-        assert!(caddy.contains(&format!("localhost:{}", config::UI_PORT)));
+    fn fqdn_subdomain_used_as_is() {
+        let routes = vec![
+            UnifiedRoute {
+                subdomain: "myapp.custom.com".to_string(),
+                port: 8080,
+                target: "apps".to_string(),
+                internal_port: Some(3001),
+            },
+        ];
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        assert!(caddy.contains("myapp.custom.com"));
+        assert!(!caddy.contains("myapp.custom.com.example.com"));
     }
 }

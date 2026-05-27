@@ -1,0 +1,27 @@
+# Static routes — host services and container extras.
+# Layer 2: overrides service.yml by subdomain, overridden by SQLite runtime apps.
+#
+# target: "host"    → direct localhost:port (no color offset)
+# target: "sandbox" → apply sandbox port_scheme offset
+# target: "apps"    → apply apps port_scheme offset + Nginx internal routing
+
+routes:
+  - subdomain: mcp
+    port: 4040
+    target: host
+
+  - subdomain: ci
+    port: 4041
+    target: host
+
+  - subdomain: trailhead
+    port: 4050
+    target: host
+
+  - subdomain: cli
+    port: 7681
+    target: sandbox
+
+  - subdomain: ops
+    port: 3090
+    target: sandbox

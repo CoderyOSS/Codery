@@ -1,16 +1,10 @@
 // Paths on the VPS host
 pub const STATE_DIR: &str = "/opt/codery/state";
 pub const CADDY_CONFIG: &str = "/etc/caddy/Caddyfile";
-/// Default routes_file path used by services/apps.yml. Referenced by YAML, not Rust.
-#[allow(dead_code)]
-pub const APPS_ROUTES: &str = "/opt/codery/proxy/apps-routes.json";
 pub const NGINX_CONFIG: &str = "/opt/codery/proxy/apps-nginx.conf";
 /// Host directory bind-mounted into apps container at /etc/launchy/apps.d/.
 /// MCP add_app/remove_app write JSON service configs here; Launchy picks them up on SIGHUP.
 pub const APPS_LAUNCHY_DIR: &str = "/opt/codery/apps-launchy.d";
-/// Default sandbox extra-routes path. Referenced by YAML, not Rust.
-#[allow(dead_code)]
-pub const SANDBOX_ROUTES: &str = "/opt/codery/proxy/sandbox-routes.json";
 pub const ENV_FILE: &str = "/opt/codery/.env";
 pub const TAILSCALE_IP_FILE: &str = "/run/tailscale.ip";
 /// Shared projects directory. Declared in service YAMLs; kept here for documentation.
@@ -36,9 +30,8 @@ pub const CADDY_ADMIN_PORT: u16 = 2019;
 
 pub const MCP_PORT: u16 = 4040;
 pub const UI_PORT: u16 = 4041;
-/// Host-level route definitions: subdomain → host_port.
-/// Read by caddy.rs and mcp.rs. Added to Caddyfile without container/color context.
-pub const HOST_ROUTES: &str = "/opt/codery/proxy/host-routes.json";
+pub const DB_PATH: &str = "/opt/codery/codery.db";
+pub const ROUTES_YAML: &str = "/opt/codery/proxy/routes.yaml";
 const DEFAULT_DOMAIN: &str = "example.com";
 
 /// Read DOMAIN_NAME from /opt/codery/.env. Returns DEFAULT_DOMAIN if not set.

@@ -4,11 +4,12 @@ use bollard::exec::{CreateExecOptions, StartExecResults};
 use futures_util::StreamExt;
 use std::fs;
 
-use crate::caddy::AppRoute;
+use crate::db::{self, UnifiedRoute};
 use crate::{config, state};
 
 pub async fn generate_and_reload() -> Result<()> {
-    let routes = load_routes()?;
+    let conn = db::open()?;
+    let routes = db::build_route_map(&conn)?;
     let domain = config::load_domain();
     let content = generate_config(&routes, &domain);
 
@@ -31,22 +32,14 @@ pub async fn generate_and_reload() -> Result<()> {
     reload_in_active_container().await
 }
 
-fn load_routes() -> Result<Vec<AppRoute>> {
-    let path = config::APPS_ROUTES;
-    if !std::path::Path::new(path).exists() {
-        return Ok(vec![]);
-    }
-    let data = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path))?;
-    serde_json::from_str(&data)
-        .with_context(|| format!("failed to parse {}", path))
-}
-
-pub(crate) fn generate_config(routes: &[AppRoute], domain: &str) -> String {
+pub(crate) fn generate_config(routes: &[UnifiedRoute], domain: &str) -> String {
     let blocks: Vec<String> = routes
         .iter()
         .filter_map(|r| {
             let internal_port = r.internal_port?;
+            if r.target != "apps" {
+                return None;
+            }
             let fqdn = if r.subdomain.contains('.') {
                 r.subdomain.clone()
             } else {
@@ -120,13 +113,30 @@ async fn reload_in_active_container() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn route(subdomain: &str, internal_port: Option<u16>) -> AppRoute {
-        AppRoute { subdomain: subdomain.to_string(), port: 8080, internal_port }
+    fn apps_route(subdomain: &str, internal_port: Option<u16>) -> UnifiedRoute {
+        UnifiedRoute {
+            subdomain: subdomain.to_string(),
+            port: 8080,
+            target: "apps".to_string(),
+            internal_port,
+        }
+    }
+
+    fn host_route(subdomain: &str, port: u16) -> UnifiedRoute {
+        UnifiedRoute {
+            subdomain: subdomain.to_string(),
+            port,
+            target: "host".to_string(),
+            internal_port: None,
+        }
     }
 
     #[test]
     fn two_apps_produce_two_server_blocks_plus_default() {
-        let routes = vec![route("myapp", Some(3001)), route("otherapp", Some(3002))];
+        let routes = vec![
+            apps_route("myapp", Some(3001)),
+            apps_route("otherapp", Some(3002)),
+        ];
         let cfg = generate_config(&routes, "example.com");
         assert!(cfg.contains("server_name myapp.example.com;"));
         assert!(cfg.contains("proxy_pass http://127.0.0.1:3001;"));
@@ -137,7 +147,7 @@ mod tests {
 
     #[test]
     fn route_without_internal_port_is_skipped() {
-        let routes = vec![route("myapp", None)];
+        let routes = vec![apps_route("myapp", None)];
         let cfg = generate_config(&routes, "example.com");
         assert!(cfg.is_empty());
     }
@@ -149,9 +159,16 @@ mod tests {
 
     #[test]
     fn full_fqdn_subdomain_used_as_is() {
-        let routes = vec![route("myapp.custom.com", Some(3001))];
+        let routes = vec![apps_route("myapp.custom.com", Some(3001))];
         let cfg = generate_config(&routes, "example.com");
         assert!(cfg.contains("server_name myapp.custom.com;"));
         assert!(!cfg.contains("myapp.custom.com.example.com"));
+    }
+
+    #[test]
+    fn host_routes_excluded_from_nginx() {
+        let routes = vec![host_route("mcp", 4040)];
+        let cfg = generate_config(&routes, "example.com");
+        assert!(cfg.is_empty());
     }
 }

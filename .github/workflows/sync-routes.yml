@@ -3,7 +3,7 @@ name: Sync Routes
 on:
   push:
     branches: [main]
-    paths: ['proxy/apps-routes.json', 'proxy/host-routes.json']
+    paths: ['proxy/routes.yaml']
   workflow_dispatch:
 
 jobs:
@@ -24,9 +24,7 @@ jobs:
           printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
           chmod 600 /tmp/deploy_key
           SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
-          SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
 
           $SSH "mkdir -p /opt/codery/proxy"
-          $SCP proxy/apps-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/apps-routes.json
-          $SCP proxy/host-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/host-routes.json
+          cat proxy/routes.yaml | $SSH "sudo tee /opt/codery/proxy/routes.yaml" > /dev/null
           $SSH "/opt/codery/codery-ci reload-routes 2>&1"

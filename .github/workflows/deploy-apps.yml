@@ -62,9 +62,6 @@ jobs:
       - name: Generate Launchy configs from devcontainer.json
         run: python3 containers/apps/scripts/gen-launchy-conf.py containers/apps/launchy/built-in
 
-      - name: Generate apps-routes.json from devcontainer.json
-        run: python3 containers/apps/scripts/gen-apps-routes.py proxy/apps-routes.json
-
       - name: Build and push apps image
         uses: docker/build-push-action@v6
         with:
@@ -90,9 +87,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Generate apps-routes.json from devcontainer.json
-        run: python3 containers/apps/scripts/gen-apps-routes.py proxy/apps-routes.json
-
       - name: Deploy apps via codery-ci
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -105,7 +99,7 @@ jobs:
 
           $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy /opt/codery/apps-launchy.d /opt/codery/state"
           cat containers/apps/service.yml | $SSH "sudo tee /opt/codery/services/apps.yml"
-          $SCP proxy/apps-routes.json deploy@${DEPLOY_HOST}:/opt/codery/proxy/apps-routes.json
+          cat proxy/routes.yaml | $SSH "sudo tee /opt/codery/proxy/routes.yaml" > /dev/null
 
           # Patch only GHCR credentials — leave all other VPS .env values intact.
           $SSH "touch /opt/codery/.env"
