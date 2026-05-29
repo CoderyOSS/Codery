@@ -27,4 +27,4 @@ jobs:
 
           $SSH "mkdir -p /opt/codery/proxy"
           cat proxy/routes.yaml | $SSH "sudo tee /opt/codery/proxy/routes.yaml" > /dev/null
-          $SSH "/opt/codery/codery-ci reload-routes 2>&1"
+          $SSH "sudo /opt/codery/codery-ci reload-routes 2>&1"
