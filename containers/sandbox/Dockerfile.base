@@ -22,11 +22,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 
-# gem user (uid 1000). Playwright image uses pwuser — delete and recreate with correct uid.
-RUN userdel -r pwuser 2>/dev/null || true && \
-    groupdel pwuser 2>/dev/null || true && \
-    groupadd -f -g 1000 gem && \
-    useradd -m -u 1000 -g 1000 -s /bin/bash gem && \
+# gem user (uid 1000). Playwright image uses pwuser — rename, then force uid.
+RUN if id pwuser >/dev/null 2>&1; then \
+        usermod -l gem pwuser && \
+        groupmod -n gem pwuser && \
+        usermod -u 1000 gem && \
+        groupmod -g 1000 gem && \
+        usermod -d /home/gem -m gem; \
+    else \
+        groupadd -f -g 1000 gem && \
+        useradd -m -u 1000 -g 1000 -s /bin/bash gem; \
+    fi && \
     usermod -p '*' gem
 
 # Pre-trust GitHub host key
