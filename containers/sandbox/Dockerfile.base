@@ -1,5 +1,5 @@
 # containers/sandbox/Dockerfile.base
-FROM debian:bookworm-slim
+FROM mcr.microsoft.com/playwright:v1.60.0-noble
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -22,10 +22,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 
-# gem user (uid 1000)
-RUN (groupadd -f -g 1000 gem || true) && \
-    (useradd -m -u 1000 -g 1000 -s /bin/bash gem || \
-     useradd -m -u 1000 -o -g 1000 -s /bin/bash gem) && \
+# gem user (uid 1000). Playwright image uses pwuser:1000 — rename it.
+RUN if id pwuser >/dev/null 2>&1; then \
+        usermod -l gem -d /home/gem -m pwuser && \
+        groupmod -n gem pwuser; \
+    else \
+        (groupadd -f -g 1000 gem || true) && \
+        (useradd -m -u 1000 -g 1000 -s /bin/bash gem || \
+         useradd -m -u 1000 -o -g 1000 -s /bin/bash gem); \
+    fi && \
     usermod -p '*' gem
 
 # Pre-trust GitHub host key

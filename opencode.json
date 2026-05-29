@@ -19,6 +19,10 @@
     "trailhead": {
       "type": "remote",
       "url": "http://host.docker.internal:4050/mcp/sse"
+    },
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "-y", "@playwright/mcp@latest"]
     }
   },
   "permission": {

@@ -4,10 +4,12 @@
 ARG BASE_TAG=sandbox-base-latest
 FROM ghcr.io/coderyoss/codery:${BASE_TAG}
 
-# Node.js 20
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
+# Node.js 20 (skip if already installed, e.g. from Playwright base image)
+RUN if ! command -v node >/dev/null 2>&1; then \
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+        && apt-get install -y nodejs \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # bun
 RUN curl -fsSL https://bun.sh/install | bash \
