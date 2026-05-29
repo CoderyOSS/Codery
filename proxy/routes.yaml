@@ -5,6 +5,7 @@
 # target: "sandbox" → apply sandbox port_scheme offset
 # target: "apps"    → apply apps port_scheme offset + Nginx internal routing
 
+# codery-ci host services + container extras
 routes:
   - subdomain: mcp
     port: 4040
