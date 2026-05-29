@@ -26,8 +26,8 @@ ENV LC_ALL=en_US.UTF-8
 RUN if id pwuser >/dev/null 2>&1; then \
         usermod -l gem pwuser && \
         groupmod -n gem pwuser && \
-        usermod -u 1000 gem && \
-        groupmod -g 1000 gem && \
+        usermod -u 1000 -o gem && \
+        groupmod -g 1000 -o gem && \
         usermod -d /home/gem -m gem; \
     else \
         groupadd -f -g 1000 gem && \
