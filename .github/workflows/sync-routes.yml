@@ -2,7 +2,7 @@ name: Sync Routes
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths: ['proxy/routes.yaml']
   workflow_dispatch:
 
