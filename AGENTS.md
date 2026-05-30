@@ -222,7 +222,7 @@ Prerequisite: `ufw allow 2222/tcp` on the host. Port 2222 is not in the default 
 
 sshd runs as a launchy-managed service (`devcontainer.json`, `user: "root"`, `restart: "always"`, `priority: 10`, flags `-D -e`). The entrypoint script `40-start-sshd.sh` only prepares host keys and authorized_keys — it does not start sshd.
 
-**Sandbox → apps:** `ssh gem@apps` from inside the sandbox — no flags, no credentials needed. Works via Docker network alias `apps` on `codery-net`. Security: only reachable from inside the Docker network.
+**Sandbox → apps:** `ssh gem@apps` from inside the sandbox — no flags, no credentials needed. Keypair baked into both images at build time (no runtime generation). Works via Docker network alias `apps` on `codery-net`. Security: only reachable from inside the Docker network.
 
 ---
 
@@ -300,19 +300,19 @@ All components follow [semantic versioning](https://semver.org). Pre-1.0: minor 
 1. Bump version in `system/orchestrator/Cargo.toml` (`version` field in `[package]`)
 2. Commit: `git commit -m "codery-ci: bump to vX.Y.Z"`
 3. Tag: `git tag codery-ci-vX.Y.Z`
-4. Push: `github-push master && git push origin codery-ci-vX.Y.Z`
+4. Push: `github-push master && github-push codery-ci-vX.Y.Z`
 5. CI builds both x86_64 and aarch64 binaries via `cross`, attaches them to a GitHub Release
 
 ### Cutting a Sandbox release
 
 1. Tag: `git tag sandbox-vX.Y.Z`
-2. Push: `git push origin sandbox-vX.Y.Z`
+2. Push: `github-push sandbox-vX.Y.Z`
 3. CI builds Docker image, pushes to GHCR
 
 ### Cutting an Apps release
 
 1. Tag: `git tag apps-vX.Y.Z`
-2. Push: `git push origin apps-vX.Y.Z`
+2. Push: `github-push apps-vX.Y.Z`
 3. CI builds Docker image, pushes to GHCR
 
 ### Release artifacts
@@ -341,12 +341,13 @@ containers/
       25-openrouter-auth.sh # Configures OpenRouter API key
       30-init-projects.sh   # Ensures /home/gem/projects exists
       40-start-sshd.sh      # Prepares sshd host keys and authorized_keys (sshd managed by launchy)
-      50-gen-ssh-key.sh     # Generates SSH host keys if missing
       60-claude-mcp.sh      # Installs Claude MCP servers
     scripts/
       entrypoint.sh         # Runs entrypoint.d/ scripts, then exec launchy
       github-app-token.sh   # Generates a GitHub App installation token
-      github-push.sh        # Wraps git push with App auth
+      github-push.sh        # Wraps git push with App auth (works for branches AND tags)
+    ssh/
+      sandbox-to-apps       # Static private key for sandbox→apps SSH (baked into image)
     agents-skills/          # Vendored caveman skills
     bin/
       launchy               # Process supervisor (replaces supervisord in sandbox)
@@ -362,6 +363,8 @@ containers/
       entrypoint.sh
       healthcheck.sh        # Used by Docker HEALTHCHECK
       ssh-agent-add-keys.sh
+    ssh/
+      sandbox-to-apps.pub   # Static public key for sandbox→apps SSH (baked into image)
     docker-entrypoint.d/
       20-ssh-agent.sh
 

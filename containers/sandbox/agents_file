@@ -59,8 +59,9 @@ Authenticated via GitHub App with write access to configured repositories.
 ```bash
 github-push              # pushes current branch
 github-push my-branch    # pushes named branch
+github-push v1.0.0       # pushes a tag (same command, works for tags too)
 ```
-`github-push` auto-detects repo and generates fresh token each time.
+`github-push` auto-detects repo and generates fresh token each time. Works for **both branches and tags**.
 
 **If `gh` commands fail** (token expires after ~1h), re-authenticate:
 ```bash
@@ -219,14 +220,14 @@ Apps container code lives in same repos under `/home/gem/projects/` — projects
 
 ## SSH to Apps Container
 
-From inside the sandbox, SSH into the apps container with no password or key setup required:
+From inside the sandbox, SSH into the apps container with no setup required:
 
 ```bash
 ssh gem@apps
 ```
 
+- Keypair baked into both images at build time — no runtime generation, never breaks
 - `apps` is a Docker network alias — resolves automatically inside codery-net
-- Sandbox generates a keypair at startup; apps sshd reads it on-demand from the shared volume
 - Only works from inside the sandbox (Docker network = security boundary)
 
 Useful commands:
@@ -292,7 +293,7 @@ To cut a CoderyCI release:
 1. Bump version in `system/orchestrator/Cargo.toml`
 2. Commit: `git commit -m "codery-ci: bump to v{version}"`
 3. Tag: `git tag codery-ci-v{version}`
-4. Push: `github-push master && git push origin codery-ci-v{version}`
+4. Push: `github-push master && github-push codery-ci-v{version}`
 
 Same pattern for sandbox/apps — no Cargo.toml bump needed, just tag and push.
 

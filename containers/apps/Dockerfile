@@ -46,8 +46,9 @@ RUN usermod -l gem -d /home/gem -m ubuntu && groupmod -n gem ubuntu \
     && chmod 440 /etc/sudoers.d/gem
 
 COPY containers/apps/sshd_config /etc/ssh/sshd_config
-COPY containers/apps/scripts/sandbox-key-lookup /usr/local/bin/sandbox-key-lookup
-RUN chmod +x /usr/local/bin/sandbox-key-lookup && mkdir -p /run/sshd
+RUN mkdir -p /run/sshd /etc/ssh/authorized_keys
+COPY containers/apps/ssh/sandbox-to-apps.pub /etc/ssh/authorized_keys/gem
+RUN chmod 644 /etc/ssh/authorized_keys/gem
 
 COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /etc/nginx/conf.d

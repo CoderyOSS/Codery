@@ -57,6 +57,21 @@ RUN mkdir -p /var/run/sshd && \
 COPY containers/sandbox/bin/launchy /sbin/launchy
 RUN chmod +x /sbin/launchy
 
+COPY containers/sandbox/ssh/sandbox-to-apps /home/gem/.ssh/id_codery_apps
+RUN chmod 600 /home/gem/.ssh/id_codery_apps && chown gem:gem /home/gem/.ssh/id_codery_apps
+
+RUN printf '%s\n' \
+        'Host apps' \
+        '    HostName apps' \
+        '    User gem' \
+        '    IdentityFile /home/gem/.ssh/id_codery_apps' \
+        '    StrictHostKeyChecking no' \
+        '    UserKnownHostsFile /dev/null' \
+        '    LogLevel ERROR' \
+    > /home/gem/.ssh/config \
+    && chown gem:gem /home/gem/.ssh/config \
+    && chmod 600 /home/gem/.ssh/config
+
 RUN mkdir -p /home/gem/projects \
     && chown -R gem:gem /home/gem
 
