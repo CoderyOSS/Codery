@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'codery-ci-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 0.6.0)'
+        required: true
 
 jobs:
   build:
@@ -11,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
 
     strategy:
       matrix:
@@ -21,9 +28,22 @@ jobs:
             artifact: codery-ci-linux-aarch64
 
     steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SEMVER="${{ github.event.inputs.version }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            SEMVER="${TAG#codery-ci-v}"
+          fi
+          echo "version=v${SEMVER}" >> $GITHUB_OUTPUT
+          echo "semver=${SEMVER}" >> $GITHUB_OUTPUT
+          echo "tag=codery-ci-v${SEMVER}" >> $GITHUB_OUTPUT
+
       - name: Prevent semver regression
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#codery-ci-v}"
+          TAG_VERSION="${{ steps.version.outputs.semver }}"
           LATEST=$(gh release list --repo ${{ github.repository }} --limit 50 --json tagName -q '.[].tagName' | grep '^codery-ci-v' | head -1 | sed 's/codery-ci-v//')
           if [ -n "$LATEST" ] && [ "$(printf '%s\n%s' "$LATEST" "$TAG_VERSION" | sort -V | tail -1)" != "$TAG_VERSION" ]; then
             echo "::error::Tag v$TAG_VERSION is not newer than latest release v$LATEST"
@@ -34,16 +54,6 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Extract version from tag
-        id: version
-        run: |
-          # Tag: codery-ci-v1.2.3  →  VERSION=v1.2.3  SEMVER=1.2.3
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#codery-ci-}"
-          SEMVER="${VERSION#v}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "semver=${SEMVER}" >> $GITHUB_OUTPUT
 
       - name: Stamp Cargo.toml version
         run: |
@@ -119,5 +129,6 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.build.outputs.tag }}
           files: artifacts/*
           generate_release_notes: true
