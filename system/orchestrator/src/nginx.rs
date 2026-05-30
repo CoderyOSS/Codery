@@ -45,8 +45,15 @@ pub(crate) fn generate_config(routes: &[UnifiedRoute], domain: &str) -> String {
             } else {
                 format!("{}.{}", r.subdomain, domain)
             };
+            let cache_headers = if r.no_cache {
+                "\n        add_header Cache-Control \"no-store, no-cache, must-revalidate, max-age=0\" always;\
+                 \n        add_header Pragma \"no-cache\" always;\
+                 \n        add_header Expires \"0\" always;"
+            } else {
+                ""
+            };
             Some(format!(
-                "server {{\n    listen 8080;\n    server_name {fqdn};\n    location / {{\n        proxy_pass http://127.0.0.1:{internal_port};\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }}\n}}\n"
+                "server {{\n    listen 8080;\n    server_name {fqdn};\n    location / {{{cache_headers}\n        proxy_pass http://127.0.0.1:{internal_port};\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }}\n}}\n"
             ))
         })
         .collect();
@@ -119,6 +126,7 @@ mod tests {
             port: 8080,
             target: "apps".to_string(),
             internal_port,
+            no_cache: false,
         }
     }
 
@@ -128,6 +136,7 @@ mod tests {
             port,
             target: "host".to_string(),
             internal_port: None,
+            no_cache: false,
         }
     }
 
@@ -170,5 +179,29 @@ mod tests {
         let routes = vec![host_route("mcp", 4040)];
         let cfg = generate_config(&routes, "example.com");
         assert!(cfg.is_empty());
+    }
+
+    #[test]
+    fn no_cache_route_adds_cache_headers() {
+        let routes = vec![UnifiedRoute {
+            subdomain: "myapp".to_string(),
+            port: 8080,
+            target: "apps".to_string(),
+            internal_port: Some(3001),
+            no_cache: true,
+        }];
+        let cfg = generate_config(&routes, "example.com");
+        assert!(cfg.contains("Cache-Control"));
+        assert!(cfg.contains("no-store"));
+        assert!(cfg.contains("Pragma"));
+        assert!(cfg.contains("Expires"));
+    }
+
+    #[test]
+    fn cache_route_has_no_cache_headers() {
+        let routes = vec![apps_route("myapp", Some(3001))];
+        let cfg = generate_config(&routes, "example.com");
+        assert!(!cfg.contains("Cache-Control"));
+        assert!(!cfg.contains("Pragma"));
     }
 }

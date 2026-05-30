@@ -67,7 +67,7 @@ pub fn generate_from_routes(
                 }
             }
         };
-        caddy.push_str(&caddy_block(&fqdn, host_port));
+        caddy.push_str(&caddy_block(&fqdn, host_port, route.no_cache));
     }
 
     Ok(caddy)
@@ -78,16 +78,27 @@ fn sandbox_host_port(color: &str, container_port: u16) -> u16 {
     container_port + offset
 }
 
-fn caddy_block(host: &str, port: u16) -> String {
+fn caddy_block(host: &str, port: u16, no_cache: bool) -> String {
+    let cache_headers = if no_cache {
+        r#"
+    header {
+        Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+        Pragma "no-cache"
+        Expires "0"
+    }"#
+    } else {
+        ""
+    };
     format!(
         r#"
 {host} {{
     bind {{$TAILSCALE_IP}}
-    reverse_proxy localhost:{port}
+    reverse_proxy localhost:{port}{cache_headers}
 }}
 "#,
         host = host,
-        port = port
+        port = port,
+        cache_headers = cache_headers
     )
 }
 
@@ -145,6 +156,7 @@ mod tests {
             port,
             target: "sandbox".to_string(),
             internal_port: None,
+            no_cache: false,
         }
     }
 
@@ -154,6 +166,7 @@ mod tests {
             port: 8080,
             target: "apps".to_string(),
             internal_port: Some(internal_port),
+            no_cache: false,
         }
     }
 
@@ -163,6 +176,7 @@ mod tests {
             port,
             target: "host".to_string(),
             internal_port: None,
+            no_cache: false,
         }
     }
 
@@ -228,10 +242,45 @@ mod tests {
                 port: 8080,
                 target: "apps".to_string(),
                 internal_port: Some(3001),
+                no_cache: false,
             },
         ];
         let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
         assert!(caddy.contains("myapp.custom.com"));
         assert!(!caddy.contains("myapp.custom.com.example.com"));
+    }
+
+    #[test]
+    fn no_cache_route_adds_cache_headers() {
+        let routes = vec![
+            UnifiedRoute {
+                subdomain: "myapp".to_string(),
+                port: 8080,
+                target: "apps".to_string(),
+                internal_port: Some(3001),
+                no_cache: true,
+            },
+        ];
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        assert!(caddy.contains("Cache-Control"));
+        assert!(caddy.contains("no-store"));
+        assert!(caddy.contains("Pragma"));
+        assert!(caddy.contains("Expires"));
+    }
+
+    #[test]
+    fn cache_route_has_no_cache_headers() {
+        let routes = vec![
+            UnifiedRoute {
+                subdomain: "myapp".to_string(),
+                port: 8080,
+                target: "apps".to_string(),
+                internal_port: Some(3001),
+                no_cache: false,
+            },
+        ];
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        assert!(!caddy.contains("Cache-Control"));
+        assert!(!caddy.contains("Pragma"));
     }
 }

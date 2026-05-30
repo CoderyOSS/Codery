@@ -17,6 +17,7 @@ pub struct AppRecord {
     pub priority: i64,
     pub user: String,
     pub restart: String,
+    pub no_cache: bool,
     pub created_at: String,
 }
 
@@ -46,13 +47,18 @@ pub fn init(conn: &Connection) -> Result<()> {
             created_at    TEXT NOT NULL DEFAULT (datetime('now'))
         );"
     ).context("failed to create apps table")?;
+
+    let _ = conn.execute_batch(
+        "ALTER TABLE apps ADD COLUMN no_cache INTEGER NOT NULL DEFAULT 0;"
+    );
+
     Ok(())
 }
 
 pub fn insert_app(conn: &Connection, app: &AppRecord) -> Result<()> {
     conn.execute(
-        "INSERT INTO apps (name, subdomain, internal_port, command, directory, env, priority, user, restart)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO apps (name, subdomain, internal_port, command, directory, env, priority, user, restart, no_cache)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         (
             &app.name,
             &app.subdomain,
@@ -63,6 +69,7 @@ pub fn insert_app(conn: &Connection, app: &AppRecord) -> Result<()> {
             app.priority,
             &app.user,
             &app.restart,
+            app.no_cache as i64,
         ),
     ).with_context(|| format!("failed to insert app '{}'", app.name))?;
     Ok(())
@@ -76,7 +83,7 @@ pub fn delete_app(conn: &Connection, name: &str) -> Result<bool> {
 
 pub fn list_apps(conn: &Connection) -> Result<Vec<AppRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT name, subdomain, internal_port, command, directory, env, priority, user, restart, created_at
+        "SELECT name, subdomain, internal_port, command, directory, env, priority, user, restart, no_cache, created_at
          FROM apps ORDER BY name"
     ).context("failed to prepare apps query")?;
     let rows = stmt.query_map([], |row| {
@@ -90,7 +97,8 @@ pub fn list_apps(conn: &Connection) -> Result<Vec<AppRecord>> {
             priority: row.get(6)?,
             user: row.get(7)?,
             restart: row.get(8)?,
-            created_at: row.get(9)?,
+            no_cache: row.get::<_, i64>(9)? != 0,
+            created_at: row.get(10)?,
         })
     }).context("failed to query apps")?;
     let mut apps = Vec::new();
@@ -163,6 +171,7 @@ pub struct UnifiedRoute {
     pub port: u16,
     pub target: String,
     pub internal_port: Option<u16>,
+    pub no_cache: bool,
 }
 
 pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
@@ -177,6 +186,7 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
                     port: port.container_port,
                     target: def.service.clone(),
                     internal_port: None,
+                    no_cache: false,
                 });
             }
         }
@@ -189,6 +199,7 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
             port: route.port,
             target: route.target.clone(),
             internal_port: None,
+            no_cache: false,
         });
     }
 
@@ -199,6 +210,7 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
             port: 8080,
             target: "apps".to_string(),
             internal_port: Some(app.internal_port),
+            no_cache: app.no_cache,
         });
     }
 
@@ -272,6 +284,7 @@ mod tests {
             priority: 100,
             user: "gem".to_string(),
             restart: "always".to_string(),
+            no_cache: false,
             created_at: String::new(),
         }
     }

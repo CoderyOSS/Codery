@@ -120,6 +120,8 @@ struct AddAppParams {
     directory: String,
     #[schemars(description = "Optional environment variables for the process")]
     env: Option<HashMap<String, String>>,
+    #[schemars(description = "If true, Caddy and Nginx will send Cache-Control: no-store and related headers to prevent client caching")]
+    no_cache: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1029,6 +1031,7 @@ impl OrchestratorMcp {
             priority: 100,
             user: "gem".to_string(),
             restart: "always".to_string(),
+            no_cache: p.no_cache.unwrap_or(false),
             created_at: String::new(),
         };
 
@@ -1069,6 +1072,7 @@ impl OrchestratorMcp {
             "subdomain": p.subdomain,
             "internal_port": p.internal_port,
             "directory": p.directory,
+            "no_cache": app.no_cache,
             "status": "running",
             "guidance": {
                 "what": "App started instantly via Launchy. No container rebuild.",
