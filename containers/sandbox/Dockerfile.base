@@ -58,7 +58,7 @@ COPY containers/sandbox/bin/launchy /sbin/launchy
 RUN chmod +x /sbin/launchy
 
 COPY containers/sandbox/ssh/sandbox-to-apps /home/gem/.ssh/id_codery_apps
-RUN chmod 600 /home/gem/.ssh/id_codery_apps && chown gem:gem /home/gem/.ssh/id_codery_apps
+RUN chmod 600 /home/gem/.ssh/id_codery_apps && chown 1000:1000 /home/gem/.ssh/id_codery_apps
 
 RUN printf '%s\n' \
         'Host apps' \
@@ -69,10 +69,16 @@ RUN printf '%s\n' \
         '    UserKnownHostsFile /dev/null' \
         '    LogLevel ERROR' \
     > /home/gem/.ssh/config \
-    && chown gem:gem /home/gem/.ssh/config \
+    && chown 1000:1000 /home/gem/.ssh/config \
     && chmod 600 /home/gem/.ssh/config
 
+RUN if [ -d /home/ubuntu ]; then \
+        mkdir -p /home/ubuntu/.ssh \
+        && ln -sf /home/gem/.ssh/id_codery_apps /home/ubuntu/.ssh/id_codery_apps \
+        && ln -sf /home/gem/.ssh/config /home/ubuntu/.ssh/config; \
+    fi
+
 RUN mkdir -p /home/gem/projects \
-    && chown -R gem:gem /home/gem
+    && chown -R 1000:1000 /home/gem
 
 WORKDIR /home/gem/projects
