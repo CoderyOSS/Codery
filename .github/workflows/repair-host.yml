@@ -50,7 +50,9 @@ jobs:
           SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
 
           echo "=== supervisor programs ==="
-          $SSH "supervisorctl status" 2>&1
+          # supervisorctl exits non-zero if any program isn't RUNNING (including
+          # expected one-shots like dns-update and tailscale-up), so suppress exit code.
+          $SSH "supervisorctl status" 2>&1 || true
 
           echo "=== caddy process ==="
           $SSH "pgrep -a caddy || echo 'caddy not running'"
