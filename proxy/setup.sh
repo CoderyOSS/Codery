@@ -46,6 +46,24 @@ fi
 # --- Ensure Tailscale state directory ---
 mkdir -p /var/lib/tailscale
 
+# --- Ensure supervisor.service loads /opt/codery/.env ---
+# Without this drop-in, supervisord starts without CLOUDFLARE_API_TOKEN /
+# CLOUDFLARE_ZONE_ID in its environment, causing %(ENV_...)s interpolation in
+# caddy.conf and dns-update.conf to fail with INVALIDARGUMENT, which prevents
+# supervisord from starting at all.
+DROP_IN_DIR="/etc/systemd/system/supervisor.service.d"
+DROP_IN_FILE="$DROP_IN_DIR/env.conf"
+DROP_IN_WANT="[Service]
+EnvironmentFile=/opt/codery/.env"
+if [ ! -f "$DROP_IN_FILE" ] || [ "$(cat "$DROP_IN_FILE")" != "$DROP_IN_WANT" ]; then
+  echo "[proxy-setup] Installing systemd drop-in: $DROP_IN_FILE"
+  mkdir -p "$DROP_IN_DIR"
+  printf '%s\n' "$DROP_IN_WANT" > "$DROP_IN_FILE"
+  systemctl daemon-reload
+else
+  echo "[proxy-setup] Systemd drop-in already up to date"
+fi
+
 # --- Ensure SSH authorized_keys for sandbox container ---
 # The sandbox container bind-mounts this file read-only at /run/secrets/authorized_keys.
 # sshd inside the container reads it directly. An empty file means SSH pubkey auth
@@ -80,12 +98,22 @@ else
   fi
 fi
 
-# --- Reload supervisor ---
-echo "[proxy-setup] Reloading supervisord..."
-supervisorctl -c /etc/supervisor/supervisord.conf reread 2>/dev/null || true
-supervisorctl -c /etc/supervisor/supervisord.conf update 2>/dev/null || true
+# --- Ensure supervisor.service is enabled and running ---
+echo "[proxy-setup] Ensuring supervisor.service is enabled..."
+systemctl enable supervisor 2>/dev/null || true
 
-echo "[proxy-setup] Checking proxy service status..."
-supervisorctl -c /etc/supervisor/supervisord.conf status tailscale tailscale-up dns-update caddy 2>/dev/null || true
+if systemctl is-active --quiet supervisor; then
+  echo "[proxy-setup] Supervisord active — reloading config..."
+  supervisorctl -c /etc/supervisor/supervisord.conf reread 2>/dev/null || true
+  supervisorctl -c /etc/supervisor/supervisord.conf update 2>/dev/null || true
+else
+  echo "[proxy-setup] Starting supervisor.service..."
+  systemctl restart supervisor
+  sleep 2
+fi
+
+echo "[proxy-setup] Proxy service status:"
+supervisorctl -c /etc/supervisor/supervisord.conf status 2>/dev/null || \
+  systemctl status supervisor --no-pager -l | tail -15
 
 echo "[proxy-setup] Done. Proxy services are managed by host supervisord."

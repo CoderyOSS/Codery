@@ -1,0 +1,59 @@
+name: Repair Host
+
+# Runs proxy/setup.sh on the VPS to restore all host services to proper working
+# order. Idempotent — safe to run at any time, including while services are
+# already healthy.
+#
+# ROOT CAUSE this repairs: supervisor.service needs EnvironmentFile=/opt/codery/.env
+# so that %(ENV_CLOUDFLARE_API_TOKEN)s / %(ENV_CLOUDFLARE_ZONE_ID)s in caddy.conf
+# and dns-update.conf can be expanded. Without it supervisord exits with
+# INVALIDARGUMENT on every start, taking down Caddy, dns-update, codery-ci-daemon,
+# tailscale-up, and trailhead.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Hourly health-check. Once the systemd drop-in is in place the VPS
+    # self-heals on reboot, but this catches any config drift or manual breakage.
+    - cron: '0 * * * *'
+
+jobs:
+  repair:
+    name: Restore host services
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run proxy/setup.sh on VPS
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          trap 'rm -f /tmp/deploy_key' EXIT
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+          SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
+
+          $SCP -r proxy "deploy@${DEPLOY_HOST}:/tmp/codery-proxy"
+          $SSH "sudo bash /tmp/codery-proxy/setup.sh && rm -rf /tmp/codery-proxy"
+
+      - name: Verify supervisor programs
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          trap 'rm -f /tmp/deploy_key' EXIT
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+
+          echo "=== supervisor programs ==="
+          $SSH "supervisorctl status" 2>&1
+
+          echo "=== caddy process ==="
+          $SSH "pgrep -a caddy || echo 'caddy not running'"
+
+          echo "=== tailscale status ==="
+          $SSH "tailscale status --json 2>/dev/null | python3 -c \"import sys,json; d=json.load(sys.stdin); print('Tailscale IP:', d.get('Self',{}).get('TailscaleIPs',['none'])[0])\" || echo 'tailscale not ready'"
