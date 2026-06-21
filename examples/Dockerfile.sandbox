@@ -27,6 +27,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
+# uv (system-wide, mirrors bun/rust pattern)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && mv /root/.local/bin/uv  /usr/local/bin/uv \
+    && mv /root/.local/bin/uvx /usr/local/bin/uvx
+
+# graphify CLI + OpenCode skill (run as gem → files owned by gem)
+ENV PATH="/home/gem/.local/bin:${PATH}"
+RUN su -s /bin/bash gem -c 'uv tool install graphifyy && graphify install --platform opencode'
+
 # Neovim + LSP toolchain
 COPY containers/sandbox/scripts/setup-neovim.sh /tmp/
 RUN chmod +x /tmp/setup-neovim.sh && /tmp/setup-neovim.sh && rm /tmp/setup-neovim.sh
