@@ -34,7 +34,10 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
 
 # graphify CLI + OpenCode skill (run as gem → files owned by gem)
 ENV PATH="/home/gem/.local/bin:${PATH}"
-RUN su -s /bin/bash gem -c 'uv tool install graphifyy && graphify install --platform opencode'
+RUN su -s /bin/bash gem -c '\
+    export PATH="/home/gem/.local/bin:$PATH"; \
+    uv tool install graphifyy && \
+    graphify install --platform opencode'
 
 # Neovim + LSP toolchain
 COPY containers/sandbox/scripts/setup-neovim.sh /tmp/
