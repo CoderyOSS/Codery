@@ -25,6 +25,14 @@
             "priority": 20
           },
           {
+            "name": "opencode-serve-guard",
+            "command": ["/usr/local/bin/opencode-serve-guard"],
+            "user": "gem",
+            "env": { "HOME": "/home/gem" },
+            "restart": "always",
+            "priority": 21
+          },
+          {
             "name": "sshd",
             "command": ["/usr/sbin/sshd", "-D", "-e"],
             "user": "root",

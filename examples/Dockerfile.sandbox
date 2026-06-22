@@ -71,6 +71,10 @@ RUN echo "gem ALL=(ALL) NOPASSWD: /usr/local/bin/github-push" > /etc/sudoers.d/g
 COPY containers/sandbox/scripts/prune-opencode-diffs.sh /usr/local/bin/prune-opencode-diffs
 RUN chmod +x /usr/local/bin/prune-opencode-diffs
 
+# opencode serve RSS guard — SIGTERM bloated serve so launchy respawns fresh
+COPY containers/sandbox/scripts/opencode-serve-guard.sh /usr/local/bin/opencode-serve-guard
+RUN chmod +x /usr/local/bin/opencode-serve-guard
+
 # Launchy config
 COPY .devcontainer/devcontainer.json /etc/devcontainer.json
 
