@@ -17,6 +17,14 @@
             "restart": "always"
           },
           {
+            "name": "opencode-diff-pruner",
+            "command": ["/usr/local/bin/prune-opencode-diffs"],
+            "user": "gem",
+            "env": { "HOME": "/home/gem" },
+            "restart": "always",
+            "priority": 20
+          },
+          {
             "name": "sshd",
             "command": ["/usr/sbin/sshd", "-D", "-e"],
             "user": "root",

@@ -67,6 +67,10 @@ RUN chmod +x /usr/local/bin/github-push
 COPY containers/sandbox/scripts/github-app-permissions-mcp.ts /usr/local/bin/github-app-permissions-mcp.ts
 RUN echo "gem ALL=(ALL) NOPASSWD: /usr/local/bin/github-push" > /etc/sudoers.d/github-push
 
+# opencode session_diff pruner — prevents oversized stale diffs from wedging the web UI
+COPY containers/sandbox/scripts/prune-opencode-diffs.sh /usr/local/bin/prune-opencode-diffs
+RUN chmod +x /usr/local/bin/prune-opencode-diffs
+
 # Launchy config
 COPY .devcontainer/devcontainer.json /etc/devcontainer.json
 
