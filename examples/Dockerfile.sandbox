@@ -2,12 +2,16 @@
 # Personalized sandbox image. Fork this and adapt it to install
 # whatever tools you want on top of codery-sandbox-base.
 
+# Global ARGs (must precede any FROM to be usable in FROM instructions)
+ARG BASE_TAG=sandbox-base-latest
+ARG OD_REF=open-design-v0.12.0
+
 # --- Open Design build stage (kept separate to avoid carrying build deps) ---
 FROM docker.io/library/node:24-alpine AS od-build
+ARG OD_REF
 RUN apk add --no-cache python3 make g++ git
 WORKDIR /build
 # Pin to a ref for reproducible builds. Update SHA/tag to upgrade OD.
-ARG OD_REF=open-design-v0.12.0
 RUN git clone --depth 1 --branch ${OD_REF} https://github.com/nexu-io/open-design.git .
 RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 RUN pnpm install --frozen-lockfile
@@ -16,7 +20,6 @@ RUN pnpm --filter @open-design/daemon build \
     && pnpm --filter @open-design/daemon deploy --legacy --prod /build/deploy/daemon
 
 # --- Main sandbox stage ---
-ARG BASE_TAG=sandbox-base-latest
 FROM ghcr.io/coderyoss/codery:${BASE_TAG}
 
 # Node.js 24 (Open Design requires ~24; force-upgrade over Playwright base's Node 22)
