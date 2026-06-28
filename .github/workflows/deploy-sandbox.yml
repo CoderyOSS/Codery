@@ -110,6 +110,7 @@ jobs:
           $SSH "printf 'GHCR_USERNAME=${{ github.actor }}\nGHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}\n' | sudo tee -a /opt/codery/.env" > /dev/null
 
           $SSH "mkdir -p /opt/codery/state"
+          $SSH "sudo mkdir -p /opt/codery/data/opendesign && sudo chown 1000:1000 /opt/codery/data/opendesign"
 
           $SSH "supervisorctl -c /etc/supervisor/supervisord.conf status codery-ci-mcp 2>/dev/null \
             | grep -q RUNNING \

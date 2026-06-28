@@ -26,3 +26,7 @@ routes:
   - subdomain: ops
     port: 3090
     target: sandbox
+
+  - subdomain: opendesign
+    port: 7456
+    target: sandbox

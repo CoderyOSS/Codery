@@ -46,6 +46,22 @@
             "directory": "/home/gem/projects",
             "env": { "HOME": "/home/gem" },
             "restart": "always"
+          },
+          {
+            "name": "opendesign",
+            "command": ["node", "/home/gem/open-design/apps/daemon/dist/cli.js", "--no-open"],
+            "user": "gem",
+            "directory": "/home/gem/open-design",
+            "env": {
+              "HOME": "/home/gem",
+              "NODE_ENV": "production",
+              "NODE_OPTIONS": "--max-old-space-size=192",
+              "OD_BIND_HOST": "0.0.0.0",
+              "OD_PORT": "7456",
+              "OD_DISABLE_API_AUTH": "1"
+            },
+            "restart": "always",
+            "priority": 30
           }
         ]
       },

@@ -1,15 +1,28 @@
 # examples/Dockerfile.sandbox
 # Personalized sandbox image. Fork this and adapt it to install
 # whatever tools you want on top of codery-sandbox-base.
+
+# --- Open Design build stage (kept separate to avoid carrying build deps) ---
+FROM docker.io/library/node:24-alpine AS od-build
+RUN apk add --no-cache python3 make g++ git
+WORKDIR /build
+# Pin to a ref for reproducible builds. Update SHA/tag to upgrade OD.
+ARG OD_REF=open-design-v0.12.0
+RUN git clone --depth 1 --branch ${OD_REF} https://github.com/nexu-io/open-design.git .
+RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @open-design/daemon build \
+    && pnpm --filter @open-design/web build \
+    && pnpm --filter @open-design/daemon deploy --legacy --prod /build/deploy/daemon
+
+# --- Main sandbox stage ---
 ARG BASE_TAG=sandbox-base-latest
 FROM ghcr.io/coderyoss/codery:${BASE_TAG}
 
-# Node.js 20 (skip if already installed, e.g. from Playwright base image)
-RUN if ! command -v node >/dev/null 2>&1; then \
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-        && apt-get install -y nodejs \
-        && rm -rf /var/lib/apt/lists/*; \
-    fi
+# Node.js 24 (Open Design requires ~24; force-upgrade over Playwright base's Node 22)
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
 # bun
 RUN curl -fsSL https://bun.sh/install | bash \
@@ -102,6 +115,29 @@ COPY containers/sandbox/docker-entrypoint.d/ /docker-entrypoint.d/
 RUN chmod +x /docker-entrypoint.d/*.sh
 COPY containers/sandbox/scripts/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Open Design runtime artifacts (built in od-build stage)
+# Layout mirrors upstream: daemon + web/out + skills + design-systems + craft + assets
+COPY --from=od-build --chown=gem:gem /build/deploy/daemon         /home/gem/open-design/apps/daemon
+COPY --from=od-build --chown=gem:gem /build/apps/web/out          /home/gem/open-design/apps/web/out
+COPY --from=od-build --chown=gem:gem /build/skills                /home/gem/open-design/skills
+COPY --from=od-build --chown=gem:gem /build/design-systems        /home/gem/open-design/design-systems
+COPY --from=od-build --chown=gem:gem /build/craft                 /home/gem/open-design/craft
+COPY --from=od-build --chown=gem:gem /build/prompt-templates      /home/gem/open-design/prompt-templates
+COPY --from=od-build --chown=gem:gem /build/assets/frames         /home/gem/open-design/assets/frames
+COPY --from=od-build --chown=gem:gem /build/assets/community-pets /home/gem/open-design/assets/community-pets
+COPY --from=od-build --chown=gem:gem /build/plugins/_official     /home/gem/open-design/plugins/_official
+
+# OD runtime deps (poppler-utils for PDF export) and data dir (bind-mounted at runtime)
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /home/gem/open-design/.od \
+    && chown -R gem:gem /home/gem/open-design
+
+# OD CLI wrapper (so `od mcp install opencode` etc. work from inside sandbox)
+RUN printf '#!/bin/sh\nexec node /home/gem/open-design/apps/daemon/bin/od.mjs "$@"\n' \
+        > /usr/local/bin/od \
+    && chmod +x /usr/local/bin/od
 
 # Persistent directories
 RUN mkdir -p /home/gem/projects \

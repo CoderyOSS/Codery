@@ -37,6 +37,9 @@ volumes:
     host: /opt/codery/data/claude
     container: /home/gem/.claude
   - type: bind
+    host: /opt/codery/data/opendesign
+    container: /home/gem/open-design/.od
+  - type: bind
     host: /opt/codery/github-app.pem
     container: /run/secrets/github-app.pem
     readonly: true
