@@ -7,12 +7,7 @@ opencode.example.com {
     reverse_proxy localhost:13000
 }
 
-vscode.example.com {
+opendesign.example.com {
     bind {$TAILSCALE_IP}
-    reverse_proxy localhost:17000
-}
-
-cli.example.com {
-    bind {$TAILSCALE_IP}
-    reverse_proxy localhost:17681
+    reverse_proxy localhost:17456
 }

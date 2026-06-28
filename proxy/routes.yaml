@@ -19,14 +19,6 @@ routes:
     port: 4050
     target: host
 
-  - subdomain: cli
-    port: 7681
-    target: sandbox
-
-  - subdomain: ops
-    port: 3090
-    target: sandbox
-
   - subdomain: opendesign
     port: 7456
     target: sandbox

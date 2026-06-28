@@ -72,16 +72,16 @@ This is critical to understand before adding any service.
 
 The port formula is: `host_port = offset + container_port` where offset is 10000 (blue) or 20000 (green).
 
-| Color | Service  | Host port | Container port | Notes |
-|-------|----------|-----------|----------------|-------|
-| blue  | OpenCode | 13000     | 3000           | |
-| blue  | ttyd     | 17681     | 7681           | via sandbox-routes.json |
-| blue  | SSH      | 10022     | 22             | stable proxy: 2222 |
-| green | OpenCode | 23000     | 3000           | |
-| green | ttyd     | 27681     | 7681           | via sandbox-routes.json |
-| green | SSH      | 20022     | 22             | stable proxy: 2222 |
+| Color | Service     | Host port | Container port | Notes |
+|-------|-------------|-----------|----------------|-------|
+| blue  | OpenCode    | 13000     | 3000           | |
+| blue  | Open Design | 17456     | 7456           | via routes.yaml |
+| blue  | SSH         | 10022     | 22             | stable proxy: 2222 |
+| green | OpenCode    | 23000     | 3000           | |
+| green | Open Design | 27456     | 7456           | via routes.yaml |
+| green | SSH         | 20022     | 22             | stable proxy: 2222 |
 
-Extra sandbox services (beyond OpenCode) are declared in `proxy/sandbox-routes.json`
+Extra sandbox services (beyond OpenCode) are declared in `proxy/routes.yaml`
 and do not require CoderyCI code changes — see "Adding a New Sandbox Service" below.
 
 ### Apps ports
@@ -370,8 +370,7 @@ containers/
 
 proxy/
   Caddyfile.default         # Initial Caddyfile (only used on first host setup — NOT edited for routes)
-  apps-routes.json          # Subdomain -> container port mappings for apps
-  sandbox-routes.json       # Subdomain -> container port mappings for extra sandbox services
+  routes.yaml               # Unified static routes (host services + sandbox/app extras)
   scripts/
     caddy-start.sh          # Starts Caddy with env vars resolved
     dns-update.sh           # Updates Tailscale IP in .env
@@ -439,8 +438,7 @@ The host is an Ubuntu VPS (any provider — see `hosting/examples/`). Key paths:
 | `/opt/codery/.env` | Secrets and config (GHCR creds, API keys, GitHub App ID) |
 | `/opt/codery/state/` | Active color per service |
 | `/opt/codery/projects/` | Shared project files |
-| `/opt/codery/proxy/apps-routes.json` | Live app routing table (read by CoderyCI at deploy time) |
-| `/opt/codery/proxy/sandbox-routes.json` | Live sandbox routing table (extra services beyond OpenCode) |
+| `/opt/codery/proxy/routes.yaml` | Unified static routing table (host services + sandbox extras) |
 | `/opt/codery/github-app.pem` | GitHub App private key (root-owned, 600) |
 | `/opt/codery/codery-ci` | The CoderyCI binary |
 | `/opt/codery/services/` | Synced service YAML definitions |

@@ -31,8 +31,7 @@ services:
       - ${GITHUB_APP_PRIVATE_KEY_PATH:-/dev/null}:/run/secrets/github-app.pem:ro
     ports:
       - "13000:3000"
-      - "17000:7000"
-      - "17681:7681"
+      - "17456:7456"
     security_opt:
       - no-new-privileges:true
     cap_drop:

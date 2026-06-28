@@ -22,7 +22,7 @@ jobs:
           $SSH "docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'"
 
           echo "=== Port bindings (relevant ports) ==="
-          $SSH "ss -tlnp | grep -E '13000|17000|17681|10022|23000|27000|27681|20022|443|80' || echo '(none)'"
+          $SSH "ss -tlnp | grep -E '13000|17456|10022|23000|27456|20022|2222|443|80' || echo '(none)'"
 
           echo "=== Codery state files ==="
           $SSH "ls -la /opt/codery/state/ && cat /opt/codery/state/* 2>/dev/null || echo '(no state files)'"

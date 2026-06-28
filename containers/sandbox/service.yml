@@ -12,6 +12,9 @@ ports:
   - name: opencode
     container_port: 3000
     subdomain: opencode
+  - name: opendesign
+    container_port: 7456
+    subdomain: opendesign
   - name: ssh
     container_port: 22
     fixed_port: 2222
