@@ -7,9 +7,13 @@ ARG BASE_TAG=sandbox-base-latest
 ARG OD_REF=open-design-v0.12.0
 
 # --- Open Design build stage (kept separate to avoid carrying build deps) ---
-FROM docker.io/library/node:24-alpine AS od-build
+# NOTE: must match sandbox runtime libc (glibc). Alpine (musl) produces
+# better-sqlite3 binaries that fail to dlopen on the Ubuntu/glibc base.
+FROM docker.io/library/node:24-bookworm-slim AS od-build
 ARG OD_REF
-RUN apk add --no-cache python3 make g++ git
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 # Pin to a ref for reproducible builds. Update SHA/tag to upgrade OD.
 RUN git clone --depth 1 --branch ${OD_REF} https://github.com/nexu-io/open-design.git .
