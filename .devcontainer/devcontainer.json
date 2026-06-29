@@ -58,7 +58,8 @@
               "NODE_OPTIONS": "--max-old-space-size=192",
               "OD_BIND_HOST": "0.0.0.0",
               "OD_PORT": "7456",
-              "OD_DISABLE_API_AUTH": "1"
+              "OD_DISABLE_API_AUTH": "1",
+              "OD_ALLOWED_ORIGINS": "https://opendesign.rancidgrandmas.online"
             },
             "restart": "always",
             "priority": 30
