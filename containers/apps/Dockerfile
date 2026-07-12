@@ -32,8 +32,16 @@ RUN curl -fsSL https://bun.sh/install | bash \
     && ln -s /usr/local/bin/bun /usr/local/bin/bunx
 ENV BUN_INSTALL_BIN=/usr/local/bin
 
-RUN apt-get update && apt-get install -y --no-install-recommends elixir \
-    && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends erlang \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV ELIXIR_VERSION=1.16.3
+RUN curl -fsSL https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-25.zip -o /tmp/elixir.zip \
+    && unzip -q /tmp/elixir.zip -d /opt/elixir \
+    && rm /tmp/elixir.zip \
+    && ln -s /opt/elixir/bin/elixir /usr/local/bin/elixir \
+    && ln -s /opt/elixir/bin/mix /usr/local/bin/mix \
+    && ln -s /opt/elixir/bin/iex /usr/local/bin/iex \
     && mix local.hex --force \
     && mix local.rebar --force
 
