@@ -32,6 +32,11 @@ RUN curl -fsSL https://bun.sh/install | bash \
     && ln -s /usr/local/bin/bun /usr/local/bin/bunx
 ENV BUN_INSTALL_BIN=/usr/local/bin
 
+RUN apt-get update && apt-get install -y --no-install-recommends elixir \
+    && rm -rf /var/lib/apt/lists/* \
+    && mix local.hex --force \
+    && mix local.rebar --force
+
 COPY containers/apps/scripts/github-app-token.sh /usr/local/bin/github-app-token
 RUN chmod +x /usr/local/bin/github-app-token
 
