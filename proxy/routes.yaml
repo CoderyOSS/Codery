@@ -15,10 +15,6 @@ routes:
     port: 4041
     target: host
 
-  - subdomain: trailhead
-    port: 4050
-    target: host
-
   - subdomain: opendesign
     port: 7456
     target: sandbox
