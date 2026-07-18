@@ -53,7 +53,7 @@ pub(crate) fn generate_config(routes: &[UnifiedRoute], domain: &str) -> String {
                 ""
             };
             Some(format!(
-                "server {{\n    listen 8080;\n    server_name {fqdn};\n    location / {{{cache_headers}\n        proxy_pass http://127.0.0.1:{internal_port};\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }}\n}}\n"
+                "server {{\n    listen 8080;\n    server_name {fqdn};\n    location / {{{cache_headers}\n        proxy_pass http://127.0.0.1:{internal_port};\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection $connection_upgrade;\n    }}\n}}\n"
             ))
         })
         .collect();
