@@ -197,6 +197,19 @@ Codery MCP server pre-configured in `opencode.json`. Use `codery.*` tools direct
 | `rollback` | Deploy previous cached image via full blue/green deploy |
 | `reload_routes` | Regenerate Caddyfile from all service YAMLs + route JSON files, reload Caddy in-place |
 | `run_preflight` | Check supervisord, Tailscale, and Caddy admin API health |
+| `add_app` | Hot-add an app: Launchy config + route, starts instantly |
+| `remove_app` | Hot-remove an app: stops process, deletes config and route |
+| `restart_app` | Restart an app process (Launchy respawns) — route and config preserved |
+| `list_apps` | List all apps registered in the apps container |
+| `get_app_status` | Per-app process state from Launchy (pid, uptime) |
+
+### Restarting an app
+
+To restart an app (pick up code/env changes), use `restart_app name='myapp'`.
+It kills the process and Launchy respawns it — the route and config stay intact.
+
+**NEVER remove_app + add_app to restart.** That drops and recreates the route;
+a wrong re-add breaks the URL.
 
 ### When to use reload_routes vs full redeploy
 

@@ -132,6 +132,12 @@ struct RemoveAppParams {
     subdomain: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RestartAppParams {
+    #[schemars(description = "App name as shown by get_app_status / list_apps")]
+    name: String,
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Run a subprocess and return combined stdout+stderr. Returns Ok regardless of
@@ -1078,6 +1084,7 @@ impl OrchestratorMcp {
                 "what": "App started instantly via Launchy. No container rebuild.",
                 "persistence": "Runtime apps persist across container restarts AND blue/green redeploys (stored in SQLite)",
                 "to_remove": "remove_app name='{}' — stops process, deletes config, removes route",
+                "to_restart": "restart_app name='{}' — kills process, Launchy respawns it; route and config preserved",
                 "to_check": "get_app_status shows per-app process state",
                 "to_read_logs": "read_container_file service='apps' path='/var/log/launchy/{name}.log'"
             }
@@ -1090,7 +1097,9 @@ impl OrchestratorMcp {
     /// removes the route, and reloads Nginx and Caddy.
     #[tool(
         description = "Remove an app from the apps container: stop process, delete Launchy \
-                          config, remove subdomain route, reload Nginx and Caddy."
+                          config, remove subdomain route, reload Nginx and Caddy. \
+                          Do NOT use this just to restart an app — use restart_app instead, \
+                          which preserves the route and config."
     )]
     async fn remove_app(
         &self,
@@ -1135,6 +1144,105 @@ impl OrchestratorMcp {
         tool_ok(json)
     }
 
+    /// Restart an app process in the apps container without touching its route or config.
+    /// Kills the process; Launchy respawns it automatically (restart=always).
+    #[tool(
+        description = "Restart an app in the apps container: kills the process and Launchy \
+                          respawns it automatically. Route, Launchy config, and SQLite record \
+                          are untouched — the subdomain keeps working throughout. \
+                          ALWAYS use this instead of remove_app+add_app when you only need a \
+                          restart (e.g. to pick up code or env changes)."
+    )]
+    async fn restart_app(
+        &self,
+        Parameters(p): Parameters<RestartAppParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let read_status = || async {
+            let out = container_exec("apps", &["cat", "/run/launchy-status.json"]).await.ok()?;
+            serde_json::from_str::<serde_json::Value>(&out).ok()
+        };
+        let find_pid = |status: &serde_json::Value, name: &str| -> Option<u64> {
+            status
+                .get("services")?
+                .as_array()?
+                .iter()
+                .find(|s| s.get("name").and_then(|n| n.as_str()) == Some(name))?
+                .get("pid")?
+                .as_u64()
+        };
+
+        let status = read_status()
+            .await
+            .ok_or_else(|| tool_err("Launchy status file not found — is the apps container running?"))?;
+
+        let old_pid = match find_pid(&status, &p.name) {
+            Some(pid) => pid,
+            None => {
+                let names: Vec<&str> = status
+                    .get("services")
+                    .and_then(|s| s.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                return Err(tool_err(format!(
+                    "app '{}' not found in Launchy status. Running apps: {}",
+                    p.name,
+                    names.join(", ")
+                )));
+            }
+        };
+
+        let old_pid_str = old_pid.to_string();
+        container_exec("apps", &["kill", &old_pid_str])
+            .await
+            .map_err(|e| tool_err(format!("failed to kill app process: {}", e)))?;
+
+        // Poll for a new pid. If the old pid is still alive after ~2s, escalate to SIGKILL.
+        let mut new_pid: Option<u64> = None;
+        for attempt in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if attempt == 3 {
+                if let Some(st) = read_status().await {
+                    if find_pid(&st, &p.name) == Some(old_pid) {
+                        let _ = container_exec("apps", &["kill", "-9", &old_pid_str]).await;
+                    }
+                }
+            }
+            if let Some(st) = read_status().await {
+                if let Some(pid) = find_pid(&st, &p.name) {
+                    if pid != old_pid {
+                        new_pid = Some(pid);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let new_pid = new_pid.ok_or_else(|| {
+            tool_err(format!(
+                "App '{}' killed (pid {}) but did not come back within 5s. \
+                 Check logs: read_container_file service='apps' path='/var/log/launchy/{}.log'",
+                p.name, old_pid, p.name
+            ))
+        })?;
+
+        let response = json!({
+            "name": p.name,
+            "old_pid": old_pid,
+            "new_pid": new_pid,
+            "status": "restarted",
+            "guidance": {
+                "what": "Process killed and respawned by Launchy. Route and config untouched.",
+                "to_verify": "get_app_status shows uptime/reset; check your subdomain responds"
+            }
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
+        tool_ok(json)
+    }
+
     /// List all apps currently registered in SQLite.
     #[tool(
         description = "List all apps registered in the apps container (reads SQLite). \
@@ -1149,6 +1257,7 @@ impl OrchestratorMcp {
             "guidance": {
                 "to_add": "add_app name='myapp' subdomain='myapp' internal_port=3001 command='...' directory='...'",
                 "to_remove": "remove_app name='myapp'",
+                "to_restart": "restart_app name='myapp' — restarts process, route and config preserved",
                 "to_check_status": "get_app_status shows per-app process state",
                 "routing": "Caddy → Nginx (8080) → app process (internal_port)"
             }
@@ -1217,7 +1326,8 @@ impl OrchestratorMcp {
             "guidance": {
                 "build_vs_runtime": "build = baked into image. runtime = added via add_app (persists across redeploys on host bind mounts).",
                 "to_read_logs": "read_container_file service='apps' path='/var/log/launchy/{name}.log'",
-                "to_add": "add_app name='myapp' subdomain='myapp' internal_port=3001 command='...' directory='...'"
+                "to_add": "add_app name='myapp' subdomain='myapp' internal_port=3001 command='...' directory='...'",
+                "to_restart": "restart_app name='myapp' — restarts process, route and config preserved"
             }
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
@@ -1299,6 +1409,7 @@ Both containers use **Launchy** (Rust binary) as PID 1:
 |---|---|
 | `add_app` | Hot-add an app: writes Launchy config, registers route, starts process (instant) |
 | `remove_app` | Hot-remove an app: stops process, deletes config, removes route |
+| `restart_app` | Restart an app process (Launchy respawns) — route and config preserved |
 | `list_apps` | List all apps from SQLite |
 | `get_app_status` | Per-app status from Launchy (pid, uptime, build vs runtime) |
 
@@ -1339,6 +1450,17 @@ Configs are stored in SQLite at `/opt/codery/codery.db` and regenerated as
 Launchy JSON files and route configs on every mutation.
 Launchy reads `include_dirs` on startup, so runtime apps auto-restore.
 
+### Restart an app
+
+```
+restart_app name='myapp'
+```
+
+Kills the process; Launchy respawns it automatically. Route, Launchy config, and
+SQLite record are untouched — the subdomain keeps working. Use this to pick up code
+or env changes. **Never use remove_app+add_app to restart** — that drops and
+recreates the route, and a wrong re-add breaks the URL.
+
 ### Remove an app
 
 ```
@@ -1363,7 +1485,7 @@ read_container_file service='apps' path='/var/log/launchy/myapp.log'
 ## Diagnostic workflow: "app not responding"
 
 1. `get_app_status` → is the app running?
-2. If not running: `read_container_file service='apps' path='/var/log/launchy/{name}.log'` → crash reason
+2. If not running: `read_container_file service='apps' path='/var/log/launchy/{name}.log'` → crash reason; after fixing, `restart_app name='{name}'`
 3. If running: `get_routes` → verify routing (subdomain → host_port → internal_port)
 4. `check_port_listening port={host_port}` → verify Caddy can reach container
 5. `get_caddyfile` → verify Caddy has the route
