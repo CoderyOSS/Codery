@@ -4,7 +4,7 @@
 
 # Global ARGs (must precede any FROM to be usable in FROM instructions)
 ARG BASE_TAG=sandbox-base-latest
-ARG OD_REF=open-design-v0.12.0
+ARG OD_REF=open-design-v0.16.1
 
 # --- Open Design build stage (kept separate to avoid carrying build deps) ---
 # NOTE: must match sandbox runtime libc (glibc). Alpine (musl) produces
@@ -73,7 +73,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && rm -rf /var/lib/apt/lists/*
 
 # OpenCode + Claude Code
-RUN npm install -g opencode-ai@1.15.1 @anthropic-ai/claude-code openspec-extensions
+RUN npm install -g opencode-ai@1.18.5 @anthropic-ai/claude-code openspec-extensions opencode-with-claude
 
 # OpenSpec skills & commands for OpenCode
 RUN openspec init --tools opencode --force /home/gem/ \
