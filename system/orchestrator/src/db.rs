@@ -52,6 +52,17 @@ pub fn init(conn: &Connection) -> Result<()> {
         "ALTER TABLE apps ADD COLUMN no_cache INTEGER NOT NULL DEFAULT 0;"
     );
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS previews (
+            service     TEXT PRIMARY KEY,
+            subdomain   TEXT NOT NULL UNIQUE,
+            host_port   INTEGER NOT NULL,
+            sha         TEXT NOT NULL,
+            color       TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );"
+    ).context("failed to create previews table")?;
+
     Ok(())
 }
 
@@ -120,6 +131,79 @@ pub fn port_claimed(conn: &Connection, port: u16) -> Result<bool> {
         |row| row.get(0),
     ).context("failed to check port")?;
     Ok(count > 0)
+}
+
+// ── Preview routes ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewRecord {
+    pub service: String,
+    pub subdomain: String,
+    pub host_port: u16,
+    pub sha: String,
+    pub color: String,
+    pub created_at: String,
+}
+
+/// Insert or replace a preview route for a service.
+/// Subdomain defaults to "{service}-preview" if not provided.
+pub fn upsert_preview(conn: &Connection, preview: &PreviewRecord) -> Result<()> {
+    conn.execute(
+        "INSERT INTO previews (service, subdomain, host_port, sha, color)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(service) DO UPDATE SET
+            subdomain = excluded.subdomain,
+            host_port = excluded.host_port,
+            sha       = excluded.sha,
+            color     = excluded.color",
+        (
+            &preview.service,
+            &preview.subdomain,
+            preview.host_port as i64,
+            &preview.sha,
+            &preview.color,
+        ),
+    )
+    .with_context(|| format!("failed to upsert preview for '{}'", preview.service))?;
+    Ok(())
+}
+
+pub fn delete_preview(conn: &Connection, service: &str) -> Result<bool> {
+    let rows = conn.execute("DELETE FROM previews WHERE service = ?1", [service])
+        .with_context(|| format!("failed to delete preview for '{}'", service))?;
+    Ok(rows > 0)
+}
+
+pub fn list_previews(conn: &Connection) -> Result<Vec<PreviewRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT service, subdomain, host_port, sha, color, created_at
+         FROM previews ORDER BY service"
+    ).context("failed to prepare previews query")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PreviewRecord {
+            service:   row.get(0)?,
+            subdomain: row.get(1)?,
+            host_port: row.get::<_, i64>(2)? as u16,
+            sha:       row.get(3)?,
+            color:     row.get(4)?,
+            created_at:row.get(5)?,
+        })
+    }).context("failed to query previews")?;
+    let mut previews = Vec::new();
+    for p in rows {
+        previews.push(p.context("failed to read preview row")?);
+    }
+    Ok(previews)
+}
+
+pub fn find_preview(conn: &Connection, service: &str) -> Result<Option<PreviewRecord>> {
+    let previews = list_previews(conn)?;
+    Ok(previews.into_iter().find(|p| p.service == service))
+}
+
+/// Default preview subdomain for a service: "{service}-preview".
+pub fn preview_subdomain(service: &str) -> String {
+    format!("{}-preview", service)
 }
 
 // ── Routes.yaml types and loader ──────────────────────────────────────────────
@@ -211,6 +295,17 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
             target: "apps".to_string(),
             internal_port: Some(app.internal_port),
             no_cache: app.no_cache,
+        });
+    }
+
+    let previews = list_previews(conn)?;
+    for p in &previews {
+        map.insert(p.subdomain.clone(), UnifiedRoute {
+            subdomain: p.subdomain.clone(),
+            port: p.host_port,
+            target: "host".to_string(),
+            internal_port: None,
+            no_cache: true,
         });
     }
 
@@ -356,5 +451,85 @@ mod tests {
         app2.subdomain = "same".to_string();
         app2.internal_port = 3002;
         assert!(insert_app(&conn, &app2).is_err());
+    }
+
+    // ── Preview tests ──────────────────────────────────────────────────────────
+
+    fn sample_preview(service: &str) -> PreviewRecord {
+        PreviewRecord {
+            service: service.to_string(),
+            subdomain: preview_subdomain(service),
+            host_port: 23000,
+            sha: "abc123".to_string(),
+            color: "green".to_string(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn preview_subdomain_format() {
+        assert_eq!(preview_subdomain("sandbox"), "sandbox-preview");
+        assert_eq!(preview_subdomain("apps"), "apps-preview");
+    }
+
+    #[test]
+    fn preview_insert_and_list() {
+        let conn = test_conn();
+        upsert_preview(&conn, &sample_preview("sandbox")).unwrap();
+        let previews = list_previews(&conn).unwrap();
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].service, "sandbox");
+        assert_eq!(previews[0].subdomain, "sandbox-preview");
+        assert_eq!(previews[0].host_port, 23000);
+    }
+
+    #[test]
+    fn preview_upsert_replaces() {
+        let conn = test_conn();
+        upsert_preview(&conn, &sample_preview("sandbox")).unwrap();
+        let mut updated = sample_preview("sandbox");
+        updated.host_port = 13000;
+        updated.color = "blue".to_string();
+        upsert_preview(&conn, &updated).unwrap();
+
+        let previews = list_previews(&conn).unwrap();
+        assert_eq!(previews.len(), 1, "upsert should replace not insert");
+        assert_eq!(previews[0].host_port, 13000);
+        assert_eq!(previews[0].color, "blue");
+    }
+
+    #[test]
+    fn preview_delete() {
+        let conn = test_conn();
+        upsert_preview(&conn, &sample_preview("sandbox")).unwrap();
+        assert!(delete_preview(&conn, "sandbox").unwrap());
+        assert!(list_previews(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn preview_delete_nonexistent_returns_false() {
+        let conn = test_conn();
+        assert!(!delete_preview(&conn, "nope").unwrap());
+    }
+
+    #[test]
+    fn preview_find_by_service() {
+        let conn = test_conn();
+        upsert_preview(&conn, &sample_preview("sandbox")).unwrap();
+        assert!(find_preview(&conn, "sandbox").unwrap().is_some());
+        assert!(find_preview(&conn, "apps").unwrap().is_none());
+    }
+
+    #[test]
+    fn preview_appears_in_route_map() {
+        let conn = test_conn();
+        upsert_preview(&conn, &sample_preview("sandbox")).unwrap();
+        let routes = build_route_map(&conn).unwrap();
+        let p = routes.iter().find(|r| r.subdomain == "sandbox-preview");
+        assert!(p.is_some(), "preview route should appear in route map");
+        let p = p.unwrap();
+        assert_eq!(p.port, 23000);
+        assert_eq!(p.target, "host");
+        assert!(p.no_cache, "preview routes should be no_cache");
     }
 }

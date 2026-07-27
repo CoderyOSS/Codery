@@ -99,6 +99,56 @@ pub async fn run(service: &str, sha: &str) -> Result<()> {
     deploy_service(&def, sha, &RealDeps { docker }).await
 }
 
+/// Load service def and start the inactive color without cutting over.
+/// Returns the inactive color that was started, so callers can register a
+/// preview route pointing at its host port.
+pub async fn run_start_inactive(service: &str, sha: &str) -> Result<String> {
+    let def = ServiceDef::load(service)
+        .with_context(|| format!("failed to load service definition for '{service}'"))?;
+    let docker = Docker::connect_with_socket_defaults()
+        .context("failed to connect to Docker socket")?;
+    let deps = RealDeps { docker };
+    deps.preflight()?;
+    deps.ensure_network(&def.network).await?;
+    let active = deps.read_active(&def.service)?;
+    let inactive = config::flip(&active).to_string();
+    println!("[deploy] Starting preview: active={} inactive={}", active, inactive);
+    start_inactive(&def, sha, &inactive, &deps).await?;
+    Ok(inactive)
+}
+
+/// Load service def and run cutover for the currently inactive color.
+/// Stops the old active container and prunes old images.
+pub async fn run_cutover(service: &str, sha: &str) -> Result<()> {
+    let def = ServiceDef::load(service)
+        .with_context(|| format!("failed to load service definition for '{service}'"))?;
+    let docker = Docker::connect_with_socket_defaults()
+        .context("failed to connect to Docker socket")?;
+    let deps = RealDeps { docker };
+    let active = deps.read_active(&def.service)?;
+    let inactive = config::flip(&active);
+    cutover(&def, sha, &active, inactive, &deps).await
+}
+
+/// Load service def, stop the inactive container, and prune images.
+/// No state changes — active color is untouched. Used by `cancel-preview`.
+pub async fn run_cancel_inactive(service: &str) -> Result<()> {
+    let def = ServiceDef::load(service)
+        .with_context(|| format!("failed to load service definition for '{service}'"))?;
+    let docker = Docker::connect_with_socket_defaults()
+        .context("failed to connect to Docker socket")?;
+    let deps = RealDeps { docker };
+    let active = deps.read_active(&def.service)?;
+    let inactive = config::flip(&active);
+    let container = config::container_name(&def.service, inactive);
+    println!("[deploy] Cancelling preview: stopping {}", container);
+    deps.stop_container(&container).await?;
+    deps.remove_container_if_exists(&container).await?;
+    deps.prune_images(&def.service).await?;
+    println!("[deploy] Preview cancelled for {}", def.service);
+    Ok(())
+}
+
 async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) -> Result<()> {
     println!(
         "[deploy] Starting {service} blue/green deploy for sha={sha}",
@@ -119,6 +169,20 @@ async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) ->
         return Ok(());
     }
 
+    start_inactive(def, sha, inactive, deps).await?;
+    cutover(def, sha, &active, inactive, deps).await?;
+    Ok(())
+}
+
+/// Validate, remove stale inactive container, start new inactive, health check.
+/// Does NOT touch state files or Caddy. Caller may register a preview route
+/// pointing at the inactive container after this returns Ok(()).
+async fn start_inactive<D: DeployDeps>(
+    def: &ServiceDef,
+    sha: &str,
+    inactive: &str,
+    deps: &D,
+) -> Result<()> {
     // ── Validate everything before touching Docker ────────────────────────────
     deps.validate(def, sha, inactive).await?;
 
@@ -131,7 +195,19 @@ async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) ->
     // ── Health check ──────────────────────────────────────────────────────────
     deps.health_check(def, inactive).await?;
     println!("[deploy] Health check passed");
+    Ok(())
+}
 
+/// Write state, reload Caddy, stop old active container, prune images.
+/// `active` is the color that is currently active (will be stopped).
+/// `inactive` is the color that will become active.
+async fn cutover<D: DeployDeps>(
+    def: &ServiceDef,
+    sha: &str,
+    active: &str,
+    inactive: &str,
+    deps: &D,
+) -> Result<()> {
     // ── Cutover (no automated rollback from this point forward) ───────────────
     println!(
         "[deploy] CUTOVER BEGIN: {service} active={active} → inactive={inactive} \
@@ -150,7 +226,7 @@ async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) ->
     deps.apply_caddy()?;
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
-    deps.stop_container(&config::container_name(&def.service, &active)).await?;
+    deps.stop_container(&config::container_name(&def.service, active)).await?;
     println!("[deploy] Stopped old active container codery-{}-{}", def.service, active);
 
     deps.prune_images(&def.service).await?;
@@ -731,6 +807,99 @@ network: codery-net
             events,
             vec!["preflight", "ensure_network:codery-net"],
             "no container operations should occur when SHA is already active\nevents: {events:?}"
+        );
+    }
+
+    // ── start_inactive / cutover split ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn start_inactive_only_does_not_cutover() {
+        let def = sandbox_def();
+        let deps = MockDeps::new(); // active=blue
+
+        start_inactive(&def, "abc123", "green", &deps).await.unwrap();
+
+        let events = deps.events();
+        // Validates, removes stale inactive, starts container, health checks.
+        // Critically: no write_active, no apply_caddy, no stop_container, no prune.
+        assert_eq!(
+            events,
+            vec![
+                "validate",
+                "remove_container:codery-sandbox-green",
+                "start_container:codery-sandbox-green",
+                "health_check:codery-sandbox-green",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cutover_only_promotes_inactive() {
+        let def = sandbox_def();
+        let deps = MockDeps::new(); // active=blue
+
+        cutover(&def, "abc123", "blue", "green", &deps).await.unwrap();
+
+        let events = deps.events();
+        assert_eq!(
+            events,
+            vec![
+                "write_active:sandbox=green",
+                "write_active_sha:sandbox=abc123",
+                "apply_caddy",
+                "stop_container:codery-sandbox-blue",
+                "prune_images:sandbox",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn start_inactive_then_cutover_matches_full_deploy() {
+        let def = sandbox_def();
+        let deps = MockDeps::new();
+
+        // Same SHA, same active color as happy_path_deploys_inactive_and_removes_active.
+        let combined = async {
+            start_inactive(&def, "abc123", "green", &deps).await?;
+            cutover(&def, "abc123", "blue", "green", &deps).await
+        };
+        combined.await.unwrap();
+
+        let events = deps.events();
+        // Compare against the happy-path expectation (minus preflight+ensure_network
+        // which live in deploy_service, not the split functions).
+        assert_eq!(
+            events,
+            vec![
+                "validate",
+                "remove_container:codery-sandbox-green",
+                "start_container:codery-sandbox-green",
+                "health_check:codery-sandbox-green",
+                "write_active:sandbox=green",
+                "write_active_sha:sandbox=abc123",
+                "apply_caddy",
+                "stop_container:codery-sandbox-blue",
+                "prune_images:sandbox",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn start_inactive_health_failure_does_not_cutover() {
+        let def = sandbox_def();
+        let deps = MockDeps { health_ok: false, ..MockDeps::new() };
+
+        let result = start_inactive(&def, "abc123", "green", &deps).await;
+        assert!(result.is_err());
+
+        let events = deps.events();
+        assert!(
+            !events.iter().any(|e| e.starts_with("write_active:")),
+            "no cutover side-effects on health failure\nevents: {events:?}"
+        );
+        assert!(
+            !events.contains(&"apply_caddy".to_string()),
+            "no caddy reload on health failure\nevents: {events:?}"
         );
     }
 }

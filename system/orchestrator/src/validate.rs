@@ -64,8 +64,10 @@ pub async fn check_deploy(
         }
     }
 
-    // ── 4. Image pullability ──────────────────────────────────────────────────
-    if let Err(e) = images::pull(&def.service, sha).await {
+    // ── 4. Image availability ─────────────────────────────────────────────────
+    // Pull from registry if missing locally. Locally-built images (e.g. devbox
+    // experiments) skip the network pull entirely.
+    if let Err(e) = images::pull_if_missing(&def.service, sha).await {
         errors.push(format!("image pull failed: {e}"));
     }
 

@@ -7,6 +7,35 @@ use std::collections::HashMap;
 
 use crate::config;
 
+/// Check whether an image reference is present in the local Docker cache.
+pub async fn image_exists_locally(image: &str) -> Result<bool> {
+    let docker = Docker::connect_with_socket_defaults()
+        .context("failed to connect to Docker socket")?;
+    let mut filters = HashMap::new();
+    filters.insert("reference".to_string(), vec![image.to_string()]);
+    let images = docker
+        .list_images(Some(ListImagesOptions {
+            all: false,
+            filters,
+            ..Default::default()
+        }))
+        .await
+        .context("failed to list images")?;
+    Ok(!images.is_empty())
+}
+
+/// Pull an image by service name and git sha, but skip the network pull if the
+/// image is already present locally. Useful for locally-built images that have
+/// never been pushed to a registry.
+pub async fn pull_if_missing(service: &str, sha: &str) -> Result<()> {
+    let image = config::image_ref(service, sha);
+    if image_exists_locally(&image).await? {
+        println!("[images] Image {} present locally — skipping pull", image);
+        return Ok(());
+    }
+    pull(service, sha).await
+}
+
 /// Pull an image by service name and git sha. Streams progress to stdout.
 /// Reads GHCR credentials from /opt/codery/.env (GHCR_USERNAME + GHCR_TOKEN).
 pub async fn pull(service: &str, sha: &str) -> Result<()> {
@@ -161,5 +190,18 @@ fn ghcr_credentials() -> Option<DockerCredentials> {
             println!("[images] Warning: GHCR_USERNAME/GHCR_TOKEN not in .env — pulling anonymously");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_ref_format() {
+        assert_eq!(
+            config::image_ref("sandbox", "abc123"),
+            "ghcr.io/coderyoss/codery:sandbox-abc123"
+        );
     }
 }

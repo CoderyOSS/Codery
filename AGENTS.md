@@ -262,11 +262,78 @@ It is a static musl binary (no dependencies). It runs on the host, not in a cont
 5. Stop and remove old container
 6. Prune old images
 
-**State files:** `/opt/codery/state/sandbox` and `/opt/codery/state/apps`
+**State files:** `/opt/codery/state/sandbox.color` and `/opt/codery/state/apps.color`
 contain the currently active color string (`blue` or `green`).
+`/opt/codery/state/{service}.sha` records the deployed SHA (idempotency check).
 
 **No automated rollback after cutover.** If something goes wrong after Caddy switches,
-investigate manually.
+investigate manually. See "Preview deploys" below for a verify-before-promote workflow.
+
+---
+
+## Preview Deploys (verify before promote)
+
+`codery-ci deploy` cuts over immediately — fine for CI-driven pushes, dangerous
+for hand-edited Dockerfiles where a broken image kills the active sandbox
+session. Preview deploys split the flow: start the inactive color, expose it
+on a `-preview` subdomain, verify, then promote or abort.
+
+All commands run from the host shell (not inside a container). `build` wraps
+`docker build` with the canonical image tag.
+
+### Workflow
+
+```
+# 1. Build the new image locally. Run from the Codery repo root so default
+#    dockerfile paths resolve. Tag can be anything (sha, hostname, descriptive).
+codery-ci build sandbox host-xyz
+# → docker build -t ghcr.io/coderyoss/codery:sandbox-host-xyz \
+#                 -f examples/Dockerfile.sandbox .
+
+# 2. Start the inactive color and register a preview route. Active container
+#    keeps running — sessions inside it survive.
+codery-ci deploy-preview sandbox host-xyz
+# → starts codery-sandbox-{inactive}, health-checks it, adds Caddy route:
+#   sandbox-preview.{DOMAIN} → localhost:{inactive_offset+3000}
+
+# 3. Verify at https://sandbox-preview.{DOMAIN}. Check OpenCode, tools, mounts.
+#    Inspect logs: ssh gem@apps 'docker logs codery-sandbox-{inactive}'
+
+# 4a. Promote — kills any sessions in the previously-active container.
+codery-ci cutover sandbox
+# → reuses the SHA recorded by deploy-preview; or pass --sha to override.
+
+# 4b. Abort — stops inactive, removes preview route. Active untouched.
+codery-ci cancel-preview sandbox
+```
+
+### Preview subdomain
+
+Fixed name: `{service}-preview`. For sandbox that's `sandbox-preview.{DOMAIN}`;
+for apps, `apps-preview.{DOMAIN}`. The route is stored in the `previews`
+SQLite table and reloaded into Caddy/Nginx on every mutation. `caddy::apply_all`
+and `nginx::generate_and_reload` both pick it up automatically.
+
+### Preview port auto-resolution
+
+`deploy-preview` needs to know which container port to expose. Resolution order:
+
+1. `--port <container_port>` flag, if given
+2. First named port in `service.yml` with a `subdomain` (sandbox → `opencode:3000`)
+3. `8080` if the service has a `port_range` covering it (apps → Nginx)
+4. Otherwise: error, pass `--port` explicitly
+
+### Locally-built images
+
+`validate` and `deploy-preview` skip the GHCR pull when the image is already
+present in the local Docker cache (`images::pull_if_missing`). This lets you
+`docker build` an image and immediately deploy-preview it without pushing.
+
+### State file paths
+
+- `/opt/codery/state/{service}.color` — active color (`blue`/`green`)
+- `/opt/codery/state/{service}.sha` — active SHA (used by `deploy` idempotency check)
+- `/opt/codery/codery.db` `previews` table — preview routes
 
 ---
 
