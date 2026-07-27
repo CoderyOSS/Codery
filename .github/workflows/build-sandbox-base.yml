@@ -1,11 +1,8 @@
 name: Build Sandbox Base
 
+# Manual-only. Relevant source paths: containers/sandbox/Dockerfile.base,
+# containers/sandbox/bin/launchy. Run "Deploy Sandbox" (Build Sandbox) after.
 on:
-  push:
-    branches: [master]
-    paths:
-      - 'containers/sandbox/Dockerfile.base'
-      - 'containers/sandbox/bin/launchy'
   workflow_dispatch:
 
 env:

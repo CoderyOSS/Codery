@@ -1,21 +1,18 @@
 # examples/Dockerfile.sandbox
-# Personalized sandbox image. Fork this and adapt it to install
-# whatever tools you want on top of codery-sandbox-base.
+# Sandbox image. Package set is declarative: containers/sandbox/nixos/
+# configuration.nix lists every tool; the nix-builder stage below turns it
+# into a rootfs + store closure, assembled onto scratch. To add a tool:
+# edit configuration.nix, rebuild. No more curl|bash chains here.
 
-# Global ARGs (must precede any FROM to be usable in FROM instructions)
-ARG BASE_TAG=sandbox-base-latest
 ARG OD_REF=open-design-v0.16.1
 
-# --- Open Design build stage (kept separate to avoid carrying build deps) ---
-# NOTE: must match sandbox runtime libc (glibc). Alpine (musl) produces
-# better-sqlite3 binaries that fail to dlopen on the Ubuntu/glibc base.
+# --- Open Design build stage (must stay glibc: better-sqlite3 dlopen) ---
 FROM docker.io/library/node:24-bookworm-slim AS od-build
 ARG OD_REF
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-# Pin to a ref for reproducible builds. Update SHA/tag to upgrade OD.
 RUN git clone --depth 1 --branch ${OD_REF} https://github.com/nexu-io/open-design.git .
 RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 RUN pnpm install --frozen-lockfile
@@ -23,137 +20,103 @@ RUN pnpm --filter @open-design/daemon build \
     && pnpm --filter @open-design/web build \
     && pnpm --filter @open-design/daemon deploy --legacy --prod /build/deploy/daemon
 
-# --- Main sandbox stage ---
-FROM ghcr.io/coderyoss/codery:${BASE_TAG}
+# --- Nix build stage: rootfs + store closure from the flake ---
+FROM docker.io/nixos/nix:latest AS nix-builder
+RUN printf '%s\n' \
+      'experimental-features = nix-command flakes' \
+      'sandbox = false' \
+      'filter-syscalls = false' \
+    >> /etc/nix/nix.conf
+WORKDIR /repo
+COPY . .
+# --override-input: the flake's repo input is declared relative (path:../..),
+# which nix resolves from the flake's copy in /nix/store — escaping to /nix.
+# Overriding with the absolute context path sidesteps that.
+RUN nix build --override-input repo path:/repo \
+      ./containers/sandbox/nixos#rootfs -o /result \
+    && mkdir -p /export/nix/store /export/rootfs \
+    && nix path-info -r /result | xargs -I{} cp -a {} /export/nix/store/ \
+    && cp -a /result/. /export/rootfs/ \
+    && chmod -R u+w /export/rootfs
 
-# Node.js 24 (Open Design requires ~24; force-upgrade over Playwright base's Node 22)
-RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/export/rootfs/home/gem/.npm-global/bin:/export/rootfs/bin:/export/rootfs/usr/bin:${PATH}"
 
-# bun
-RUN curl -fsSL https://bun.sh/install | bash \
-    && mv /root/.bun/bin/bun /usr/local/bin/bun \
-    && ln -s /usr/local/bin/bun /usr/local/bin/bunx
-ENV BUN_INSTALL_BIN=/usr/local/bin
+# Pre-trust GitHub host key (network step, so it lives in Docker not nix)
+RUN ssh-keyscan github.com >> /export/rootfs/etc/ssh/ssh_known_hosts
 
-# Rust
-ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/usr/local/cargo/bin:${PATH}"
+# npm global tools (npm registry, not nixpkgs). opencode-linux-x64 is the
+# platform binary package installed directly: the opencode-ai launcher's
+# libc detection sees the musl nixos/nix builder and picks the wrong variant,
+# while nixpkgs node (and the final image) are glibc.
+RUN npm install -g --prefix /export/rootfs/home/gem/.npm-global \
+      opencode-linux-x64@1.18.5 @anthropic-ai/claude-code openspec-extensions opencode-with-claude \
+      typescript typescript-language-server prettier \
+    && ln -sf ../lib/node_modules/opencode-linux-x64/bin/opencode \
+      /export/rootfs/home/gem/.npm-global/bin/opencode \
+    && HOME=/export/rootfs/home/gem openspec init --tools opencode --force /export/rootfs/home/gem/
 
-# Python (for Neovim LSP tools: basedpyright, ruff)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
-    && rm -rf /var/lib/apt/lists/*
+# Rust toolchain (rustup manages its own store; mirrored at /usr/local/*).
+# `rustup default stable` populates RUSTUP_HOME but not CARGO_HOME/bin (only
+# rustup-init does) — seed the shim hardlinks manually; rustup proxies by argv[0].
+ENV RUSTUP_HOME=/export/rustup CARGO_HOME=/export/cargo
+RUN rustup default stable && rustup component add rust-analyzer \
+    && mkdir -p /export/cargo/bin \
+    && cp "$(readlink -f "$(command -v rustup)")" /export/cargo/bin/rustup \
+    && for t in cargo rustc rust-analyzer rustfmt rustdoc; do \
+         ln /export/cargo/bin/rustup "/export/cargo/bin/$t"; \
+       done
 
-# uv (system-wide, mirrors bun/rust pattern)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && mv /root/.local/bin/uv  /usr/local/bin/uv \
-    && mv /root/.local/bin/uvx /usr/local/bin/uvx
+# Python tools via uv + graphify (installed as the future gem home)
+RUN export HOME=/export/rootfs/home/gem \
+    && uv tool install graphifyy \
+    && uv tool install basedpyright \
+    && uv tool install ruff \
+    && "$HOME/.local/bin/graphify" install --platform opencode
 
-# graphify CLI + OpenCode skill (run as gem → files owned by gem)
-ENV PATH="/home/gem/.local/bin:${PATH}"
-RUN su -s /bin/bash gem -c '\
-    export PATH="/home/gem/.local/bin:$PATH"; \
-    uv tool install graphifyy && \
-    graphify install --platform opencode'
+# od CLI wrapper
+RUN printf '#!/bin/sh\nexec node /home/gem/open-design/apps/daemon/bin/od.mjs "$@"\n' \
+      > /export/rootfs/usr/local/bin/od && chmod +x /export/rootfs/usr/local/bin/od
 
-# Neovim + LSP toolchain
-COPY containers/sandbox/scripts/setup-neovim.sh /tmp/
-RUN chmod +x /tmp/setup-neovim.sh && /tmp/setup-neovim.sh && rm /tmp/setup-neovim.sh
+# setuid helper: sudo (github-push reads the root-owned PEM; entrypoint
+# scripts drop to gem via sudo -Hu). Real binary must be copied out of the
+# store: setuid bits don't survive nix. Note: no su — nixpkgs shadow doesn't
+# ship it, and sudo covers every use.
+RUN for b in sudo; do \
+      src="$(readlink -f /export/rootfs/bin/$b)"; \
+      rm -f "/export/rootfs/bin/$b" "/export/rootfs/usr/bin/$b"; \
+      cp "$src" "/export/rootfs/usr/bin/$b"; \
+      chmod 4755 "/export/rootfs/usr/bin/$b"; \
+    done
 
-# GitHub CLI
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y gh \
-    && rm -rf /var/lib/apt/lists/*
+RUN chown -R 1000:1000 /export/rootfs/home/gem
 
-# OpenCode + Claude Code
-RUN npm install -g opencode-ai@1.18.5 @anthropic-ai/claude-code openspec-extensions opencode-with-claude
+# --- Runtime stage: scratch + closure + artifacts ---
+FROM scratch
 
-# OpenSpec skills & commands for OpenCode
-RUN openspec init --tools opencode --force /home/gem/ \
-    && chown -R gem:gem /home/gem/.opencode/skills /home/gem/.opencode/commands
-
-# GitHub App helpers
-COPY containers/sandbox/scripts/github-app-token.sh /usr/local/bin/github-app-token
-RUN chmod +x /usr/local/bin/github-app-token
-COPY containers/sandbox/scripts/github-push.sh /usr/local/bin/github-push
-RUN chmod +x /usr/local/bin/github-push
-COPY containers/sandbox/scripts/github-app-permissions-mcp.ts /usr/local/bin/github-app-permissions-mcp.ts
-RUN echo "gem ALL=(ALL) NOPASSWD: /usr/local/bin/github-push" > /etc/sudoers.d/github-push
-
-# opencode session_diff pruner — prevents oversized stale diffs from wedging the web UI
-COPY containers/sandbox/scripts/prune-opencode-diffs.sh /usr/local/bin/prune-opencode-diffs
-RUN chmod +x /usr/local/bin/prune-opencode-diffs
-
-# opencode serve RSS guard — SIGTERM bloated serve so launchy respawns fresh
-COPY containers/sandbox/scripts/opencode-serve-guard.sh /usr/local/bin/opencode-serve-guard
-RUN chmod +x /usr/local/bin/opencode-serve-guard
-
-# Launchy config
-COPY .devcontainer/devcontainer.json /etc/devcontainer.json
-
-# AGENTS.md (only if present)
-COPY containers/sandbox/agents_file /home/gem/AGENTS.md
-RUN chown gem:gem /home/gem/AGENTS.md
-
-# OpenCode config
-RUN mkdir -p /home/gem/.config/opencode
-COPY opencode.json /home/gem/.config/opencode/config.json
-
-# OpenCode global AGENTS.md
-COPY containers/sandbox/opencode-global-agents.md /home/gem/.config/opencode/AGENTS.md
-
-# Vendored caveman skills
-COPY containers/sandbox/agents-skills/ /home/gem/.agents/skills/
-RUN chown -R gem:gem /home/gem/.config /home/gem/.agents
-
-# tmux config
-COPY containers/sandbox/tmux.conf /home/gem/.tmux.conf
-RUN chown gem:gem /home/gem/.tmux.conf
-
-# Entrypoint scripts
-COPY containers/sandbox/docker-entrypoint.d/ /docker-entrypoint.d/
-RUN chmod +x /docker-entrypoint.d/*.sh
-COPY containers/sandbox/scripts/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY --from=nix-builder /export/nix/store /nix/store
+COPY --from=nix-builder /export/rootfs /
+COPY --from=nix-builder /export/rustup /usr/local/rustup
+COPY --from=nix-builder /export/cargo /usr/local/cargo
 
 # Open Design runtime artifacts (built in od-build stage)
-# Layout mirrors upstream: daemon + web/out + skills + design-systems + craft + assets
-COPY --from=od-build --chown=gem:gem /build/deploy/daemon         /home/gem/open-design/apps/daemon
-COPY --from=od-build --chown=gem:gem /build/apps/web/out          /home/gem/open-design/apps/web/out
-COPY --from=od-build --chown=gem:gem /build/skills                /home/gem/open-design/skills
-COPY --from=od-build --chown=gem:gem /build/design-systems        /home/gem/open-design/design-systems
-COPY --from=od-build --chown=gem:gem /build/craft                 /home/gem/open-design/craft
-COPY --from=od-build --chown=gem:gem /build/prompt-templates      /home/gem/open-design/prompt-templates
-COPY --from=od-build --chown=gem:gem /build/assets/frames         /home/gem/open-design/assets/frames
-COPY --from=od-build --chown=gem:gem /build/assets/community-pets /home/gem/open-design/assets/community-pets
-COPY --from=od-build --chown=gem:gem /build/plugins/_official     /home/gem/open-design/plugins/_official
+COPY --from=od-build --chown=1000:1000 /build/deploy/daemon         /home/gem/open-design/apps/daemon
+COPY --from=od-build --chown=1000:1000 /build/apps/web/out          /home/gem/open-design/apps/web/out
+COPY --from=od-build --chown=1000:1000 /build/skills                /home/gem/open-design/skills
+COPY --from=od-build --chown=1000:1000 /build/design-systems        /home/gem/open-design/design-systems
+COPY --from=od-build --chown=1000:1000 /build/craft                 /home/gem/open-design/craft
+COPY --from=od-build --chown=1000:1000 /build/prompt-templates      /home/gem/open-design/prompt-templates
+COPY --from=od-build --chown=1000:1000 /build/assets/frames         /home/gem/open-design/assets/frames
+COPY --from=od-build --chown=1000:1000 /build/assets/community-pets /home/gem/open-design/assets/community-pets
+COPY --from=od-build --chown=1000:1000 /build/plugins/_official     /home/gem/open-design/plugins/_official
 
-# OD runtime deps (poppler-utils for PDF export) and data dir (bind-mounted at runtime)
-RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /home/gem/open-design/.od \
-    && chown -R gem:gem /home/gem/open-design
-
-# OD CLI wrapper (so `od mcp install opencode` etc. work from inside sandbox)
-RUN printf '#!/bin/sh\nexec node /home/gem/open-design/apps/daemon/bin/od.mjs "$@"\n' \
-        > /usr/local/bin/od \
-    && chmod +x /usr/local/bin/od
-
-# Persistent directories
-RUN mkdir -p /home/gem/projects \
-    /home/gem/.local/share/opencode \
-    /home/gem/.claude \
-    && chown -R gem:gem /home/gem
-
-# Security hardening
-RUN rm -rf /root/.ssh /root/.cache /root/.config 2>/dev/null || true
+ENV PATH="/home/gem/.local/bin:/home/gem/.npm-global/bin:/usr/local/cargo/bin:/usr/local/bin:/bin:/usr/bin" \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    LOCALE_ARCHIVE=/usr/lib/locale/locale-archive \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt \
+    NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 WORKDIR /home/gem/projects
 ENTRYPOINT ["/entrypoint.sh"]

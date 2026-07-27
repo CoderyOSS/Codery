@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-su -s /bin/bash gem -c "
+sudo -Hu gem /bin/bash -c "
   claude mcp remove codery     2>/dev/null || true
   claude mcp remove github-app 2>/dev/null || true
   claude mcp remove trailhead  2>/dev/null || true

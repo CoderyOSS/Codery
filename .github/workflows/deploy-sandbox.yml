@@ -1,23 +1,11 @@
 name: Build Sandbox
 
+# Manual-only. Relevant source paths (for operator reference):
+#   examples/Dockerfile.sandbox, .devcontainer/devcontainer.json,
+#   containers/sandbox/{docker-entrypoint.d,scripts,service.yml,tmux.conf,
+#   agents_file,agents-skills,opencode-global-agents.md}, opencode.json
+# If Dockerfile.base changed, run "Build Sandbox Base" FIRST, then this.
 on:
-  push:
-    branches: [master]
-    paths:
-      - 'examples/Dockerfile.sandbox'
-      - '.devcontainer/devcontainer.json'
-      - 'containers/sandbox/docker-entrypoint.d/**'
-      - 'containers/sandbox/scripts/**'
-      - 'containers/sandbox/service.yml'
-      - 'containers/sandbox/tmux.conf'
-      - 'opencode.json'
-      - 'containers/sandbox/agents_file'
-      - 'containers/sandbox/agents-skills/**'
-      - 'containers/sandbox/opencode-global-agents.md'
-  workflow_run:
-    workflows: ["Build Sandbox Base"]
-    types: [completed]
-    branches: [master]
   workflow_dispatch:
 
 env:

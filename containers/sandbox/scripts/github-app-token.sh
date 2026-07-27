@@ -30,7 +30,7 @@ sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$PEM_FIL
 
 JWT="${header}.${payload}.${sig}"
 
-INSTALLATIONS=$(curl -sf \
+INSTALLATIONS=$(curl -sSf \
   -H "Authorization: Bearer ${JWT}" \
   -H "Accept: application/vnd.github+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -50,7 +50,7 @@ if [ -z "$INSTALLATION_ID" ] || [ "$INSTALLATION_ID" = "null" ]; then
 fi
 
 # Exchange JWT for a short-lived installation access token (~1h)
-curl -sf -X POST \
+curl -sSf -X POST \
   -H "Authorization: Bearer ${JWT}" \
   -H "Accept: application/vnd.github+json" \
   -H "X-GitHub-Api-Version: 2022-11-28" \

@@ -52,6 +52,9 @@
       "tail ~/.ssh/*": "deny"
     }
   },
+  "compaction": {
+    "auto": true
+  },
   "watcher": {
     "ignore": [
       "/run/secrets/**",

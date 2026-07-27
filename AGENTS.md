@@ -208,12 +208,12 @@ before committing.
 
 ### Adding a new web app to the apps container
 
-Declare in `.devcontainer/devcontainer.json` (`customizations.codery.apps` array). Push triggers `Build Apps`:
+Declare in `.devcontainer/devcontainer.json` (`customizations.codery.apps` array). Push, then run `Build Apps` manually:
 1. CI runs `gen-supervisor-conf.py` → supervisord conf baked into image (manages the process)
 2. CI runs `gen-apps-routes.py` → `proxy/apps-routes.json` synced to VPS
 3. CoderyCI deploys new apps image; `reload-routes` generates Nginx config + reloads
 
-**Route-only change** (app process already running, just updating subdomain/port): edit `proxy/apps-routes.json` directly → push → `Sync Routes` workflow (~30s, no image rebuild).
+**Route-only change** (app process already running, just updating subdomain/port): edit `proxy/apps-routes.json` directly → push → run `Sync Routes` workflow manually (~30s, no image rebuild), or call `reload_routes` via MCP (no push needed).
 
 ---
 
@@ -239,7 +239,7 @@ sshd runs as a launchy-managed service (`devcontainer.json`, `user: "root"`, `re
    - Add a step to sync `containers/newservice/service.yml` before the `codery-ci deploy` call
    - **Ordering invariant**: the YAML sync MUST come before `codery-ci deploy` — CoderyCI
      reads it at deploy time, so a stale or missing YAML means wrong config
-4. Push to `main`
+4. Push to `main`, then run the new workflow manually
 
 No changes to `system/orchestrator/` are needed.
 
@@ -362,14 +362,22 @@ present in the local Docker cache (`images::pull_if_missing`). This lets you
 
 ## CI/CD Triggers
 
-| Workflow | Triggers on push to `master` when... | What it does |
-|----------|---------------------------------------|--------------|
-| Build Sandbox | `containers/sandbox/**`, `opencode.json`, `examples/Dockerfile.sandbox`, `.devcontainer/devcontainer.json` | Builds image, deploys via CoderyCI |
-| Build Apps | `workflow_dispatch` only | Builds image, deploys via CoderyCI |
-| Sync Routes | `proxy/apps-routes.json` | Syncs route file, runs `codery-ci reload-routes` (~30s, no container rebuild) |
-| Build Orchestrator | `workflow_dispatch` only | Compiles musl binary, uploads to `/opt/codery/codery-ci`, restarts codery-mcp |
+**All workflows are manual-only (`workflow_dispatch`), except release workflows
+which trigger on tag push, and `repair-host` which also runs hourly via cron.**
 
-All workflows also have `workflow_dispatch` for manual triggering.
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| Build Sandbox (`deploy-sandbox.yml`) | `workflow_dispatch` | Builds image, deploys via CoderyCI. Relevant paths: `examples/Dockerfile.sandbox`, `.devcontainer/devcontainer.json`, `containers/sandbox/**`, `opencode.json`. If `Dockerfile.base` changed, run Build Sandbox Base first |
+| Build Sandbox Base | `workflow_dispatch` | Builds `Dockerfile.base` base image |
+| Build Apps (`deploy-apps.yml`) | `workflow_dispatch` | Builds image, deploys via CoderyCI |
+| Sync Routes | `workflow_dispatch` | Syncs route file, runs `codery-ci reload-routes` (~30s, no container rebuild) |
+| Build Orchestrator | `workflow_dispatch` | Compiles musl binary, uploads to `/opt/codery/codery-ci`, restarts codery-mcp |
+| Release Orchestrator | tag push `codery-ci-v*` or `workflow_dispatch` | Builds release binaries |
+| Release Apps | tag push `apps-v*` | Builds apps image |
+| Repair Host | `workflow_dispatch` + hourly cron | Idempotent host-services repair (supervisor/Caddy/Tailscale self-heal) |
+
+**Pushing to `master` never deploys.** After pushing changes, run the relevant
+workflow manually from the Actions tab (or `gh workflow run`).
 
 ---
 

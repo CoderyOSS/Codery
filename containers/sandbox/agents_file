@@ -148,9 +148,9 @@ Controls entire infrastructure. Key directories:
 
 ### Blue/green deployment
 
-Both sandbox and apps containers use blue/green deployments. CI/CD triggers deploys automatically on push to `main` when relevant files change.
+Both sandbox and apps containers use blue/green deployments. All deploy workflows are manual-only (`workflow_dispatch`) — pushing to `main` NEVER deploys. Only tag pushes (`codery-ci-v*`, `sandbox-v*`, `apps-v*`) trigger release workflows.
 
-Deploy new sandbox or apps image: push changes to `main` in Codery repo.
+Deploy new sandbox or apps image: push changes to `main` in Codery repo, then run the workflow manually (Actions tab or `gh workflow run`).
 
 ### Service declarations (declarative infrastructure)
 
@@ -159,7 +159,7 @@ Each container service declared in `containers/<name>/service.yml` in Codery rep
 #### Adding a new web app to the apps container (no container restart)
 
 1. Edit `proxy/apps-routes.json` — add `{"subdomain": "foo.example.com", "port": 8080}`
-2. Push to `main` — triggers Sync Routes workflow (~30s), no container rebuild
+2. Push to `main`, then run Sync Routes workflow manually (~30s), or call `reload_routes` via MCP (no push needed)
 
 #### Adding a new container service
 
@@ -167,7 +167,7 @@ Each container service declared in `containers/<name>/service.yml` in Codery rep
 2. Create `containers/newservice/Dockerfile`
 3. Create `.github/workflows/deploy-newservice.yml` — model on `deploy-sandbox.yml`
    **Critical**: `containers/newservice/service.yml` sync step MUST run before `codery-ci deploy`
-4. Push to `main`
+4. Push to `main`, then run the new workflow manually
 
 #### Removing a service
 
@@ -214,7 +214,7 @@ a wrong re-add breaks the URL.
 ### When to use reload_routes vs full redeploy
 
 - Route JSON change only (new app subdomain) -> `reload_routes`
-- Container code, Dockerfile, supervisor config, or service YAML change -> push to main, CI deploys
+- Container code, Dockerfile, supervisor config, or service YAML change -> push to main, then run the deploy workflow manually
 
 ---
 
@@ -275,7 +275,7 @@ Declare apps in `.devcontainer/devcontainer.json` under `customizations.codery.a
 }
 ```
 
-Push to `main` → `Build Apps` workflow runs (~8 min):
+Push to `main`, then run `Build Apps` workflow manually (~8 min):
 - Bakes supervisord conf into image (starts the process)
 - Syncs `apps-routes.json` to VPS (Caddy subdomain)
 - Orchestrator reloads Nginx (internal routing to port 3001)

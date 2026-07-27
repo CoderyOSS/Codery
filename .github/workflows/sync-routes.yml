@@ -1,9 +1,8 @@
 name: Sync Routes
 
+# Manual-only. Run after pushing proxy/routes.yaml changes, or use the
+# reload_routes MCP tool instead (no push required).
 on:
-  push:
-    branches: [master]
-    paths: ['proxy/routes.yaml']
   workflow_dispatch:
 
 jobs:
