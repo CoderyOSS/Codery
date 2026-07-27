@@ -40,6 +40,11 @@ drops to `gem` (uid 1000) for all processes.
 **What it cannot do:** No Docker socket, no Caddy/Tailscale access, no host supervisor.
 Route and image changes must go through this repo.
 
+**No compiler/linker in the sandbox.** Do not attempt `cargo build`/`cargo check` here —
+there is no `cc`. The build tools live in the **apps container** (`ssh gem@apps`, has gcc;
+install rustup user-level for cargo) and on the **host** (full toolchain, used by
+`codery-ci build`). For Rust verification use the apps container or the MCP build loop.
+
 ---
 
 ### Apps (`containers/apps/Dockerfile`)
@@ -313,6 +318,24 @@ Fixed name: `{service}-preview`. For sandbox that's `sandbox-preview.{DOMAIN}`;
 for apps, `apps-preview.{DOMAIN}`. The route is stored in the `previews`
 SQLite table and reloaded into Caddy/Nginx on every mutation. `caddy::apply_all`
 and `nginx::generate_and_reload` both pick it up automatically.
+
+### MCP host exec (agent build loop)
+
+The MCP server exposes a build-only exec bridge so an agent can run the
+preview-deploy loop without host shell access:
+
+| Tool | Purpose |
+|------|---------|
+| `codery_exec` | Spawn allowlisted subcommand as background job (`build`, `validate`, `deploy-preview`, `cancel-preview`) |
+| `codery_exec_status` | Poll job: status, exit code, log tail |
+| `mcp_exec_enabled` | Read-only check whether the toggle is on |
+
+`cutover` and `deploy` are **never** exposed via MCP — humans run those on the
+host shell.
+
+**Toggle (host shell):** `codery-ci mcp-exec enable|disable|status`
+State file: `/opt/codery/state/mcp-exec.enabled`. Job logs: `/var/log/codery-ci-mcp/`.
+Default: disabled. Enable only while actively iterating.
 
 ### Preview port auto-resolution
 

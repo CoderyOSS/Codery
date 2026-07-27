@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{caddy, config, db, deploy, images, nginx, preflight, service_def::ServiceDef, state};
+use crate::{caddy, config, db, deploy, images, mcp_exec, nginx, preflight, service_def::ServiceDef, state};
 
 // ── Data shapes returned by tools ────────────────────────────────────────────
 
@@ -136,6 +136,28 @@ struct RemoveAppParams {
 struct RestartAppParams {
     #[schemars(description = "App name as shown by get_app_status / list_apps")]
     name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CoderyExecParams {
+    #[schemars(
+        description = "Arguments to pass to `codery-ci` (e.g. [\"build\", \"sandbox\", \"host-xyz\"]). \
+                       First element must be one of: build, validate, deploy-preview, cancel-preview. \
+                       Cutover and deploy are NOT exposed via MCP — run those on the host shell."
+    )]
+    args: Vec<String>,
+    #[schemars(description = "Job timeout in seconds. 0 = no timeout. Default 1800 (30 min).")]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CoderyExecStatusParams {
+    #[schemars(description = "Job ID returned by codery_exec")]
+    job_id: String,
+    #[schemars(
+        description = "Maximum bytes of log output to return as `tail`. Default 65536 (64 KB)."
+    )]
+    tail_bytes: Option<usize>,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1333,6 +1355,72 @@ impl OrchestratorMcp {
         let json = serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
         tool_ok(json)
     }
+
+    /// Report whether the codery_exec MCP tool is currently enabled.
+    /// Safe to call regardless of toggle state — pure read-only check.
+    #[tool(
+        description = "Check whether codery_exec is enabled. \
+                          Returns {enabled: bool, allowed_subcommands: [...]}. \
+                          Toggle by running `codery-ci mcp-exec enable|disable` on the host."
+    )]
+    async fn mcp_exec_enabled(&self) -> Result<CallToolResult, McpError> {
+        let enabled = mcp_exec::toggle_enabled();
+        let response = json!({
+            "enabled": enabled,
+            "allowed_subcommands": mcp_exec::allowlist(),
+            "toggle_path": config::MCP_EXEC_TOGGLE,
+            "guidance": if enabled {
+                "codery_exec will accept build/validate/deploy-preview/cancel-preview only. \
+                 Cutover and deploy are NEVER exposed via MCP — run on host shell."
+            } else {
+                "codery_exec is disabled. To enable, run on host: codery-ci mcp-exec enable"
+            }
+        });
+        let json = serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
+        tool_ok(json)
+    }
+
+    /// Spawn a build-only codery-ci subcommand as a background job. Returns a
+    /// job_id immediately — poll with codery_exec_status for output.
+    #[tool(
+        description = "Spawn a codery-ci subcommand as a background job (async). \
+                          Returns job_id + log_path immediately; poll codery_exec_status for output. \
+                          Allowlist: build, validate, deploy-preview, cancel-preview. \
+                          Toggle must be enabled via `codery-ci mcp-exec enable` on the host."
+    )]
+    async fn codery_exec(
+        &self,
+        Parameters(CoderyExecParams {
+            args,
+            timeout_secs,
+        }): Parameters<CoderyExecParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let timeout = timeout_secs.unwrap_or(1800);
+        let resp = mcp_exec::spawn(args, timeout)
+            .await
+            .map_err(tool_err)?;
+        let json = serde_json::to_string_pretty(&resp).map_err(|e| tool_err(e.to_string()))?;
+        tool_ok(json)
+    }
+
+    /// Poll a previously-spawned codery_exec job. Returns status, exit code,
+    /// elapsed time, log path, and the tail of the log output.
+    #[tool(
+        description = "Poll a codery_exec job by ID. Returns status (running|done|failed|timeout), \
+                          exit_code, elapsed_secs, log_path, and tail (last N bytes of output). \
+                          Default tail = 64 KB. Poll every ~30s for long builds."
+    )]
+    async fn codery_exec_status(
+        &self,
+        Parameters(CoderyExecStatusParams { job_id, tail_bytes }): Parameters<CoderyExecStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let tail = tail_bytes.unwrap_or(65536);
+        let resp = mcp_exec::status(&job_id, tail)
+            .await
+            .map_err(tool_err)?;
+        let json = serde_json::to_string_pretty(&resp).map_err(|e| tool_err(e.to_string()))?;
+        tool_ok(json)
+    }
 }
 
 fn run_check(name: &'static str, f: fn() -> anyhow::Result<()>) -> PreflightCheck {
@@ -1420,6 +1508,19 @@ Both containers use **Launchy** (Rust binary) as PID 1:
 | `rollback` | Deploy previous cached image via blue/green |
 | `list_images` | Locally cached Docker images for a service |
 
+### Host Exec (build loop)
+
+| Tool | What it does |
+|---|---|
+| `codery_exec` | Spawn an allowlisted codery-ci subcommand as a background job (async). Returns job_id + log_path |
+| `codery_exec_status` | Poll a job: status (running/done/failed/timeout), exit_code, log tail |
+| `mcp_exec_enabled` | Check whether codery_exec is enabled (read-only) |
+
+Allowlist: `build`, `validate`, `deploy-preview`, `cancel-preview`. `cutover` and
+`deploy` are NEVER exposed via MCP — those run on the host shell by a human.
+Gated by a host-side toggle: `codery-ci mcp-exec enable|disable|status`.
+If `mcp_exec_enabled` returns `enabled: false`, ask the user to enable it on the host.
+
 ### Diagnostics
 
 | Tool | What it does |
@@ -1497,6 +1598,21 @@ To add a new container service:
 2. `upsert_service` → write the YAML
 3. `reload_routes` → reload Caddy
 4. Trigger deploy via CI
+
+## Build loop workflow (host exec)
+
+Build and preview a container image without leaving the agent session:
+
+1. `mcp_exec_enabled` → confirm the toggle is on
+2. `codery_exec args=["build", "sandbox", "mytag"]` → returns job_id immediately
+3. Poll `codery_exec_status job_id=...` every ~30s until status != running
+4. On failure, read `tail` from the status response, fix, rebuild
+5. `codery_exec args=["deploy-preview", "sandbox", "mytag"]` → verify at `sandbox-preview.{DOMAIN}`
+6. Ask the user to run `codery-ci cutover sandbox` on the host (never exposed via MCP)
+
+Note: `build` runs `docker build` on the host — full toolchain available there.
+The sandbox container itself has NO compiler/linker; never try to `cargo build`
+inside the sandbox.
 
 ## Port formula
 

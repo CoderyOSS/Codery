@@ -34,6 +34,14 @@ pub const DB_PATH: &str = "/opt/codery/codery.db";
 pub const ROUTES_YAML: &str = "/opt/codery/proxy/routes.yaml";
 const DEFAULT_DOMAIN: &str = "example.com";
 
+// MCP exec toggle (build-only subcommand gating).
+// File present  → codery_exec MCP tool allowed (still restricted to allowlist).
+// File absent   → codery_exec refuses with an error.
+// Toggled via `codery-ci mcp-exec enable|disable` on the host shell.
+pub const MCP_EXEC_TOGGLE: &str = "/opt/codery/state/mcp-exec.enabled";
+// Per-job stdout/stderr logs. Created on first use.
+pub const MCP_EXEC_LOG_DIR: &str = "/var/log/codery-ci-mcp";
+
 /// Read DOMAIN_NAME from /opt/codery/.env. Returns DEFAULT_DOMAIN if not set.
 pub fn load_domain() -> String {
     let content = match std::fs::read_to_string(ENV_FILE) {

@@ -8,6 +8,7 @@ mod deploy;
 mod deploy_lock;
 mod images;
 mod mcp;
+mod mcp_exec;
 mod nginx;
 mod preflight;
 mod service_def;
@@ -327,6 +328,40 @@ async fn main() -> Result<()> {
             }
             println!("[cancel-preview] {} preview cancelled — active untouched.", service);
         }
+        Some("mcp-exec") => {
+            // Usage: codery-ci mcp-exec <enable|disable|status>
+            //
+            // Toggles whether the codery_exec MCP tool is allowed to spawn
+            // codery-ci subcommands (build-only allowlist). The toggle is a
+            // state file at /opt/codery/state/mcp-exec.enabled.
+            //
+            // Default: disabled. Enable when handing the agent the build loop;
+            // disable when not actively iterating to keep the security surface flat.
+            let sub = args
+                .get(2)
+                .map(|s| s.as_str())
+                .ok_or_else(|| anyhow!("missing subcommand: enable|disable|status"))?;
+            match sub {
+                "enable" => {
+                    mcp_exec::set_toggle(true)?;
+                    println!("[mcp-exec] Enabled — codery_exec MCP tool can run build/validate/deploy-preview/cancel-preview");
+                }
+                "disable" => {
+                    mcp_exec::set_toggle(false)?;
+                    println!("[mcp-exec] Disabled — codery_exec MCP tool will refuse all calls");
+                }
+                "status" => {
+                    let state = if mcp_exec::toggle_enabled() { "enabled" } else { "disabled" };
+                    println!("[mcp-exec] {}", state);
+                }
+                other => {
+                    return Err(anyhow!(
+                        "unknown mcp-exec subcommand '{}': expected enable|disable|status",
+                        other
+                    ));
+                }
+            }
+        }
         _ => {
             eprintln!(
                 "Usage: codery-ci [--version | preflight | deploy <service> <sha> | \
@@ -335,7 +370,8 @@ async fn main() -> Result<()> {
                  build <service> <tag> [--dockerfile PATH] [--context PATH] | \
                  deploy-preview <service> <sha> [--port N] | \
                  cutover <service> [--sha <sha>] | \
-                 cancel-preview <service>]"
+                 cancel-preview <service> | \
+                 mcp-exec <enable|disable|status>]"
             );
             std::process::exit(1);
         }
