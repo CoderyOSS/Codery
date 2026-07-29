@@ -38,7 +38,7 @@ infra = [
     },
     {
         "name": "nginx",
-        "command": ["nginx", "-g", "daemon off;"],
+        "command": ["nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off;"],
         "restart": "always",
         "priority": 30,
     },

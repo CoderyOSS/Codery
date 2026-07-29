@@ -43,22 +43,6 @@ jobs:
         with:
           install: true
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
-      - name: Install musl-tools
-        run: sudo apt-get install -y musl-tools
-
-      - name: Build Launchy for musl
-        run: cargo build --manifest-path system/launchy/Cargo.toml --release --target x86_64-unknown-linux-musl
-
-      - name: Copy Launchy binary for Docker build
-        run: |
-          mkdir -p target
-          cp system/launchy/target/x86_64-unknown-linux-musl/release/launchy target/launchy
-
       - name: Generate Launchy configs from devcontainer.json
         run: python3 containers/apps/scripts/gen-launchy-conf.py containers/apps/launchy/built-in
 
