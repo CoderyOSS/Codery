@@ -198,21 +198,17 @@ pub fn route_fix(subdomain: &str, service: &str) -> Vec<String> {
 /// Parse `ss -tlnp` output and return the set of TCP ports currently
 /// listening on any address.
 ///
-/// Recognises both IPv4 (`0.0.0.0:13000`) and IPv6 (`[::]:13000`) forms.
+/// `ss -tlnp` uses fixed-width columns separated by multiple spaces.
+/// We split each line by whitespace and collect ports from any field that
+/// matches `\d+\.\d+\.\d+\.\d+:\d+` (IPv4) or `\[.*\]:\d+` (IPv6).
 pub fn parse_listening_ports(ss_output: &str) -> HashSet<u16> {
     let mut ports = HashSet::new();
     for line in ss_output.lines().skip(1) {
-        // The local-address column looks like one of:
-        //   `0.0.0.0:13000`
-        //   `127.0.0.1:8080`
-        //   `[::]:8080`
-        //   `[::1]:8080`
-        // We grab the digits immediately preceding the next whitespace
-        // after the last ':' in the address column.
-        if let Some(addr_end) = line.find(' ') {
-            let addr = &line[..addr_end];
-            if let Some(idx) = addr.rfind(':') {
-                let port_str = &addr[idx + 1..];
+        for field in line.split_whitespace() {
+            // Look for the last ':' that separates an address from a port.
+            // Formats: "0.0.0.0:13000", "[::]:8080", "127.0.0.1:9090"
+            if let Some(colon) = field.rfind(':') {
+                let port_str = &field[colon + 1..];
                 if let Ok(p) = port_str.parse::<u16>() {
                     ports.insert(p);
                 }
