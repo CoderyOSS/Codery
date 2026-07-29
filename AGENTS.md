@@ -19,6 +19,25 @@ of whichever container serves that subdomain.
 
 ---
 
+## Common Operations — Quick Reference
+
+| Situation | Command / Tool |
+|-----------|----------------|
+| Something broken, unknown cause | `codery-ci diagnose` (or `diagnose` MCP tool) |
+| Routing points to dead container | `codery-ci cutover <service>` |
+| Promote a verified preview | `codery-ci cutover <service>` |
+| Abort a preview deploy | `codery-ci cancel-preview <service>` |
+| Build + try new image locally | `codery-ci build <svc> <tag>` → `deploy-preview` → `cutover` |
+| Reload routing after YAML edit | `codery-ci reload-routes` (or `reload_routes` MCP) |
+| Restart stuck container | `restart_service` MCP (no blue/green swap) |
+| Roll back to previous image | `rollback` MCP |
+| State vs reality disagree | `codery-ci diagnose` shows mismatch + fix |
+
+Each subcommand has focused help: `codery-ci <command> --help`.
+Detailed docs in the sections below.
+
+---
+
 ## Container Roles
 
 ### Sandbox (`containers/sandbox/Dockerfile.base` + `examples/Dockerfile.sandbox`)

@@ -19,6 +19,9 @@ use crate::{caddy, config, db, deploy, images, mcp_exec, nginx, preflight, servi
 struct ServiceStatus {
     service: String,
     active_color: String,
+    /// Color recorded in /opt/codery/state/{service}.color (what routing uses).
+    /// May differ from active_color when a deploy-preview was not cut over.
+    state_file_color: String,
     active_sha: Option<String>,
     container: String,
     running: bool,
@@ -33,6 +36,8 @@ struct RouteEntry {
     service: String,
     color: Option<String>,
     note: Option<String>,
+    /// True if a TCP listener is bound on host_port (from `ss -tlnp`).
+    healthy: bool,
 }
 
 #[derive(Serialize)]
@@ -245,11 +250,14 @@ impl OrchestratorMcp {
                 state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string())
             };
             let running = blue_running || green_running;
+            let state_file_color =
+                state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string());
 
             statuses.push(ServiceStatus {
                 container: config::container_name(&def.service, &color),
                 active_sha: state::read_active_sha(&def.service),
                 active_color: color,
+                state_file_color,
                 service: def.service.clone(),
                 running,
             });
@@ -288,6 +296,12 @@ impl OrchestratorMcp {
         db::init(&conn).map_err(|e| tool_err(e.to_string()))?;
         let unified = db::build_route_map(&conn).map_err(|e| tool_err(e.to_string()))?;
 
+        // One `ss -tlnp` call — reused to flag every route's health.
+        let listening_ports = shell_output("ss", &["-tlnp"])
+            .await
+            .map(|s| crate::diagnose::parse_listening_ports(&s))
+            .unwrap_or_default();
+
         let route_entries: Vec<RouteEntry> = unified.iter().map(|r| {
             let fqdn = if r.subdomain.contains('.') {
                 r.subdomain.clone()
@@ -319,9 +333,11 @@ impl OrchestratorMcp {
                 service: r.target.clone(),
                 color: color.map(|s| s.to_string()),
                 note: None,
+                healthy: listening_ports.contains(&host_port),
             }
         }).collect();
 
+        let unhealthy_count = route_entries.iter().filter(|r| !r.healthy).count();
         let table = RoutingTable {
             services: services_map,
             routes: route_entries,
@@ -332,7 +348,9 @@ impl OrchestratorMcp {
                 "routing_model": "Traffic: Internet → Tailscale → Caddy → Nginx (8080) → app (internal_port)",
                 "apps_ports": "For apps: container_port is always 8080 (Nginx). internal_port is where app listens.",
                 "sandbox_ports": "For sandbox: container_port is the actual service port (e.g. 3000).",
-                "to_add_route": "Use add_app for instant routing, or edit devcontainer.json for permanent."
+                "to_add_route": "Use add_app for instant routing, or edit devcontainer.json for permanent.",
+                "healthy_field": "Each route has `healthy: bool` based on whether host_port has a TCP listener.",
+                "if_unhealthy": format!("{} route(s) have no listener. Run `diagnose` for fix commands.", unhealthy_count)
             }
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
@@ -597,16 +615,20 @@ impl OrchestratorMcp {
                         editing proxy/routes.yaml."
     )]
     async fn reload_routes(&self) -> Result<CallToolResult, McpError> {
+        let before = std::fs::read_to_string(config::CADDY_CONFIG).unwrap_or_default();
         caddy::apply_all().map_err(|e| tool_err(e.to_string()))?;
         nginx::generate_and_reload()
             .await
             .map_err(|e| tool_err(e.to_string()))?;
+        let after = std::fs::read_to_string(config::CADDY_CONFIG).unwrap_or_default();
+        let status = if before == after { "unchanged" } else { "changed" };
         let response = json!({
-            "status": "ok",
+            "status": status,
             "guidance": {
-                "what": "Caddy and Nginx reloaded. No container restart.",
+                "what": format!("Caddy and Nginx reloaded (Caddyfile {}). No container restart.", status),
                 "when_to_use": "After editing routes.yaml or service YAMLs",
-                "when_not_to_use": "For Dockerfile/service.yml changes — push to main"
+                "when_not_to_use": "For Dockerfile/service.yml changes — push to main",
+                "if_unchanged": "Run `diagnose` to detect state vs Docker mismatches. The state file may point at a color whose container is dead — cutover to fix."
             }
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
@@ -625,6 +647,25 @@ impl OrchestratorMcp {
         ];
         let all_passed = checks.iter().all(|c| c.passed);
         let report = PreflightReport { all_passed, checks };
+        let json = serde_json::to_string_pretty(&report).map_err(|e| tool_err(e.to_string()))?;
+        tool_ok(json)
+    }
+
+    /// Cross-check the state file against running Docker containers, verify each
+    /// route target port has a TCP listener, and list any uncut-over preview
+    /// deploys. Returns a structured report with `fix` commands for each issue.
+    /// Read-only — safe to run anytime. Run when something looks wrong, or after
+    /// a `reload_routes` that didn't fix routing.
+    #[tool(
+        description = "Diagnose mismatches between state file, running containers, \
+                        route targets, and preview deploys. Returns structured report \
+                        with fix commands for each issue. Read-only — run anytime \
+                        something looks wrong."
+    )]
+    async fn diagnose(&self) -> Result<CallToolResult, McpError> {
+        let report = crate::diagnose::run()
+            .await
+            .map_err(|e| tool_err(e.to_string()))?;
         let json = serde_json::to_string_pretty(&report).map_err(|e| tool_err(e.to_string()))?;
         tool_ok(json)
     }

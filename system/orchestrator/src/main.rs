@@ -3,6 +3,7 @@ use anyhow::{anyhow, Context, Result};
 mod caddy;
 mod config;
 mod daemon;
+mod diagnose;
 mod db;
 mod deploy;
 mod deploy_lock;
@@ -51,6 +52,20 @@ pub(crate) fn open_port_for_docker_bridges(port: u16) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+
+    // Per-subcommand --help: short-circuit before the main match so users can
+    // discover usage without reading the flat usage string at the bottom.
+    // e.g. `codery-ci cutover --help` prints focused cutover usage.
+    if args.len() >= 3 {
+        let third = args.get(2).map(|s| s.as_str()).unwrap_or("");
+        if third == "--help" || third == "-h" {
+            if let Some(sub) = args.get(1) {
+                print_subcommand_help(sub);
+                return Ok(());
+            }
+        }
+    }
+
     match args.get(1).map(|s| s.as_str()) {
         Some("--version") | Some("-V") => {
             println!("codery-ci {}", env!("CARGO_PKG_VERSION"));
@@ -99,6 +114,28 @@ async fn main() -> Result<()> {
             caddy::apply_all()?;
             nginx::generate_and_reload().await?;
             println!("[routes] Reloaded Caddyfile and Nginx");
+        }
+        Some("diagnose") => {
+            // Usage: codery-ci diagnose [--json]
+            //
+            // Read-only mismatch detector. Cross-checks:
+            //   - state file vs running containers (color mismatch / dead)
+            //   - route targets vs TCP listeners (dead port)
+            //   - preview table (uncut-over deploy-preview)
+            //
+            // Prints a human-readable report by default; --json emits the
+            // structured DiagnoseReport. Exit 1 if any issue found, 0 otherwise.
+            let as_json = args.iter().any(|a| a == "--json");
+            let report = diagnose::run().await?;
+            if as_json {
+                let json = serde_json::to_string_pretty(&report)?;
+                println!("{}", json);
+            } else {
+                print!("{}", report.format_human());
+            }
+            if !report.all_healthy {
+                std::process::exit(1);
+            }
         }
         Some("serve") => {
             // Start the MCP server. Reads --port N or defaults to MCP_PORT.
@@ -365,7 +402,7 @@ async fn main() -> Result<()> {
         _ => {
             eprintln!(
                 "Usage: codery-ci [--version | preflight | deploy <service> <sha> | \
-                 validate <service> <sha> | reload-routes | daemon | \
+                 validate <service> <sha> | reload-routes | diagnose [--json] | daemon | \
                  serve [--port N] | serve-ui [--port N] | serve-tcp-proxy | \
                  build <service> <tag> [--dockerfile PATH] [--context PATH] | \
                  deploy-preview <service> <sha> [--port N] | \
@@ -373,10 +410,224 @@ async fn main() -> Result<()> {
                  cancel-preview <service> | \
                  mcp-exec <enable|disable|status>]"
             );
+            eprintln!("\nRun `codery-ci <command> --help` for focused usage on any subcommand.");
             std::process::exit(1);
         }
     }
     Ok(())
+}
+
+// ── Per-subcommand --help ────────────────────────────────────────────────────
+
+fn print_subcommand_help(sub: &str) {
+    let text = match sub {
+        "preflight" => "\
+codery-ci preflight
+
+Run preflight health checks: supervisord, Tailscale, and the Caddy admin API.
+Exits non-zero if any check fails.
+
+Docs: AGENTS.md → \"Host Environment\"
+",
+        "deploy" => "\
+codery-ci deploy <service> <sha>
+
+Full blue/green deploy. Pulls the image from GHCR, starts the inactive color,
+health-checks it, cuts over (rewrites Caddyfile + state file), stops the old
+container, prunes stale images. Acquires a per-service deploy lock.
+
+Arguments:
+  <service>  Service name (sandbox, apps, ...)
+  <sha>      Image tag suffix (resolved as ghcr.io/coderyoss/codery:<service>-<sha>)
+
+Example:
+  codery-ci deploy sandbox abc123
+
+Docs: AGENTS.md → \"Blue/Green Deployment\"
+",
+        "validate" => "\
+codery-ci validate <service> <sha>
+
+Dry-run pre-deploy validation. Runs all preconditions (required_env, bind-mount
+paths, image pullability, free host ports) without starting any containers.
+Locally-cached images skip the GHCR pull check.
+
+Arguments:
+  <service>  Service name
+  <sha>      Image tag suffix
+
+Example:
+  codery-ci validate sandbox host-xyz
+
+Docs: AGENTS.md → \"Pre-deploy validation\" / \"Dry-run validation\"
+",
+        "reload-routes" => "\
+codery-ci reload-routes
+
+Regenerate the Caddyfile and Nginx config from all service YAMLs, routes.yaml,
+and runtime apps in codery.db, then reload both. No container restart.
+
+Use after editing proxy/routes.yaml or a service YAML's routing fields.
+For Dockerfile / volume / image changes, push to main and run a full deploy.
+
+Docs: AGENTS.md → \"Service Declarations\"
+",
+        "diagnose" => "\
+codery-ci diagnose [--json]
+
+Read-only mismatch detector. Cross-checks the state file against running
+containers, route target ports against TCP listeners, and flags any uncut-over
+preview deploys. Each issue includes the exact shell command to fix it.
+
+Exit code 1 if any issue is found, 0 if all healthy.
+
+Flags:
+  --json  Emit the structured DiagnoseReport instead of human-readable text
+
+Example:
+  codery-ci diagnose
+  codery-ci diagnose --json
+
+Docs: docs/superpowers/specs/2026-07-28-diagnose-command-design.md
+",
+        "build" => "\
+codery-ci build <service> <tag> [--dockerfile PATH] [--context PATH]
+
+Wraps `docker build` with the canonical image tag for the service. Tags the
+result as ghcr.io/coderyoss/codery:<service>-<tag> so deploy-preview / deploy
+can find it locally without a GHCR pull.
+
+Default Dockerfile lookup:
+  sandbox → examples/Dockerfile.sandbox
+  apps    → containers/apps/Dockerfile
+  <other> → containers/<service>/Dockerfile
+
+Flags:
+  --dockerfile PATH  Override the default Dockerfile path
+  --context PATH     Override the build context (default: current directory)
+
+Example:
+  codery-ci build sandbox host-xyz
+
+Docs: AGENTS.md → \"Preview Deploys\"
+",
+        "deploy-preview" => "\
+codery-ci deploy-preview <service> <sha> [--port N]
+
+Start the inactive color with the given image and register a preview route at
+<service>-preview.<domain>. The active container keeps running — sessions
+inside it survive. Promote with `cutover`, abort with `cancel-preview`.
+
+Locally-built images skip the GHCR pull (see build subcommand).
+
+Arguments:
+  <service>  Service name
+  <sha>      Image tag suffix (matches a tag built via `codery-ci build`)
+
+Flags:
+  --port N  Container port to expose via the preview subdomain.
+            Auto-resolved from service YAML if omitted.
+
+Example:
+  codery-ci deploy-preview sandbox host-xyz
+
+Docs: AGENTS.md → \"Preview Deploys\"
+",
+        "cutover" => "\
+codery-ci cutover <service> [--sha <sha>]
+
+Promote the inactive color to active. Updates the state file, regenerates the
+Caddyfile, stops the previously-active container, and removes the preview route.
+
+Use to finalize a preview deploy, OR to recover when routing points to a dead
+container (state file disagrees with Docker reality — run `diagnose` to confirm).
+
+Arguments:
+  <service>  Service name
+
+Flags:
+  --sha <sha>  Override the SHA (default: read from the preview record).
+               Required if no preview exists for the service.
+
+Example:
+  codery-ci cutover sandbox
+  codery-ci cutover sandbox --sha sandbox-nixos-v1
+
+Docs: AGENTS.md → \"Preview Deploys\"
+",
+        "cancel-preview" => "\
+codery-ci cancel-preview <service>
+
+Abort a preview deploy. Stops the inactive container and removes the preview
+route. The active container is untouched.
+
+Arguments:
+  <service>  Service name
+
+Example:
+  codery-ci cancel-preview sandbox
+
+Docs: AGENTS.md → \"Preview Deploys\"
+",
+        "mcp-exec" => "\
+codery-ci mcp-exec <enable|disable|status>
+
+Toggle whether the codery_exec MCP tool is allowed to spawn build/validate/
+deploy-preview/cancel-preview jobs. Default: disabled. Enable only while
+actively iterating via the agent build loop.
+
+State file: /opt/codery/state/mcp-exec.enabled
+Job logs:   /var/log/codery-ci-mcp/
+
+Subcommands:
+  enable   Allow codery_exec calls
+  disable  Refuse codery_exec calls (default)
+  status   Print current state
+
+Docs: AGENTS.md → \"MCP host exec (agent build loop)\"
+",
+        "serve" => "\
+codery-ci serve [--port N]
+
+Start the CoderyCI MCP server (HTTP+SSE on /sse). Default port 4040.
+
+OpenCode in the sandbox connects to this endpoint to call infrastructure tools.
+An iptables ACCEPT rule is added so Docker bridge networks can reach the port.
+
+Flags:
+  --port N  Port to listen on (default: MCP_PORT from /opt/codery/.env or 4040)
+",
+        "serve-ui" => "\
+codery-ci serve-ui [--port N]
+
+Start the deploy-progress terminal UI server. Default port 4041.
+
+Flags:
+  --port N  Port to listen on (default: 4041)
+",
+        "serve-tcp-proxy" => "\
+codery-ci serve-tcp-proxy
+
+Run the stable-port TCP proxy (e.g. :2222 → active sandbox sshd). Reads the
+active color from the state file on each inbound connection and forwards to
+the color-specific host port.
+",
+        "daemon" => "\
+codery-ci daemon
+
+Run the orchestrator daemon (background coordinator mode).
+",
+        _ => {
+            eprintln!(
+                "No help for '{}'. Known subcommands: preflight, deploy, validate, \
+                 reload-routes, diagnose, build, deploy-preview, cutover, cancel-preview, \
+                 mcp-exec, serve, serve-ui, serve-tcp-proxy, daemon.",
+                sub
+            );
+            return;
+        }
+    };
+    print!("{}", text);
 }
 
 // ── CLI helpers ───────────────────────────────────────────────────────────────
