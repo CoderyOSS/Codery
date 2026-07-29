@@ -5,6 +5,11 @@ port_scheme:
   blue_offset: 0
   green_offset: 10000
 
+ports:
+  - name: ssh
+    container_port: 2022
+    fixed_port: 3333
+
 port_range:
   container_start: 8000
   container_end: 9000
