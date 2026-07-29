@@ -71,6 +71,10 @@ RUN for f in passwd group shadow gshadow; do \
     grep -q '^root:' /etc/group     || echo 'root:x:0:'      >> /etc/group && \
     grep -q '^gem:' /etc/group      || echo 'gem:x:1000:'     >> /etc/group && \
     grep -q '^www-data:' /etc/group || echo 'www-data:x:33:' >> /etc/group && \
+    grep -q '^sshd:' /etc/passwd    || echo 'sshd:x:74:74:sshd:/var/empty:/usr/sbin/nologin' >> /etc/passwd && \
+    grep -q '^sshd:' /etc/group     || echo 'sshd:x:74:' >> /etc/group && \
+    grep -q '^sshd:' /etc/shadow    || echo 'sshd:!:19000::::::' >> /etc/shadow && \
+    mkdir -p /var/empty && \
     grep -q '^root:' /etc/shadow    || echo 'root:!:19000::::::'      >> /etc/shadow && \
     grep -q '^gem:' /etc/shadow     || echo 'gem:!:19000::::::'       >> /etc/shadow && \
     grep -q '^www-data:' /etc/shadow || echo 'www-data:!:19000::::::' >> /etc/shadow && \
