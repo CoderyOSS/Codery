@@ -76,7 +76,7 @@ RUN for f in passwd group shadow gshadow; do \
     grep -q '^sshd:' /etc/shadow    || echo 'sshd:!:19000::::::' >> /etc/shadow && \
     mkdir -p /var/empty && \
     grep -q '^root:' /etc/shadow    || echo 'root:!:19000::::::'      >> /etc/shadow && \
-    grep -q '^gem:' /etc/shadow     || echo 'gem:!:19000::::::'       >> /etc/shadow && \
+    grep -q '^gem:' /etc/shadow     || echo 'gem:*:19000::::::'       >> /etc/shadow && \
     grep -q '^www-data:' /etc/shadow || echo 'www-data:!:19000::::::' >> /etc/shadow && \
     echo "gem ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gem && \
     chmod 440 /etc/sudoers.d/gem && \

@@ -44,8 +44,10 @@
 
   programs.bash = {
     enable = true;
-    initExtra = ''
-      # Surface nix-installed binaries in interactive shells.
+    # bashrcExtra runs at the TOP of .bashrc (before the interactive guard) so
+    # PATH is set for non-interactive SSH commands too (bash reads ~/.bashrc
+    # when invoked by sshd, even non-interactively).
+    bashrcExtra = ''
       export PATH="/nix/var/nix/profiles/default/bin:$HOME/.local/bin:$PATH"
       export SSL_CERT_FILE="/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt"
       export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"
