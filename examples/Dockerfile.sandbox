@@ -116,7 +116,7 @@ ENV PATH="/home/gem/.local/bin:/home/gem/.npm-global/bin:/usr/local/cargo/bin:/u
     LC_ALL=en_US.UTF-8 \
     LOCALE_ARCHIVE=/usr/lib/locale/locale-archive \
     SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt \
-    NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt
 
 WORKDIR /home/gem/projects
 ENTRYPOINT ["/entrypoint.sh"]

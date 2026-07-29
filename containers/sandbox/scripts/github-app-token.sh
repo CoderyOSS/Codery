@@ -1,7 +1,10 @@
 #!/bin/bash
 # Generate a GitHub App installation access token.
-# Usage: github-app-token [installation_id]
-# If installation_id is omitted, uses the first installation found.
+# Usage:
+#   github-app-token                        # auto (only works with exactly 1 installation)
+#   github-app-token <installation_id>      # explicit ID — most reliable
+#   github-app-token "" <account_login>     # match by org/user login (case-insensitive)
+#   github-app-token --list                 # list all installations (id + account)
 #
 # Required env vars:
 #   GITHUB_APP_ID                - numeric App ID
@@ -36,16 +39,44 @@ INSTALLATIONS=$(curl -sSf \
   -H "X-GitHub-Api-Version: 2022-11-28" \
   "https://api.github.com/app/installations")
 
+list_installations() {
+  echo "$INSTALLATIONS" | jq -r '.[] | "  \(.id)\t\(.account.login) (\(.account.type))"'
+}
+
+if [ "${1:-}" = "--list" ]; then
+  echo "GitHub App installations:" >&2
+  list_installations >&2
+  exit 0
+fi
+
 if [ -n "${1:-}" ]; then
   INSTALLATION_ID="$1"
 elif [ -n "${2:-}" ]; then
-  INSTALLATION_ID=$(echo "$INSTALLATIONS" | jq -r ".[] | select(.account.login == \"$2\") | .id")
+  # Case-insensitive account login match
+  INSTALLATION_ID=$(echo "$INSTALLATIONS" | jq -r --arg acct "$2" \
+    '.[] | select(.account.login | ascii_downcase == ($acct | ascii_downcase)) | .id')
 else
-  INSTALLATION_ID=$(echo "$INSTALLATIONS" | jq -r '.[0].id')
+  COUNT=$(echo "$INSTALLATIONS" | jq 'length')
+  if [ "$COUNT" = "1" ]; then
+    INSTALLATION_ID=$(echo "$INSTALLATIONS" | jq -r '.[0].id')
+  else
+    echo "Error: multiple installations found — refusing to guess." >&2
+    echo "Available installations:" >&2
+    list_installations >&2
+    echo "" >&2
+    echo "Re-run with an explicit ID:  github-app-token <installation_id>" >&2
+    echo "Or by account login:         github-app-token '' <account_login>" >&2
+    exit 1
+  fi
 fi
 
 if [ -z "$INSTALLATION_ID" ] || [ "$INSTALLATION_ID" = "null" ]; then
-  echo "Error: no installation found. Install the app at github.com/settings/apps/${GITHUB_APP_SLUG:-}/installations" >&2
+  echo "Error: no installation found for account '${2:-}'." >&2
+  echo "Available installations:" >&2
+  list_installations >&2
+  echo "" >&2
+  echo "Re-run with an explicit ID:  github-app-token <installation_id>" >&2
+  echo "Or check the login spelling (matching is case-insensitive but must be exact otherwise)." >&2
   exit 1
 fi
 
