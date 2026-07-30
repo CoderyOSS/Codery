@@ -74,8 +74,7 @@ RUN nix --extra-experimental-features "nix-command flakes" profile install --pri
 # sudo symlink. Remove that symlink, install a real setuid copy at
 # /usr/bin/sudo (in runtime PATH after nix profile bin). Also copy
 # /etc/sudoers from the nix package — the main file is required even
-# with /etc/sudoers.d/ rules. nix sudo is built without PAM, so no
-# /etc/pam.d/ needed.
+# with /etc/sudoers.d/ rules.
 RUN src="$(readlink -f "$(command -v sudo)")" && \
     prefix="$(dirname "$(dirname "$src")")" && \
     rm -f /nix/var/nix/profiles/default/bin/sudo && \
@@ -83,6 +82,17 @@ RUN src="$(readlink -f "$(command -v sudo)")" && \
     chmod 4755 /usr/bin/sudo && \
     cp "$prefix/etc/sudoers" /etc/sudoers && \
     chmod 440 /etc/sudoers
+
+# --- PAM config for sudo ---
+# sudoers.so plugin links libpam — PAM IS used. nix linux-pam reads
+# config from /usr/lib/pam.d/ (compiled-in path) and modules from the
+# nix store security dir. Create permissive config (sudoers already
+# grants NOPASSWD:ALL to gem).
+RUN mkdir -p /etc/pam.d /usr/lib/pam.d && \
+    printf 'auth sufficient pam_permit.so\naccount sufficient pam_permit.so\nsession optional pam_permit.so\n' \
+      > /etc/pam.d/sudo && \
+    ln -sf /etc/pam.d/sudo /usr/lib/pam.d/sudo && \
+    chmod 644 /etc/pam.d/sudo
 
 # Allow gem to manage its own nix profile (single-user nix in nixos/nix
 # keeps /nix owned by root; world-writable per-user dir lets non-root users
