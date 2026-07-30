@@ -23,6 +23,7 @@ of whichever container serves that subdomain.
 
 | Situation | Command / Tool |
 |-----------|----------------|
+| **Deploy a change (default)** | **Local build** — `codery_exec` MCP: `build` → `deploy-preview` → ask user to `cutover`. See [Deploying Changes](#deploying-changes--local-build-preferred). Avoid the GitHub pipeline unless explicitly asked. |
 | Something broken, unknown cause | `codery-ci diagnose` (or `diagnose` MCP tool) |
 | Routing points to dead container | `codery-ci cutover <service>` |
 | Promote a verified preview | `codery-ci cutover <service>` |
@@ -379,10 +380,53 @@ present in the local Docker cache (`images::pull_if_missing`). This lets you
 
 ---
 
+## Deploying Changes — Local Build (Preferred)
+
+**Always prefer local build over the GitHub Actions pipeline**, unless the user
+explicitly asks for a pipeline deploy. Local build is faster (no GHCR push/pull,
+no runner startup), keeps images in the host Docker cache (faster redeploys +
+rollback), and avoids the pipeline's 2-min container-stop timeout that leaves
+orphan stopped containers around.
+
+### Local build workflow (agent, via MCP)
+
+The `codery_exec` MCP tool runs allowlisted `codery-ci` subcommands as background
+jobs on the host. `deploy` and `cutover` are **never** exposed via MCP — the user
+runs those on the host shell.
+
+```
+1. mcp_exec_enabled            → confirm toggle is on
+2. codery_exec ["build", "<service>", "<tag>"]   → returns job_id
+3. codery_exec_status job_id    → poll every ~30s until status != running
+4. (pick one)
+   a. codery_exec ["deploy-preview", "<service>", "<tag>"]
+      → verify at https://<service>-preview.{DOMAIN}
+      → ask user: "run `codery-ci cutover <service>` on the host to promote"
+   b. ask user: "run `codery-ci deploy <service> <tag>` on the host"
+      (full blue/green, no preview verify step)
+```
+
+`<tag>` can be anything descriptive (hostname, short reason). The image is tagged
+`ghcr.io/coderyoss/codery:<service>-<tag>` locally; no GHCR push needed.
+
+If `mcp_exec_enabled` returns `enabled: false`, ask the user to run
+`codery-ci mcp-exec enable` on the host.
+
+### GitHub pipeline (fallback)
+
+Only when the user explicitly asks for a pipeline deploy, or when local build
+is unavailable (host Docker down, mcp-exec disabled and user won't enable). See
+[CI/CD Triggers](#cicd-triggers) below.
+
+---
+
 ## CI/CD Triggers
 
 **All workflows are manual-only (`workflow_dispatch`), except release workflows
 which trigger on tag push, and `repair-host` which also runs hourly via cron.**
+
+**Prefer [local build](#deploying-changes--local-build-preferred) over these
+pipelines.** The pipelines are the fallback path, not the default.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|

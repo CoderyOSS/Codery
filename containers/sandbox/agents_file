@@ -150,7 +150,7 @@ Controls entire infrastructure. Key directories:
 
 Both sandbox and apps containers use blue/green deployments. All deploy workflows are manual-only (`workflow_dispatch`) — pushing to `main` NEVER deploys. Only tag pushes (`codery-ci-v*`, `sandbox-v*`, `apps-v*`) trigger release workflows.
 
-Deploy new sandbox or apps image: push changes to `main` in Codery repo, then run the workflow manually (Actions tab or `gh workflow run`).
+**Always prefer local build over the GitHub pipeline.** Use `codery_exec` MCP (build → deploy-preview → ask user to `cutover`). Only use `gh workflow run` when the user explicitly asks for a pipeline deploy, or when local build is unavailable. Local build is faster and avoids the pipeline's container-stop timeout issues.
 
 ### Service declarations (declarative infrastructure)
 
@@ -214,7 +214,7 @@ a wrong re-add breaks the URL.
 ### When to use reload_routes vs full redeploy
 
 - Route JSON change only (new app subdomain) -> `reload_routes`
-- Container code, Dockerfile, supervisor config, or service YAML change -> push to main, then run the deploy workflow manually
+- Container code, Dockerfile, supervisor config, or service YAML change -> **local build** (`codery_exec`: build → deploy-preview → cutover). Pipeline (`gh workflow run`) only as fallback.
 
 ---
 
@@ -275,7 +275,7 @@ Declare apps in `.devcontainer/devcontainer.json` under `customizations.codery.a
 }
 ```
 
-Push to `main`, then run `Build Apps` workflow manually (~8 min):
+Push to `main`, then build + deploy locally (`codery_exec`: build → deploy-preview → ask user to `cutover`, ~3-4 min) or via `Build Apps` pipeline (~8 min, fallback):
 - Bakes supervisord conf into image (starts the process)
 - Syncs `apps-routes.json` to VPS (Caddy subdomain)
 - Orchestrator reloads Nginx (internal routing to port 3001)
