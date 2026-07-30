@@ -9,7 +9,10 @@ AllowUsers gem
 AuthenticationMethods publickey
 PubkeyAuthentication yes
 
-AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+# /etc/ssh/authorized_keys/%u: baked-in sandbox→apps key (image)
+# /run/secrets/authorized_keys: host-managed keys (Blink etc.) — bind-mounted
+#   from /opt/codery/ssh/authorized_keys, same file the sandbox uses.
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u /run/secrets/authorized_keys
 
 StrictModes no
 LogLevel INFO

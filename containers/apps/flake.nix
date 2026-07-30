@@ -85,6 +85,8 @@
         less
         which
         file
+        # util-linux: `script` (PTY wrapper Blink/Mosh expect), flock, nsenter
+        util-linux
 
         # --- Locale data for nix (glibc) binaries ---
         # Alpine base uses musl; nix-installed binaries are glibc-linked and

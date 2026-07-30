@@ -33,6 +33,9 @@
     ];
   };
 
+  # Put the home-manager profile itself on PATH (starship, nvim wrappers).
+  home.sessionPath = [ "$HOME/.nix-profile/bin" ];
+
   # --- Shell environment ---
   home.sessionVariables = {
     EDITOR = "nvim";
@@ -44,15 +47,27 @@
 
   programs.bash = {
     enable = true;
+    shellAliases = {
+      ll = "ls -alF --color=auto";
+      la = "ls -A --color=auto";
+      ls = "ls --color=auto";
+      grep = "grep --color=auto";
+    };
     # bashrcExtra runs at the TOP of .bashrc (before the interactive guard) so
     # PATH is set for non-interactive SSH commands too (bash reads ~/.bashrc
     # when invoked by sshd, even non-interactively).
     bashrcExtra = ''
-      export PATH="/nix/var/nix/profiles/default/bin:$HOME/.local/bin:$PATH"
+      export PATH="/nix/var/nix/profiles/default/bin:$HOME/.nix-profile/bin:$HOME/.local/bin:$PATH"
       export SSL_CERT_FILE="/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt"
       export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"
     '';
   };
+
+  # LS_COLORS for directory listings (symlinks ls --color above).
+  programs.dircolors.enable = true;
+
+  # Starship: git-aware colored prompt, single Rust binary, zero config.
+  programs.starship.enable = true;
 
   home.packages = [ ];
 }

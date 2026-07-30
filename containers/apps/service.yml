@@ -29,6 +29,12 @@ volumes:
     host: /opt/codery/github-app.pem
     container: /run/secrets/github-app.pem
     readonly: true
+  # Host-managed SSH client keys (Blink etc.) — same file the sandbox mounts.
+  # Adding a device = append pubkey here, no image rebuild needed.
+  - type: bind
+    host: /opt/codery/ssh/authorized_keys
+    container: /run/secrets/authorized_keys
+    readonly: true
   - type: bind
     host: /opt/codery/projects
     container: /home/gem/projects
