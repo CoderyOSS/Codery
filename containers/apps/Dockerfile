@@ -1,35 +1,13 @@
-# Apps container — Nix-managed toolchain on nixos/nix base.
+# Apps container — Nix-managed toolchain + s6-overlay process supervision.
 #
-# Replaces the previous Ubuntu+apt image with a pinned, reproducible Nix
-# profile driven by containers/apps/flake.nix. See README-NIX.md for the
-# bump/verify workflow.
+# Pinned, reproducible Nix profile driven by containers/apps/flake.nix.
+# Process supervision via s6-overlay (s6-rc) — replaces the previous
+# Launchy-based process manager. See README-NIX.md for the bump/verify workflow.
 #
-# Multi-stage build:
-#   stage 1 (alpine): build launchy as a static musl binary via apk's rust
-#   stage 2 (nixos/nix): runtime, all toolchains come from nixpkgs
-#
-# Base image note: nixos/nix is Alpine Linux. We `apk add shadow bash sudo`
-# for Debian-style useradd/groupadd + bash shell + sudo. Everything else
+# Base image note: nixos/nix is Alpine Linux. Everything else
 # (rust, elixir, bun, gcc, nvim, nginx, sshd, etc.) comes from nixpkgs.
 
-# --- Stage 1: build launchy (static musl binary) ---
-FROM alpine:latest AS launchy-builder
-RUN apk add --no-cache curl build-base
-# Official rustup musl target produces static musl binaries by default
-# (alpine's own rust package links dynamically and crt-static breaks
-# proc-macros on the musl host triple — so we use rustup like CI does).
-RUN curl -sSf https://sh.rustup.rs | sh -s -- -y \
-      --default-toolchain stable \
-      --profile minimal \
-      --target x86_64-unknown-linux-musl
-ENV PATH="/root/.cargo/bin:$PATH"
-WORKDIR /src
-COPY system/launchy/ ./
-RUN cargo build --release --target x86_64-unknown-linux-musl && \
-    cp target/x86_64-unknown-linux-musl/release/launchy /launchy && \
-    file /launchy
-
-# --- Stage 2: runtime ---
+# --- Runtime ---
 FROM nixos/nix:latest
 
 # --- Nix config: flakes on ---
@@ -44,7 +22,6 @@ RUN ln -sf /nix/var/nix/profiles/default/bin/bash /bin/bash && \
 
 # --- PATH + locale for all subsequent RUN steps ---
 # nix profile install puts binaries in /nix/var/nix/profiles/default/bin.
-# Without this, processes launched by launchy/entrypoint can't find them.
 ENV PATH="/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ENV SSL_CERT_FILE="/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt"
 ENV NIX_SSL_CERT_FILE="/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt"
@@ -129,9 +106,7 @@ RUN git clone --filter=blob:none https://github.com/NvChad/starter \
 USER root
 
 # --- Backwards-compat symlinks ---
-# gen-launchy-conf.py uses absolute paths /usr/sbin/sshd and bare `nginx`.
-# Point them at the nix-installed binaries so the launchy configs work
-# unmodified.
+# Ensure nix-installed binaries are at expected paths.
 RUN mkdir -p /usr/sbin /usr/bin /usr/local/bin /usr/local/sbin \
               /usr/lib/openssh /var/log/nginx /etc/nginx && \
     ln -sf "$(which sshd)"     /usr/sbin/sshd    && \
@@ -163,33 +138,24 @@ RUN chmod 644 /etc/ssh/authorized_keys/gem
 COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /etc/nginx/conf.d
 
-# --- Launchy config ---
-COPY containers/apps/launchy/config.json /etc/launchy/config.json
-RUN mkdir -p /etc/launchy/apps.d /var/log/launchy /run /etc/launchy/built-in
+# --- s6-overlay (process supervision) ---
+# nixos/nix is Alpine-based; xz needed to extract s6-overlay tarballs.
+RUN apk add --no-cache xz 2>/dev/null || true
+ARG S6_OVERLAY_VERSION=3.2.3.2
+ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp
+RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz
+ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz /tmp
+RUN tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz
 
-# Generate infra + app launchy configs from devcontainer.json inside the
-# build (CI also runs this script, but MCP/local builds don't — generating
-# in-container keeps both paths working).
-WORKDIR /build
-COPY .devcontainer/devcontainer.json .devcontainer/devcontainer.json
-COPY containers/apps/scripts/gen-launchy-conf.py containers/apps/scripts/gen-launchy-conf.py
-RUN python3 containers/apps/scripts/gen-launchy-conf.py /etc/launchy/built-in
-WORKDIR /
+# --- s6-rc service definitions ---
+COPY containers/apps/s6-overlay/ /etc/s6-overlay/
+RUN mkdir -p /etc/s6-overlay/apps.d
 
-# --- Entrypoint ---
-COPY containers/apps/docker-entrypoint.d/ /docker-entrypoint.d/
-RUN chmod +x /docker-entrypoint.d/*.sh
-COPY containers/apps/scripts/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
+# --- Healthcheck ---
 COPY containers/apps/scripts/healthcheck.sh /usr/local/bin/healthcheck
 RUN chmod +x /usr/local/bin/healthcheck
-
-# --- Launchy binary (built in stage 1 from system/launchy/) ---
-COPY --from=launchy-builder /launchy /sbin/launchy
-RUN chmod +x /sbin/launchy
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=90s --retries=3 \
     CMD /usr/local/bin/healthcheck
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/init"]

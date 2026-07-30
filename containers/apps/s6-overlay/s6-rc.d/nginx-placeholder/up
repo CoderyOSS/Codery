@@ -1,0 +1,2 @@
+#!/command/execlineb -P
+/bin/sh -c "if [ ! -f /etc/nginx/conf.d/apps.conf ]; then printf 'server {\n    listen 8080 default_server;\n    return 503 \"No apps configured yet\";\n}\n' > /etc/nginx/conf.d/apps.conf; fi"

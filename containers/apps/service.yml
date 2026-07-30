@@ -43,8 +43,8 @@ volumes:
     container: /etc/nginx/conf.d/apps.conf
     readonly: true
   - type: bind
-    host: /opt/codery/apps-launchy.d
-    container: /etc/launchy/apps.d
+    host: /opt/codery/apps-s6.d
+    container: /etc/s6-overlay/apps.d
 
 env_overrides:
   GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem

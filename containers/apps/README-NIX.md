@@ -1,22 +1,46 @@
-# Apps Container — Nix Build
+# Apps Container — Nix Toolchains + s6-overlay
 
-Apps container uses [Nix](https://nixos.org) for reproducible, declarative toolchains.
+Apps container uses [Nix](https://nixos.org) for reproducible, declarative toolchains and
+[s6-overlay](https://github.com/just-containers/s6-overlay) for process supervision.
 All packages come from a pinned nixpkgs revision; NvChad is cloned at a pinned commit.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `containers/apps/Dockerfile` | `nixos/nix` base image, runs `nix profile install` + `home-manager switch` |
+| `containers/apps/Dockerfile` | `nixos/nix` base image, `nix profile install` + `home-manager switch` + s6-overlay |
 | `containers/apps/flake.nix` | System profile (Rust, Elixir, Bun, gcc, nvim, nginx, sshd, infra) |
 | `containers/apps/home.nix` | home-manager module for `gem` — neovim + treesitter parsers |
-| `containers/apps/scripts/entrypoint.sh` | Unchanged — runs `/docker-entrypoint.d/*.sh` then `launchy` |
-| `containers/apps/service.yml` | Unchanged — volumes, ports, network alias |
+| `containers/apps/s6-overlay/` | s6-rc service definitions (ssh-agent, sshd, nginx, oneshots) |
+| `containers/apps/service.yml` | Volumes, ports, network alias |
+| `containers/apps/sshd_config` | OpenSSH server config |
+| `containers/apps/nginx.conf` | Nginx reverse-proxy config |
+
+## Process supervision (s6-overlay)
+
+s6-overlay replaces Launchy as PID 1. Services are defined as s6-rc source definition
+directories under `containers/apps/s6-overlay/s6-rc.d/` and included in the `user` bundle.
+
+| Service | Type | Description |
+|---------|------|-------------|
+| `ssh-host-keys` | oneshot | `ssh-keygen -A` — generates host keys on first boot |
+| `sshd` | longrun | `/usr/sbin/sshd -D -e` — depends on `ssh-host-keys` |
+| `ssh-agent` | longrun | `ssh-agent -a /tmp/ssh-agent.sock -d` |
+| `ssh-agent-keys` | oneshot | Loads SSH keys — depends on `ssh-agent` |
+| `nginx-placeholder` | oneshot | Writes fallback config if bind mount missing |
+| `nginx` | longrun | `nginx -c /etc/nginx/nginx.conf` — depends on `nginx-placeholder` |
+
+All services depend on s6-overlay's `base` bundle (system readiness). Dependencies enforce
+ordering — no race conditions between sshd and host key generation.
+
+To add a new static service (baked into the image), add an s6-rc directory, an empty file
+in `user-bundles.d/user/contents.d/`, and the Dockerfile COPY will pick it up.
 
 ## Pinned versions (nixos-25.05)
 
 - **nixpkgs**: `ac62194c3917d5f474c1a844b6fd6da2db95077d` (nixos-25.05 HEAD as of Jan 2026)
 - **home-manager**: `44831a7eaba4360fb81f2acc5ea6de5fde90aaa3` (release-25.05)
+- **s6-overlay**: `3.2.3.2` (ARG in Dockerfile)
 - **NvChad starter**: `e3572e1f5e1c297212c3deeb17b7863139ce663e` (cloned in Dockerfile)
 
 Resolved package versions on this pin (approximate — check via `nix profile list` inside container):
@@ -68,8 +92,8 @@ To build locally on the host:
 
 ```bash
 # From Codery repo root
-codery-ci build apps nix-test
-# → docker build -t ghcr.io/coderyoss/codery:apps-nix-test \
+codery-ci build apps test-s6
+# -> docker build -t ghcr.io/coderyoss/codery:apps-test-s6 \
 #                 -f containers/apps/Dockerfile .
 ```
 
@@ -78,7 +102,7 @@ First build takes ~10-15 min (nix downloads ~1.5GB of packages from cache.nixos.
 ## Verifying
 
 ```bash
-codery-ci deploy-preview apps nix-test
+codery-ci deploy-preview apps test-s6
 
 ssh gem@apps 'rustc --version && cargo --version'
 ssh gem@apps 'elixir --version && iex --version'
@@ -89,17 +113,15 @@ ssh gem@apps 'nvim --version | head -2'
 ssh gem@apps 'nginx -v 2>&1'
 ssh gem@apps 'sshd -V 2>&1 | head -1'
 
-# NvChad + plugins present
-ssh gem@apps 'ls /home/gem/.local/share/nvim/lazy | head'
+# s6-rc service status
+ssh gem@apps 's6-rc -l /run/s6-rc.servicedir -d /run/s6-rc.servicedir list'
 
-# Tree-sitter parsers compiled
-ssh gem@apps 'ls /home/gem/.local/share/nvim/lazy/nvim-treesitter/parser | head'
+# s6 supervision status
+ssh gem@apps 's6-svstat /run/service/sshd'
+ssh gem@apps 's6-svstat /run/service/nginx'
 
 # Healthcheck passes
 ssh gem@apps '/usr/local/bin/healthcheck'
-
-# Launchy running everything
-ssh gem@apps 'cat /run/launchy-status.json | jq'
 ```
 
 Then on the host:
@@ -107,6 +129,18 @@ Then on the host:
 ```bash
 codery-ci cutover apps
 ```
+
+## Runtime app management via s6
+
+To hot-add an app at runtime (without rebuilding):
+
+1. Create an s6 service directory at `/etc/s6-overlay/apps.d/<name>/` with `type`, `run`, and `dependencies.d/base`
+2. Link it into s6 supervision: `s6-svlink /run/service /etc/s6-overlay/apps.d/<name>`
+3. To remove: `s6-svunlink /run/service/<name>` and delete the service directory
+
+This replaces the previous Launchy `add_app`/`remove_app` mechanism. The codery-ci MCP tools
+(`add_app`, `remove_app`) need corresponding updates to write s6 service directories and run
+`s6-svlink`/`s6-svunlink` inside the container.
 
 ## Installing extra apps in the container
 

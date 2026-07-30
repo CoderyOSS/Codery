@@ -43,9 +43,6 @@ jobs:
         with:
           install: true
 
-      - name: Generate Launchy configs from devcontainer.json
-        run: python3 containers/apps/scripts/gen-launchy-conf.py containers/apps/launchy/built-in
-
       - name: Build and push apps image
         uses: docker/build-push-action@v6
         with:
@@ -81,7 +78,7 @@ jobs:
           SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
           SCP="scp -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new"
 
-          $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy /opt/codery/apps-launchy.d /opt/codery/state"
+          $SSH "sudo mkdir -p /opt/codery/services /opt/codery/proxy /opt/codery/apps-s6.d /opt/codery/state"
           cat containers/apps/service.yml | $SSH "sudo tee /opt/codery/services/apps.yml"
           cat proxy/routes.yaml | $SSH "sudo tee /opt/codery/proxy/routes.yaml" > /dev/null
 

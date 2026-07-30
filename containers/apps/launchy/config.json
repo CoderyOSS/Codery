@@ -1,4 +1,0 @@
-{
-  "include_dirs": ["/etc/launchy/built-in", "/etc/launchy/apps.d"],
-  "status_file": "/run/launchy-status.json"
-}

@@ -3,8 +3,7 @@
 # ssh-agent-add-keys.sh - Add SSH keys to the running ssh-agent
 # This is called by supervisord after ssh-agent starts
 
-USER="${USER:-gem}"
-SSH_DIR="/home/${USER}/.ssh"
+SSH_DIR="/home/gem/.ssh"
 
 # Wait for ssh-agent socket to be ready
 for i in {1..30}; do
