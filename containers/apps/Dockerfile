@@ -139,8 +139,6 @@ COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /etc/nginx/conf.d
 
 # --- s6-overlay (process supervision) ---
-# nixos/nix is Alpine-based; xz needed to extract s6-overlay tarballs.
-RUN apk add --no-cache xz 2>/dev/null || true
 ARG S6_OVERLAY_VERSION=3.2.3.2
 ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp
 RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz

@@ -85,6 +85,8 @@
         less
         which
         file
+        # xz needed by s6-overlay tarball extraction at build time
+        xz
         # util-linux: `script` (PTY wrapper Blink/Mosh expect), flock, nsenter
         util-linux
 
