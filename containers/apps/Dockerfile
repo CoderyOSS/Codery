@@ -70,13 +70,13 @@ RUN nix --extra-experimental-features "nix-command flakes" profile install --pri
 
 # --- sudo setuid: nix store binaries lack setuid bit ---
 # home-manager-only container (no NixOS modules) means security.wrappers
-# never runs. Copy sudo out of the store, chmod 4755. Mirrors
-# examples/Dockerfile.sandbox pattern.
+# never runs. The nix profile bin is first in PATH and has a non-setuid
+# sudo symlink. Remove that symlink, install a real setuid copy at
+# /usr/bin/sudo (in runtime PATH after nix profile bin).
 RUN src="$(readlink -f "$(command -v sudo)")" && \
-    mkdir -p /usr/local/bin && \
-    rm -f /usr/local/bin/sudo /usr/bin/sudo && \
-    cp "$src" /usr/local/bin/sudo && \
-    chmod 4755 /usr/local/bin/sudo
+    rm -f /nix/var/nix/profiles/default/bin/sudo && \
+    cp "$src" /usr/bin/sudo && \
+    chmod 4755 /usr/bin/sudo
 
 # Allow gem to manage its own nix profile (single-user nix in nixos/nix
 # keeps /nix owned by root; world-writable per-user dir lets non-root users
