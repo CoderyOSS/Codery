@@ -72,15 +72,15 @@ RUN nix --extra-experimental-features "nix-command flakes" profile install --pri
 # home-manager-only container (no NixOS modules) means security.wrappers
 # never runs. The nix profile bin is first in PATH and has a non-setuid
 # sudo symlink. Remove that symlink, install a real setuid copy at
-# /usr/bin/sudo (in runtime PATH after nix profile bin). Also copy
-# /etc/sudoers from the nix package — the main file is required even
-# with /etc/sudoers.d/ rules.
+# /usr/bin/sudo (in runtime PATH after nix profile bin). Write a custom
+# sudoers with nix profile bin in secure_path (default sudoers only has
+# FHS paths, so sudo can't find nix-installed commands).
 RUN src="$(readlink -f "$(command -v sudo)")" && \
-    prefix="$(dirname "$(dirname "$src")")" && \
     rm -f /nix/var/nix/profiles/default/bin/sudo && \
     cp "$src" /usr/bin/sudo && \
     chmod 4755 /usr/bin/sudo && \
-    cp "$prefix/etc/sudoers" /etc/sudoers && \
+    printf 'Defaults secure_path="/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\nroot ALL=(ALL:ALL) ALL\n@includedir /etc/sudoers.d\n' \
+      > /etc/sudoers && \
     chmod 440 /etc/sudoers
 
 # --- PAM config for sudo ---
