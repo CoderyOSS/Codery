@@ -11,6 +11,72 @@ use std::time::Duration;
 use crate::service_def::{HealthCheck, ServiceDef};
 use crate::{caddy, config, images, preflight, state, validate};
 
+// ── Cutover planning (pure decision, no Docker IO) ───────────────────────────
+
+/// Decision returned by `plan_cutover`. `run_cutover` consumes this and
+/// executes the appropriate Docker/state actions.
+#[derive(Debug, PartialEq)]
+pub(crate) enum CutoverPlan {
+    /// Promote `sha` to active.
+    /// `already_staged=true`  → inactive container verified running this image (preview path);
+    ///                          `run_cutover` may cutover immediately.
+    /// `already_staged=false` → `run_cutover` must start the inactive color with this image
+    ///                          first (or, for `--sha`, skip start only if inactive happens to
+    ///                          already run it).
+    Promote { sha: String, already_staged: bool },
+    /// Active container's image is already the newest available locally.
+    NothingNewer { active_tag: String, newest_tag: String },
+    /// No local images for this service exist at all.
+    NoLocalImages,
+    /// A preview record exists but the inactive container is not running the
+    /// previewed image — the staged state was lost (container removed / replaced).
+    StalePreview { expected_sha: String },
+}
+
+/// Pure cutover resolver. No Docker/state IO — fully unit-testable.
+///
+/// Resolution priority:
+/// 1. `sha_opt` (explicit `--sha`) wins over everything.
+/// 2. `preview` (deploy-preview record) wins over auto-newest, but only if
+///    `preview_staged` (inactive is actually running that image). Otherwise stale.
+/// 3. Auto: pick `newest_local`. Equal to active tag → `NothingNewer`. None → `NoLocalImages`.
+pub(crate) fn plan_cutover(
+    sha_opt: Option<&str>,
+    preview: Option<&str>,
+    preview_staged: bool,
+    newest_local: Option<&images::LocalImage>,
+    active_image_tag: &str,
+) -> CutoverPlan {
+    // 1. Explicit --sha wins over everything. Not pre-verified — run_cutover
+    //    will start_inactive (or skip if inactive already happens to run it).
+    if let Some(sha) = sha_opt {
+        return CutoverPlan::Promote { sha: sha.to_string(), already_staged: false };
+    }
+
+    // 2. Staged preview wins over auto-newest. If the inactive container isn't
+    //    actually running the previewed image, that's a stale preview — bail
+    //    rather than silently falling through to auto-newest.
+    if let Some(p) = preview {
+        if preview_staged {
+            return CutoverPlan::Promote { sha: p.to_string(), already_staged: true };
+        }
+        return CutoverPlan::StalePreview { expected_sha: p.to_string() };
+    }
+
+    // 3. Auto: newest local image by .created (list_local is newest-first).
+    match newest_local {
+        None => CutoverPlan::NoLocalImages,
+        Some(newest) if newest.tag == active_image_tag => CutoverPlan::NothingNewer {
+            active_tag: active_image_tag.to_string(),
+            newest_tag: newest.tag.clone(),
+        },
+        Some(newest) => CutoverPlan::Promote {
+            sha: newest.sha.clone(),
+            already_staged: false,
+        },
+    }
+}
+
 // ── DeployDeps trait ──────────────────────────────────────────────────────────
 
 trait DeployDeps {
@@ -28,6 +94,9 @@ trait DeployDeps {
     async fn health_check(&self, def: &ServiceDef, color: &str) -> Result<()>;
     async fn prune_images(&self, service: &str) -> Result<()>;
     fn ensure_nginx_config(&self) -> Result<()>;
+    /// Whether the named container exists AND is in running state.
+    /// Used by the dead-container safety guards in `deploy_service` and `cutover`.
+    async fn container_running(&self, name: &str) -> Result<bool>;
 }
 
 // ── RealDeps (production implementation) ─────────────────────────────────────
@@ -87,6 +156,17 @@ impl DeployDeps for RealDeps {
         }
         Ok(())
     }
+    async fn container_running(&self, name: &str) -> Result<bool> {
+        let running = self
+            .docker
+            .inspect_container(name, None)
+            .await
+            .ok()
+            .and_then(|i| i.state)
+            .and_then(|s| s.running)
+            .unwrap_or(false);
+        Ok(running)
+    }
 }
 
 /// Entry point called by `main.rs`: load the service definition from YAML
@@ -117,17 +197,140 @@ pub async fn run_start_inactive(service: &str, sha: &str) -> Result<String> {
     Ok(inactive)
 }
 
-/// Load service def and run cutover for the currently inactive color.
-/// Stops the old active container and prunes old images.
-pub async fn run_cutover(service: &str, sha: &str) -> Result<()> {
+/// Load service def and run cutover, resolving the SHA to promote via
+/// `plan_cutover`. Priority: explicit `--sha` → staged preview → newest local.
+///
+/// Safety guards:
+/// - Never stops the active container unless the inactive is verified running
+///   the promoted image (Bug B fix, enforced inside `cutover()`).
+/// - A stale preview record (inactive no longer running it) bails with an
+///   actionable message rather than silently falling back to auto-newest.
+pub async fn run_cutover(
+    service: &str,
+    sha_opt: Option<&str>,
+    preview: Option<&str>,
+) -> Result<()> {
     let def = ServiceDef::load(service)
         .with_context(|| format!("failed to load service definition for '{service}'"))?;
     let docker = Docker::connect_with_socket_defaults()
         .context("failed to connect to Docker socket")?;
-    let deps = RealDeps { docker };
+    let deps = RealDeps { docker: docker.clone() };
     let active = deps.read_active(&def.service)?;
     let inactive = config::flip(&active);
-    cutover(&def, sha, &active, inactive, &deps).await
+
+    // ── Gather plan_cutover inputs ────────────────────────────────────────────
+    // preview_staged: is the inactive container actually running the preview's image?
+    let preview_staged = match preview {
+        Some(p) => container_runs_image(&docker, &def, inactive, p).await?,
+        None => false,
+    };
+
+    // newest_local: list_local is already sorted newest-first.
+    let newest_local = images::list_local(&def.service).await?.into_iter().next();
+
+    // active_image_tag: full tag of the active container's image, e.g.
+    // "ghcr.io/coderyoss/codery:sandbox-abc123". Compared verbatim against
+    // LocalImage.tag (which is the same full tag).
+    let active_image_tag = active_container_image(&docker, &def.service, &active)
+        .await?
+        .unwrap_or_default();
+
+    let plan = plan_cutover(
+        sha_opt,
+        preview,
+        preview_staged,
+        newest_local.as_ref(),
+        &active_image_tag,
+    );
+
+    match plan {
+        CutoverPlan::Promote { sha, already_staged: true } => {
+            // Preview path: inactive verified running this image. Cutover directly.
+            println!("[cutover] Promoting staged preview sha={}", sha);
+            cutover(&def, &sha, &active, inactive, &deps).await
+        }
+        CutoverPlan::Promote { sha, already_staged: false } => {
+            // Explicit --sha or auto-newest. If inactive isn't already running
+            // this image, start it first (handles --sha pointing at an image
+            // that hasn't been deploy-previewed yet).
+            let already_up = container_runs_image(&docker, &def, inactive, &sha).await?;
+            if already_up {
+                println!("[cutover] Inactive already running sha={} — skipping start", sha);
+            } else {
+                println!("[cutover] Starting inactive {} with sha={}", inactive, sha);
+                start_inactive(&def, &sha, inactive, &deps).await?;
+            }
+            cutover(&def, &sha, &active, inactive, &deps).await
+        }
+        CutoverPlan::NothingNewer { active_tag, newest_tag } => {
+            println!(
+                "[cutover] nothing newer to cut to (active={active_tag}, newest={newest_tag})"
+            );
+            Ok(())
+        }
+        CutoverPlan::NoLocalImages => {
+            bail!(
+                "no local images found for '{service}'. \
+                 Run `codery-ci build {0} <tag>` or `codery-ci deploy {0} <sha>` first.",
+                service
+            );
+        }
+        CutoverPlan::StalePreview { expected_sha } => {
+            bail!(
+                "stale preview for '{service}': inactive container is not running sha \
+                 {expected_sha}. Run `codery-ci cancel-preview {0}` to discard it, then \
+                 `cutover` again to promote the newest local image — or `deploy-preview \
+                 {0} <sha>` to restage.",
+                service
+            );
+        }
+    }
+}
+
+/// Inspect a container and return its image tag (`Config.image`), e.g.
+/// "ghcr.io/coderyoss/codery:sandbox-abc123". Returns None if the container
+/// does not exist.
+async fn container_image_tag(
+    docker: &Docker,
+    name: &str,
+) -> Result<Option<String>> {
+    Ok(docker
+        .inspect_container(name, None)
+        .await
+        .ok()
+        .and_then(|i| i.config.and_then(|c| c.image)))
+}
+
+/// True iff `color` container for `def` is running the image tagged with `sha`.
+/// Compares the full image ref (`def.image_ref(sha)`) against the container's
+/// `Config.image`, and verifies `.state.running == true`.
+async fn container_runs_image(
+    docker: &Docker,
+    def: &ServiceDef,
+    color: &str,
+    sha: &str,
+) -> Result<bool> {
+    let name = config::container_name(&def.service, color);
+    let Some(inspect) = docker.inspect_container(&name, None).await.ok() else {
+        return Ok(false);
+    };
+    let running = inspect.state.as_ref().and_then(|s| s.running).unwrap_or(false);
+    if !running {
+        return Ok(false);
+    }
+    let want = def.image_ref(sha);
+    let have = inspect.config.as_ref().and_then(|c| c.image.as_deref()).unwrap_or("");
+    Ok(have == want)
+}
+
+/// Image tag of the active container, or None if it does not exist.
+async fn active_container_image(
+    docker: &Docker,
+    service: &str,
+    active: &str,
+) -> Result<Option<String>> {
+    let name = config::container_name(service, active);
+    container_image_tag(docker, &name).await
 }
 
 /// Load service def, stop the inactive container, and prune images.
@@ -163,10 +366,19 @@ async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) ->
     let inactive = config::flip(&active);
     println!("[deploy] active={} inactive={}", active, inactive);
 
-    // Idempotency: same SHA already running → no-op.
+    // Idempotency: same SHA already running AND the active container is actually
+    // up → no-op. If the SHA matches but the container is dead/removed, fall
+    // through and redeploy (Bug A fix — see deploy_redeploys_when_sha_matches_but_container_dead).
+    let active_container = config::container_name(&def.service, &active);
     if deps.read_active_sha(&def.service).as_deref() == Some(sha) {
-        println!("[deploy] already running sha={} — no-op", sha);
-        return Ok(());
+        if deps.container_running(&active_container).await? {
+            println!("[deploy] already running sha={} — no-op", sha);
+            return Ok(());
+        }
+        println!(
+            "[deploy] sha={} matches state but active container {} is dead — redeploying",
+            sha, active_container
+        );
     }
 
     start_inactive(def, sha, inactive, deps).await?;
@@ -208,6 +420,23 @@ async fn cutover<D: DeployDeps>(
     inactive: &str,
     deps: &D,
 ) -> Result<()> {
+    // ── Dead-container guard (Bug B fix) ─────────────────────────────────────
+    // Refuse to flip state or stop the active container unless the inactive
+    // color is actually running. Without this, a state/reality desync would
+    // stop the only live container → total outage.
+    let inactive_container = config::container_name(&def.service, inactive);
+    if !deps.container_running(&inactive_container).await? {
+        bail!(
+            "cutover refused: inactive container {} is not running. \
+             Refusing to stop active container {} without a verified replacement. \
+             Run `codery-ci deploy-preview {svc} <sha>` (or `deploy {svc} <sha>`) \
+             to start the inactive color first.",
+            inactive_container,
+            config::container_name(&def.service, active),
+            svc = def.service
+        );
+    }
+
     // ── Cutover (no automated rollback from this point forward) ───────────────
     println!(
         "[deploy] CUTOVER BEGIN: {service} active={active} → inactive={inactive} \
@@ -578,6 +807,9 @@ network: codery-net
         health_ok:    bool,
         validate_ok:  bool,
         preflight_ok: bool,
+        /// Set of container names currently "running". Models Docker state.
+        /// `start_container` inserts; `stop_container`/`remove_container_if_exists` remove.
+        running:      RefCell<std::collections::HashSet<String>>,
     }
 
     impl MockDeps {
@@ -589,11 +821,26 @@ network: codery-net
                 health_ok:    true,
                 validate_ok:  true,
                 preflight_ok: true,
+                // Default: the active color container (codery-sandbox-blue) is up.
+                running:      RefCell::new(
+                    ["codery-sandbox-blue".to_string()].into_iter().collect()
+                ),
             }
         }
 
         fn events(&self) -> Vec<String> {
             self.events.borrow().clone()
+        }
+
+        /// Test helper: mark a container as not-running (e.g. simulate the
+        /// "active container was removed during debugging" outage scenario).
+        fn kill(&self, name: &str) {
+            self.running.borrow_mut().remove(name);
+        }
+
+        /// Test helper: mark a container as running.
+        fn revive(&self, name: &str) {
+            self.running.borrow_mut().insert(name.to_string());
         }
     }
 
@@ -631,17 +878,19 @@ network: codery-net
             if self.validate_ok { Ok(()) } else { anyhow::bail!("mock validate failed") }
         }
         async fn start_container(&self, def: &ServiceDef, _sha: &str, color: &str) -> Result<()> {
-            self.events.borrow_mut().push(
-                format!("start_container:codery-{}-{}", def.service, color)
-            );
+            let name = format!("codery-{}-{}", def.service, color);
+            self.events.borrow_mut().push(format!("start_container:{}", name));
+            self.running.borrow_mut().insert(name);
             Ok(())
         }
         async fn remove_container_if_exists(&self, name: &str) -> Result<()> {
             self.events.borrow_mut().push(format!("remove_container:{}", name));
+            self.running.borrow_mut().remove(name);
             Ok(())
         }
         async fn stop_container(&self, name: &str) -> Result<()> {
             self.events.borrow_mut().push(format!("stop_container:{}", name));
+            self.running.borrow_mut().remove(name);
             Ok(())
         }
         async fn health_check(&self, def: &ServiceDef, color: &str) -> Result<()> {
@@ -652,6 +901,7 @@ network: codery-net
             } else {
                 // Mirror real behavior: remove the new container before bailing.
                 self.events.borrow_mut().push(format!("remove_container:{}", container));
+                self.running.borrow_mut().remove(&container);
                 anyhow::bail!("mock health check timed out on container port 3000")
             }
         }
@@ -660,6 +910,9 @@ network: codery-net
             Ok(())
         }
         fn ensure_nginx_config(&self) -> Result<()> { Ok(()) }
+        async fn container_running(&self, name: &str) -> Result<bool> {
+            Ok(self.running.borrow().contains(name))
+        }
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
@@ -837,6 +1090,8 @@ network: codery-net
     async fn cutover_only_promotes_inactive() {
         let def = sandbox_def();
         let deps = MockDeps::new(); // active=blue
+        // cutover is called AFTER deploy-preview has started the inactive color.
+        deps.revive("codery-sandbox-green");
 
         cutover(&def, "abc123", "blue", "green", &deps).await.unwrap();
 
@@ -901,5 +1156,177 @@ network: codery-net
             !events.contains(&"apply_caddy".to_string()),
             "no caddy reload on health failure\nevents: {events:?}"
         );
+    }
+
+    // ── Dead-container safety guards (Bug A & Bug B) ──────────────────────────
+
+    /// Bug A: `deploy <sha>` used to no-op whenever the recorded SHA matched,
+    /// even if the active container was dead/removed. Recovery required
+    /// manually corrupting the state file. Now: SHA match + dead container
+    /// triggers a real redeploy.
+    #[tokio::test]
+    async fn deploy_redeploys_when_sha_matches_but_container_dead() {
+        let def = sandbox_def();
+        let deps = MockDeps {
+            active_sha: RefCell::new(Some("abc123".to_string())),
+            ..MockDeps::new()
+        };
+        // Simulate the outage scenario: active container was removed during
+        // debugging but state SHA still records "abc123".
+        deps.kill("codery-sandbox-blue");
+
+        deploy_service(&def, "abc123", &deps).await.unwrap();
+
+        let events = deps.events();
+        assert!(
+            events.contains(&"start_container:codery-sandbox-green".to_string()),
+            "dead active container with matching SHA must trigger a real redeploy\n\
+             events: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.starts_with("write_active:")),
+            "cutover must run after redeploy\nevents: {events:?}"
+        );
+    }
+
+    /// Bug B: `cutover` used to flip state and stop the active container on the
+    /// assumption the inactive color was already live. When state/reality
+    /// desynced, this stopped the only running container → total outage.
+    /// Now: cutover refuses if the inactive color isn't actually running.
+    #[tokio::test]
+    async fn cutover_refuses_when_inactive_not_running() {
+        let def = sandbox_def();
+        let deps = MockDeps::new(); // active=blue; green NOT in running set
+
+        let result = cutover(&def, "abc123", "blue", "green", &deps).await;
+        assert!(result.is_err(), "cutover must refuse when inactive is not running");
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("codery-sandbox-green") && err.contains("not running"),
+            "error must name the dead container\n got: {err}"
+        );
+
+        let events = deps.events();
+        assert!(
+            !events.iter().any(|e| e.starts_with("write_active:")),
+            "no state mutation on refusal\nevents: {events:?}"
+        );
+        assert!(
+            !events.contains(&"stop_container:codery-sandbox-blue".to_string()),
+            "must NOT stop the active container when inactive is dead\nevents: {events:?}"
+        );
+        assert!(
+            !events.contains(&"apply_caddy".to_string()),
+            "no caddy reload on refusal\nevents: {events:?}"
+        );
+    }
+
+    // ── plan_cutover (pure decision fn) ───────────────────────────────────────
+
+    fn local(sha: &str, created: i64) -> images::LocalImage {
+        // tag follows the registry convention `<service>-<sha>`; the service prefix
+        // is irrelevant to plan_cutover — only the tag-equality comparison matters.
+        let tag = format!("sandbox-{}", sha);
+        images::LocalImage { sha: sha.to_string(), tag, created }
+    }
+
+    #[test]
+    fn plan_explicit_sha_wins_over_preview_and_newest() {
+        let p = local("preview-sha", 100);
+        let n = local("newer-sha", 200);
+        let plan = plan_cutover(
+            Some("explicit-sha"),
+            Some("preview-sha"),
+            true,
+            Some(&n),
+            "sandbox-old",
+        );
+        let _ = &p; // silence unused warning; kept for readability
+        assert_eq!(
+            plan,
+            CutoverPlan::Promote { sha: "explicit-sha".into(), already_staged: false }
+        );
+    }
+
+    #[test]
+    fn plan_explicit_sha_wins_when_only_preview_present() {
+        let plan = plan_cutover(Some("x"), Some("preview-sha"), true, None, "sandbox-old");
+        assert_eq!(
+            plan,
+            CutoverPlan::Promote { sha: "x".into(), already_staged: false }
+        );
+    }
+
+    #[test]
+    fn plan_preview_honored_when_staged() {
+        let plan = plan_cutover(None, Some("preview-sha"), true, None, "sandbox-old");
+        assert_eq!(
+            plan,
+            CutoverPlan::Promote { sha: "preview-sha".into(), already_staged: true }
+        );
+    }
+
+    #[test]
+    fn plan_preview_priority_over_newer_local() {
+        // User staged an OLDER preview, then built something newer.
+        // plan_cutover must still pick the staged preview (explicit staging wins).
+        let newest = local("newer-sha", 999);
+        let plan = plan_cutover(None, Some("preview-sha"), true, Some(&newest), "sandbox-old");
+        assert_eq!(
+            plan,
+            CutoverPlan::Promote { sha: "preview-sha".into(), already_staged: true }
+        );
+    }
+
+    #[test]
+    fn plan_stale_preview_when_not_staged() {
+        let plan = plan_cutover(None, Some("preview-sha"), false, None, "sandbox-old");
+        assert_eq!(
+            plan,
+            CutoverPlan::StalePreview { expected_sha: "preview-sha".into() }
+        );
+    }
+
+    #[test]
+    fn plan_stale_preview_even_when_newer_local_exists() {
+        // Stale preview must NOT silently fall through to auto-newest.
+        // Operator should cancel-preview first, then cutover.
+        let newest = local("newer-sha", 999);
+        let plan = plan_cutover(None, Some("preview-sha"), false, Some(&newest), "sandbox-old");
+        assert_eq!(
+            plan,
+            CutoverPlan::StalePreview { expected_sha: "preview-sha".into() }
+        );
+    }
+
+    #[test]
+    fn plan_auto_picks_newest_local() {
+        let newest = local("newer-sha", 200);
+        let plan = plan_cutover(None, None, false, Some(&newest), "sandbox-old");
+        assert_eq!(
+            plan,
+            CutoverPlan::Promote { sha: "newer-sha".into(), already_staged: false }
+        );
+    }
+
+    #[test]
+    fn plan_auto_nothing_newer_when_tags_equal() {
+        let newest = local("current", 200);
+        // Active container's image tag is the same as the newest local tag.
+        let plan = plan_cutover(None, None, false, Some(&newest), "sandbox-current");
+        assert_eq!(
+            plan,
+            CutoverPlan::NothingNewer {
+                active_tag: "sandbox-current".into(),
+                newest_tag: "sandbox-current".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn plan_auto_no_local_images() {
+        let plan = plan_cutover(None, None, false, None, "sandbox-old");
+        assert_eq!(plan, CutoverPlan::NoLocalImages);
     }
 }

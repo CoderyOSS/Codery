@@ -294,12 +294,16 @@ async fn main() -> Result<()> {
         Some("cutover") => {
             // Usage: codery-ci cutover <service> [--sha <sha>]
             //
-            // Promotes the currently-running inactive color to active. Stops the
-            // old active container. State files / Caddy / Nginx all reload.
+            // Promotes the inactive color to active. Stops the old active
+            // container. State files / Caddy / Nginx all reload.
             //
-            // --sha records the SHA that was deployed. If omitted, the preview's
-            // recorded SHA is used (from deploy-preview). If neither is available,
-            // an error is returned — cutover refuses to run without a SHA record.
+            // SHA resolution priority:
+            //   1. --sha <sha>          (explicit; wins over everything)
+            //   2. staged preview       (from a prior `deploy-preview`)
+            //   3. newest local image   (auto; nothing-newer exits 0)
+            //
+            // Safety: refuses to flip state if the inactive color isn't actually
+            // running the promoted image. Stale previews bail with a fix message.
             //
             // WARNING: this kills any sessions in the previously-active container.
             let service = args
@@ -315,20 +319,13 @@ async fn main() -> Result<()> {
 
             let conn = db::open()?;
             db::init(&conn)?;
-            let sha = if let Some(s) = flag_value(&args, "--sha") {
-                s
-            } else if let Some(p) = db::find_preview(&conn, service)? {
-                println!("[cutover] Using SHA {} from existing preview record", p.sha);
-                p.sha
-            } else {
-                return Err(anyhow!(
-                    "no --sha given and no preview record for '{}'. \
-                     Run deploy-preview first, or pass --sha <sha>.",
-                    service
-                ));
-            };
+            let sha_opt = flag_value(&args, "--sha");
+            let preview = db::find_preview(&conn, service)?.map(|p| p.sha);
+            if let (None, Some(p)) = (sha_opt.as_deref(), preview.as_deref()) {
+                println!("[cutover] Found staged preview sha={}", p);
+            }
 
-            deploy::run_cutover(service, &sha).await?;
+            deploy::run_cutover(service, sha_opt.as_deref(), preview.as_deref()).await?;
 
             // Clean up preview route (now redundant — the new active serves the main subdomain).
             if db::delete_preview(&conn, service)? {
@@ -539,15 +536,26 @@ codery-ci cutover <service> [--sha <sha>]
 Promote the inactive color to active. Updates the state file, regenerates the
 Caddyfile, stops the previously-active container, and removes the preview route.
 
-Use to finalize a preview deploy, OR to recover when routing points to a dead
-container (state file disagrees with Docker reality — run `diagnose` to confirm).
+SHA resolution (in priority order):
+  1. --sha <sha>          Explicit; wins over everything.
+  2. staged preview       From a prior `deploy-preview`. Bails if the inactive
+                          container is not actually running the previewed image
+                          (stale preview — run cancel-preview then cutover again).
+  3. newest local image   Auto-picked from the host Docker cache. If the active
+                          container already runs the newest, prints \"nothing
+                          newer to cut to\" and exits 0.
+
+Safety: refuses to stop the active container unless the inactive color is
+verified running the promoted image.
+
+Use to finalize a preview deploy, promote a freshly-built image, or recover
+when routing points at a dead container (run `diagnose` to confirm state).
 
 Arguments:
   <service>  Service name
 
 Flags:
-  --sha <sha>  Override the SHA (default: read from the preview record).
-               Required if no preview exists for the service.
+  --sha <sha>  Promote this SHA explicitly. Default: preview → newest local.
 
 Example:
   codery-ci cutover sandbox
