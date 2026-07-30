@@ -72,11 +72,17 @@ RUN nix --extra-experimental-features "nix-command flakes" profile install --pri
 # home-manager-only container (no NixOS modules) means security.wrappers
 # never runs. The nix profile bin is first in PATH and has a non-setuid
 # sudo symlink. Remove that symlink, install a real setuid copy at
-# /usr/bin/sudo (in runtime PATH after nix profile bin).
+# /usr/bin/sudo (in runtime PATH after nix profile bin). Also copy
+# /etc/sudoers from the nix package — the main file is required even
+# with /etc/sudoers.d/ rules. nix sudo is built without PAM, so no
+# /etc/pam.d/ needed.
 RUN src="$(readlink -f "$(command -v sudo)")" && \
+    prefix="$(dirname "$(dirname "$src")")" && \
     rm -f /nix/var/nix/profiles/default/bin/sudo && \
     cp "$src" /usr/bin/sudo && \
-    chmod 4755 /usr/bin/sudo
+    chmod 4755 /usr/bin/sudo && \
+    cp "$prefix/etc/sudoers" /etc/sudoers && \
+    chmod 440 /etc/sudoers
 
 # Allow gem to manage its own nix profile (single-user nix in nixos/nix
 # keeps /nix owned by root; world-writable per-user dir lets non-root users
