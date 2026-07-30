@@ -99,6 +99,40 @@ RUN git clone --filter=blob:none https://github.com/NvChad/starter \
     cp -a /tmp/nvchad-starter /home/gem/.config/nvim && \
     rm -rf /tmp/nvchad-starter /home/gem/.config/nvim/.git
 
+# --- Treesitter grammars + queries (bypass broken nvim-treesitter installer) ---
+# See docs/treesitter-nix-fix.md for full explanation.
+# Short version: lazy's nvim-treesitter (master) requires neovim 0.12+; container
+# has 0.11.5 (nixos-25.05). Installer crashes on vim.list API, so :TSInstall is
+# broken for all languages. home.nix ships nvim-treesitter.withAllGrammars but
+# lazy shadows it. Plugin also nests queries under runtime/queries/ while
+# treesitter scans <rtp>/queries/ (one level shallower); installer normally
+# bridges that gap.
+# Fix: symlink nix-built parsers + nix-shipped queries into stdpath('data')/site/
+# (on runtimepath by default). Bypasses installer entirely. Auto-includes any
+# future grammar nix ships — no edit needed on nixpkgs bumps.
+RUN SITE=/home/gem/.local/share/nvim/site && \
+    mkdir -p "$SITE/parser" "$SITE/queries" && \
+    for so in /nix/store/*-vimplugin-treesitter-grammar-*/parser/*.so; do \
+      [ -f "$so" ] || continue; \
+      lang=$(basename "$so" .so); \
+      ln -sf "$so" "$SITE/parser/$lang.so"; \
+    done && \
+    TS_NIX=$(ls -d /nix/store/*-vimplugin-nvim-treesitter-2* 2>/dev/null | head -1) && \
+    if [ -n "$TS_NIX" ] && [ -d "$TS_NIX/queries" ]; then \
+      for q in "$TS_NIX"/queries/*; do \
+        [ -d "$q" ] || continue; \
+        lang=$(basename "$q"); \
+        ln -sf "$q" "$SITE/queries/$lang"; \
+      done; \
+    fi && \
+    ls "$SITE/parser/" | wc -l && \
+    ls "$SITE/queries/" | wc -l
+
+# Elixir LSP — elixir-ls on PATH via flake.nix (beam.packages.erlang_27.elixir-ls).
+# NvChad's defaults() sets capabilities globally via vim.lsp.config("*", ...);
+# lspconfig auto-registers the elixirls.lua default config, so just enable it.
+RUN printf '\nvim.lsp.enable("elixirls")\n' >> /home/gem/.config/nvim/lua/configs/lspconfig.lua
+
 # NOTE: NvChad plugin bootstrap (Lazy sync + TSUpdateSync) is NOT done at
 # build time. Reason: lazy.nvim clones from various forges (codeberg, etc.)
 # that rate-limit / 504 mid-build, hanging docker build. First interactive
