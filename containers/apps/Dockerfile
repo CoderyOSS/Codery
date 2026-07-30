@@ -133,6 +133,37 @@ RUN SITE=/home/gem/.local/share/nvim/site && \
 # lspconfig auto-registers the elixirls.lua default config, so just enable it.
 RUN printf '\nvim.lsp.enable("elixirls")\n' >> /home/gem/.config/nvim/lua/configs/lspconfig.lua
 
+# Silence nvim-treesitter installer noise. Parsers + queries are wired manually
+# above; the plugin's installer is redundant. Without this override, NvChad's
+# default ensure_installed = {"lua","luadoc",...} triggers a build task on every
+# nvim launch that can't compile (no cc at runtime) and spams output. Setting
+# ensure_installed = {} skips it entirely. Highlighting still works via
+# neovim's built-in vim.treesitter.start() + the symlinked parsers/queries.
+RUN cat > /home/gem/.config/nvim/lua/plugins/init.lua <<'NVIM_PLUGINS'
+return {
+  {
+    "stevearc/conform.nvim",
+    opts = require "configs.conform",
+  },
+
+  {
+    "neovim/nvim-lspconfig",
+    config = function()
+      require "configs.lspconfig"
+    end,
+  },
+
+  {
+    "nvim-treesitter/nvim-treesitter",
+    opts = {
+      ensure_installed = {},
+      auto_install = false,
+      sync_install = false,
+    },
+  },
+}
+NVIM_PLUGINS
+
 # NOTE: NvChad plugin bootstrap (Lazy sync + TSUpdateSync) is NOT done at
 # build time. Reason: lazy.nvim clones from various forges (codeberg, etc.)
 # that rate-limit / 504 mid-build, hanging docker build. First interactive
