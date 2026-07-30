@@ -1,0 +1,7 @@
+#!/bin/bash
+export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+export HOME=/home/gem/projects
+export CARTA_PROJECT_DIR=/home/gem/projects/CartaBE1
+export PORT=8060
+cd /home/gem/projects/Carta
+exec /command/s6-setuidgid gem bash -c "elixir --sname cbe1 -S mix run --no-halt"

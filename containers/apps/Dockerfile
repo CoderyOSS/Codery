@@ -68,6 +68,15 @@ COPY containers/apps/flake.nix containers/apps/home.nix ./
 RUN nix --extra-experimental-features "nix-command flakes" flake lock
 RUN nix --extra-experimental-features "nix-command flakes" profile install --priority 4 .#apps-profile
 
+# --- sudo setuid: nix store binaries lack setuid bit ---
+# home-manager-only container (no NixOS modules) means security.wrappers
+# never runs. Copy sudo out of the store, chmod 4755. Mirrors
+# examples/Dockerfile.sandbox pattern.
+RUN src="$(readlink -f "$(command -v sudo)")" && \
+    rm -f /usr/local/bin/sudo /usr/bin/sudo && \
+    cp "$src" /usr/local/bin/sudo && \
+    chmod 4755 /usr/local/bin/sudo
+
 # Allow gem to manage its own nix profile (single-user nix in nixos/nix
 # keeps /nix owned by root; world-writable per-user dir lets non-root users
 # create ~/.nix-profile links).

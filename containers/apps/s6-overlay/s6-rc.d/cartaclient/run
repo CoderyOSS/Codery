@@ -1,0 +1,5 @@
+#!/bin/bash
+export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+export HOME=/home/gem
+cd /home/gem/projects/CartaClient/frontend
+exec /command/s6-setuidgid gem bun run serve.js
