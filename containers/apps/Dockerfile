@@ -27,8 +27,8 @@ ENV SSL_CERT_FILE="/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt"
 ENV NIX_SSL_CERT_FILE="/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt"
 # glibc binaries (all nix-installed tools) look here for non-C locales.
 ENV LOCALE_ARCHIVE="/nix/var/nix/profiles/default/lib/locale/locale-archive"
-ENV LANG=en_US.UTF-8
-ENV LC_ALL=en_US.UTF-8
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
 # --- OS users (nixos/nix only ships root) ---
 # /etc/passwd, /etc/group, /etc/shadow are SYMLINKS into the nix store on
