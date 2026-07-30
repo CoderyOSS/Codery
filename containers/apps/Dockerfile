@@ -73,6 +73,7 @@ RUN nix --extra-experimental-features "nix-command flakes" profile install --pri
 # never runs. Copy sudo out of the store, chmod 4755. Mirrors
 # examples/Dockerfile.sandbox pattern.
 RUN src="$(readlink -f "$(command -v sudo)")" && \
+    mkdir -p /usr/local/bin && \
     rm -f /usr/local/bin/sudo /usr/bin/sudo && \
     cp "$src" /usr/local/bin/sudo && \
     chmod 4755 /usr/local/bin/sudo
