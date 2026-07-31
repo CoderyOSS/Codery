@@ -29,6 +29,11 @@ ENV NIX_SSL_CERT_FILE="/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt
 ENV LOCALE_ARCHIVE="/nix/var/nix/profiles/default/lib/locale/locale-archive"
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
+# Erlang/BEAM filename encoding. nixos/nix (Alpine) base lacks a generated
+# UTF-8 locale in the glibc sense, so BEVM defaults to latin1 — Elixir then
+# warns and may mangle non-ASCII paths. +fnu forces Unicode filename mode
+# regardless of locale detection. See Elixir "Unicode" docs.
+ENV ELIXIR_ERL_OPTIONS="+fnu"
 
 # --- OS users (nixos/nix only ships root) ---
 # /etc/passwd, /etc/group, /etc/shadow are SYMLINKS into the nix store on
@@ -214,7 +219,11 @@ RUN mkdir -p /usr/sbin /usr/bin /usr/local/bin /usr/local/sbin \
 # --- Helper scripts ---
 COPY containers/apps/scripts/github-app-token.sh /usr/local/bin/github-app-token
 COPY containers/apps/scripts/ssh-agent-add-keys.sh /usr/local/bin/ssh-agent-add-keys.sh
-RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.sh
+# Locale loader sourced by every s6-rc run script (s6-rc doesn't pass container
+# ENV to longruns). Pulls LANG/LC_ALL/ELIXIR_ERL_OPTIONS/LOCALE_ARCHIVE from
+# /run/s6/container_environment so beam.smp gets +fnu and Elixir stops warning.
+COPY containers/apps/scripts/s6-load-locale-env.sh /usr/local/bin/s6-load-locale-env
+RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.sh /usr/local/bin/s6-load-locale-env
 
 # GitHub host key for git operations.
 RUN ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true

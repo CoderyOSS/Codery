@@ -41,6 +41,14 @@
     EDITOR = "nvim";
     VISUAL = "nvim";
     PAGER = "less";
+    # Locale for SSH login shells (sourced via .profile → hm-session-vars.sh).
+    # sshd does NOT inherit Docker ENV (UsePAM no, no /etc/environment,
+    # AcceptEnv commented), so locale must be re-exported here or BEAM falls
+    # back to latin1 filename encoding and Elixir warns on every startup.
+    LANG = "C.UTF-8";
+    LC_ALL = "C.UTF-8";
+    LOCALE_ARCHIVE = "/nix/var/nix/profiles/default/lib/locale/locale-archive";
+    ELIXIR_ERL_OPTIONS = "+fnu";
   };
 
   programs.bash = {
@@ -58,6 +66,10 @@
       export PATH="/nix/var/nix/profiles/default/bin:$HOME/.nix-profile/bin:$HOME/.local/bin:$PATH"
       export SSL_CERT_FILE="/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt"
       export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"
+      export LANG=C.UTF-8
+      export LC_ALL=C.UTF-8
+      export LOCALE_ARCHIVE=/nix/var/nix/profiles/default/lib/locale/locale-archive
+      export ELIXIR_ERL_OPTIONS=+fnu
     '';
   };
 

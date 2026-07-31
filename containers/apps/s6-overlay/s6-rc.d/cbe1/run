@@ -1,4 +1,5 @@
 #!/bin/bash
+. /usr/local/bin/s6-load-locale-env
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 export HOME=/home/gem/projects
 export CARTA_PROJECT_DIR=/home/gem/projects/CartaBE1

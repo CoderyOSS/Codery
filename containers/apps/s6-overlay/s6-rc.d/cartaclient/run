@@ -1,4 +1,5 @@
 #!/bin/bash
+. /usr/local/bin/s6-load-locale-env
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 export HOME=/home/gem
 cd /home/gem/projects/CartaClient/frontend
