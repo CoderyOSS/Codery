@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Patches @langchain/openai completions converter in-place to force assistant
 # role on streaming chunks that carry tool_calls/content but no explicit role.
 #
@@ -7,6 +7,7 @@
 # rejects with "expected AIMessage or Command, got object".
 #
 # Idempotent: skips files already patched.
+# Uses /bin/sh (not bash) so it runs inside the nix-builder stage too.
 set -e
 
 GUARD="const fallbackRole = (delta.tool_calls"
@@ -22,6 +23,6 @@ for f in "$@"; do
     continue
   fi
   # Use perl for precise matching — sed `|` separator clashes with shell quoting.
-  perl -i -pe "s|\Qconst role = delta.role \?\? defaultRole;\E|$REPLACEMENT|g" "$f"
+  perl -i -pe "s|\\Qconst role = delta.role \\?\\? defaultRole;\\E|$REPLACEMENT|g" "$f"
   echo "[patch-langchain] patched: $f"
 done
