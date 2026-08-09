@@ -59,18 +59,24 @@ RUN npm install -g --prefix /export/rootfs/home/gem/.npm-global \
 # 1. zai-patch.js: monkey-patches global fetch to inject thinking:{type:"disabled"}
 #    on Z.ai requests (GLM emits reasoning_content by default; langchain's stream
 #    aggregator chokes on it). Auto-loaded via NODE_OPTIONS in service.yml.
-# 2. patch-langchain-openai.sh: forces assistant role on streaming chunks that
+# 2. Inline node patch (below): forces assistant role on streaming chunks that
 #    carry tool_calls/content but no explicit role. GLM omits role on mid-stream
 #    chunks; without this the aggregator falls back to ChatMessageChunk, which
 #    deepagents' middleware rejects ("expected AIMessage or Command, got object").
 COPY containers/sandbox/bin/zai-patch.js /export/rootfs/home/gem/bin/zai-patch.js
-COPY containers/sandbox/bin/patch-langchain-openai.sh /tmp/patch-langchain-openai.sh
 RUN chmod 644 /export/rootfs/home/gem/bin/zai-patch.js \
-    && chmod +x /tmp/patch-langchain-openai.sh \
-    && /tmp/patch-langchain-openai.sh \
-      /export/rootfs/home/gem/.npm-global/lib/node_modules/openwiki/node_modules/@langchain/openai/dist/converters/completions.js \
-      /export/rootfs/home/gem/.npm-global/lib/node_modules/openwiki/node_modules/@langchain/openai/dist/converters/completions.cjs \
-    && rm /tmp/patch-langchain-openai.sh
+    && node -e 'const fs=require("fs"); \
+      const needle="const role = delta.role ?? defaultRole;"; \
+      const repl=`const fallbackRole = (delta.tool_calls || delta.content || delta.reasoning_content) ? "assistant" : defaultRole; const role = delta.role ?? fallbackRole;`; \
+      for (const p of [\
+        "/export/rootfs/home/gem/.npm-global/lib/node_modules/openwiki/node_modules/@langchain/openai/dist/converters/completions.js",\
+        "/export/rootfs/home/gem/.npm-global/lib/node_modules/openwiki/node_modules/@langchain/openai/dist/converters/completions.cjs"]) {\
+        const s=fs.readFileSync(p,"utf8");\
+        if (s.includes("const fallbackRole = (delta.tool_calls")) { console.log("skip (patched):",p); continue; }\
+        if (!s.includes(needle)) { console.log("skip (needle missing):",p); continue; }\
+        fs.writeFileSync(p, s.split(needle).join(repl));\
+        console.log("patched:",p);\
+      }'
 
 # Rust toolchain (rustup manages its own store; mirrored at /usr/local/*).
 # `rustup default stable` populates RUSTUP_HOME but not CARGO_HOME/bin (only
