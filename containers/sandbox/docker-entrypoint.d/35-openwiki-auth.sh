@@ -12,9 +12,11 @@ fi
 
 mkdir -p /home/gem/.openwiki
 
+# glm-4.7-flash is the free tier; glm-5.2 (flagship) requires paid balance.
+# Switch OPENWIKI_MODEL_ID to glm-5.2 once the key has credit.
 cat > /home/gem/.openwiki/.env <<EOF
 OPENWIKI_PROVIDER=openai-compatible
-OPENWIKI_MODEL_ID=glm-5.2
+OPENWIKI_MODEL_ID=glm-4.7-flash
 OPENAI_COMPATIBLE_API_KEY=${ZAI_API_KEY}
 OPENAI_COMPATIBLE_BASE_URL=https://open.bigmodel.cn/api/paas/v4
 EOF
