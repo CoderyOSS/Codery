@@ -53,6 +53,10 @@ volumes:
 
 env_overrides:
   GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+  # OpenWiki + Z.ai GLM-5.x compat: injects thinking:{type:"disabled"} on Z.ai
+  # requests so langchain's stream aggregator stays happy. Inert for non-Z.ai
+  # traffic (the patch inspects URL + body shape before mutating).
+  NODE_OPTIONS: --require /home/gem/bin/zai-patch.js
 
 required_env:
   - GHCR_USERNAME
