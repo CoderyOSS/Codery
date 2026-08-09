@@ -59,16 +59,18 @@ RUN npm install -g --prefix /export/rootfs/home/gem/.npm-global \
 # 1. zai-patch.js: monkey-patches global fetch to inject thinking:{type:"disabled"}
 #    on Z.ai requests (GLM emits reasoning_content by default; langchain's stream
 #    aggregator chokes on it). Auto-loaded via NODE_OPTIONS in service.yml.
-# 2. completions.js patch: force assistant role when delta has tool_calls/content
-#    but no explicit role. GLM omits role on mid-stream chunks; without this the
-#    aggregator falls back to ChatMessageChunk, which deepagents' middleware
-#    rejects ("expected AIMessage or Command, got object").
+# 2. patch-langchain-openai.sh: forces assistant role on streaming chunks that
+#    carry tool_calls/content but no explicit role. GLM omits role on mid-stream
+#    chunks; without this the aggregator falls back to ChatMessageChunk, which
+#    deepagents' middleware rejects ("expected AIMessage or Command, got object").
 COPY containers/sandbox/bin/zai-patch.js /export/rootfs/home/gem/bin/zai-patch.js
+COPY containers/sandbox/bin/patch-langchain-openai.sh /tmp/patch-langchain-openai.sh
 RUN chmod 644 /export/rootfs/home/gem/bin/zai-patch.js \
-    && sed -i 's|const role = delta.role ?? defaultRole;|const fallbackRole = (delta.tool_calls || delta.content || delta.reasoning_content) ? "assistant" : defaultRole; const role = delta.role ?? fallbackRole;|' \
+    && chmod +x /tmp/patch-langchain-openai.sh \
+    && /tmp/patch-langchain-openai.sh \
       /export/rootfs/home/gem/.npm-global/lib/node_modules/openwiki/node_modules/@langchain/openai/dist/converters/completions.js \
-    && sed -i 's|const role = delta.role ?? defaultRole;|const fallbackRole = (delta.tool_calls || delta.content || delta.reasoning_content) ? "assistant" : defaultRole; const role = delta.role ?? fallbackRole;|' \
-      /export/rootfs/home/gem/.npm-global/lib/node_modules/openwiki/node_modules/@langchain/openai/dist/converters/completions.cjs
+      /export/rootfs/home/gem/.npm-global/lib/node_modules/openwiki/node_modules/@langchain/openai/dist/converters/completions.cjs \
+    && rm /tmp/patch-langchain-openai.sh
 
 # Rust toolchain (rustup manages its own store; mirrored at /usr/local/*).
 # `rustup default stable` populates RUSTUP_HOME but not CARGO_HOME/bin (only
