@@ -7,4 +7,5 @@ export interface Container {
   rollback_available: boolean;
   prev_container: string | null;
   operation: string | null;
+  serving?: boolean;
 }

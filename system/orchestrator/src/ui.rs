@@ -49,6 +49,7 @@ pub struct ServiceStatus {
     pub rollback_available: bool,
     pub prev_container:     Option<String>,
     pub operation:          Option<String>,
+    pub serving:            bool,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -189,14 +190,16 @@ async fn build_status(ops: &HashMap<String, &'static str>) -> Result<Vec<Service
 
         let operation = ops.get(&name).map(|s| s.to_string());
 
-        let (service, rollback_available, prev_container) =
+        let (service, rollback_available, prev_container, serving) =
             if let Some((svc, color)) = parse_service_container(&name) {
+                let active = state::read_active(&svc).ok();
+                let is_serving = active.as_deref() == Some(color);
                 let peer_color = config::flip(color);
                 let peer = peer_container_name(&name, &svc, peer_color);
                 let stopped = is_container_stopped(&docker, &peer).await;
-                (Some(svc), stopped, if stopped { Some(peer) } else { None })
+                (Some(svc), stopped, if stopped { Some(peer) } else { None }, is_serving)
             } else {
-                (None, false, None)
+                (None, false, None, false)
             };
 
         out.push(ServiceStatus {
@@ -208,6 +211,7 @@ async fn build_status(ops: &HashMap<String, &'static str>) -> Result<Vec<Service
             rollback_available,
             prev_container,
             operation,
+            serving,
         });
     }
     Ok(out)
