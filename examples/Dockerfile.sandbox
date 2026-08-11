@@ -111,6 +111,29 @@ RUN for b in sudo; do \
       chmod 4755 "/export/rootfs/usr/bin/$b"; \
     done
 
+# Shell init for SSH login shells (nix image ships no /etc/profile, .bashrc, or
+# .profile). sshd strips parent env vars — only PATH/USER/HOME survive — so
+# any env required by tools must be set explicitly here, not just inherited
+# from entrypoint.
+#
+# Required by openwiki:
+#   NODE_OPTIONS    — Z.ai GLM fetch patch (disables reasoning_content)
+#   SSL_CERT_FILE   — Node TLS uses system CA bundle (node's bundled CAs
+#                     don't include the nix store certs)
+RUN printf '%s\n' \
+        '# User-specific shell init (sshd strips parent env)' \
+        'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"' \
+        'export NODE_OPTIONS="--require /home/gem/bin/zai-patch.js"' \
+        'export SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt' \
+        'export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt' \
+        'export LANG=en_US.UTF-8' \
+        'export LC_ALL=en_US.UTF-8' \
+        'PS1="\\u@\\h:\\w$ "' \
+      > /export/rootfs/home/gem/.bashrc \
+ && printf '%s\n' \
+        '[ -f ~/.bashrc ] && . ~/.bashrc' \
+        > /export/rootfs/home/gem/.profile
+
 RUN chown -R 1000:1000 /export/rootfs/home/gem
 
 # --- Runtime stage: scratch + closure + artifacts ---
