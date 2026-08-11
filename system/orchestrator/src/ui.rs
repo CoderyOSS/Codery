@@ -50,6 +50,15 @@ pub struct ServiceStatus {
     pub prev_container:     Option<String>,
     pub operation:          Option<String>,
     pub serving:            bool,
+    pub container_id:       String,
+    pub image_id:           String,
+}
+
+/// Shorten a Docker ID for display: strip an optional `sha256:` prefix and
+/// truncate to the conventional 12-char short form. Empty string if absent.
+fn short_id(id: Option<&str>) -> String {
+    let s = id.unwrap_or_default().trim_start_matches("sha256:");
+    s.get(..12).unwrap_or(s).to_string()
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -212,6 +221,8 @@ async fn build_status(ops: &HashMap<String, &'static str>) -> Result<Vec<Service
             prev_container,
             operation,
             serving,
+            container_id:       short_id(c.id.as_deref()),
+            image_id:           short_id(c.image_id.as_deref()),
         });
     }
     Ok(out)

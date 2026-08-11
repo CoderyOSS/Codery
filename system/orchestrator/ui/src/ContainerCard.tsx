@@ -135,6 +135,18 @@ export function ContainerCard({ container: c }: Props) {
           <span className="lbl">status</span>
           <span className="val">{c.status}</span>
         </div>
+        {c.container_id && (
+          <div className="meta-line">
+            <span className="lbl">container</span>
+            <span className="val">{c.container_id}</span>
+          </div>
+        )}
+        {c.image_id && (
+          <div className="meta-line">
+            <span className="lbl">image id</span>
+            <span className="val">{c.image_id}</span>
+          </div>
+        )}
         {c.prev_container && (
           <div className="meta-line">
             <span className="lbl">rollback target</span>

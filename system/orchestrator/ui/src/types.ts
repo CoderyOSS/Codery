@@ -8,4 +8,6 @@ export interface Container {
   prev_container: string | null;
   operation: string | null;
   serving?: boolean;
+  container_id?: string;
+  image_id?: string;
 }
