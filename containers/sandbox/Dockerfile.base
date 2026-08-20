@@ -19,6 +19,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && locale-gen en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
 
+# Dart's BoringSSL ignores SSL_CERT_FILE and reads
+# /etc/ssl/certs/ca-certificates.crt directly. Some base-image cert
+# layouts only ship ca-bundle.crt — without this symlink every dart/pub
+# network operation fails with "Got TLS error trying to find package"
+# while curl (OpenSSL) works fine.
+RUN if [ ! -e /etc/ssl/certs/ca-certificates.crt ]; then \
+        ln -s /etc/ssl/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; \
+    fi
+
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 
