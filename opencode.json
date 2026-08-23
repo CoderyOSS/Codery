@@ -16,10 +16,6 @@
       "type": "local",
       "command": ["bun", "/usr/local/bin/github-app-permissions-mcp.ts"]
     },
-    "trailhead": {
-      "type": "remote",
-      "url": "http://host.docker.internal:4050/mcp/sse"
-    },
     "playwright": {
       "type": "local",
       "command": ["npx", "-y", "@playwright/mcp@latest"]
