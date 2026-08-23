@@ -14,4 +14,12 @@ mkdir -p "/home/${USER}/.local/share/opencode"
 chown "${USER_UID}:${USER_GID}" "/home/${USER}/.local/share/opencode"
 mkdir -p "/home/${USER}/.claude"
 chown "${USER_UID}:${USER_GID}" "/home/${USER}/.claude"
+# ssh private keys must not be group/world-readable; the nix build
+# normalizes store modes and the Dockerfile u+w pass leaves them 644
+if [ -f "/home/${USER}/.ssh/id_codery_apps" ]; then
+    chmod 600 "/home/${USER}/.ssh/id_codery_apps"
+fi
+if [ -f "/home/${USER}/.ssh/config" ]; then
+    chmod 600 "/home/${USER}/.ssh/config"
+fi
 echo "[sandbox] Fixed ownership of /home/${USER}"

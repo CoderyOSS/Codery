@@ -163,6 +163,28 @@ Rules:
 
 If Task 10 dart TLS STILL fails (mechanism wrong): mirror becomes permanent infra — bake supervised mirror (v3: rewrites `archive_url` in JSON, disk cache on projects mount, launchy service) + `pub-get` wrapper. Escalate to user before building this.
 
+## Follow-up Work (2026-08-23, post-cutover)
+
+### F1: sandbox→apps SSH broken by image (perms) — FIXED live, image fix pending
+
+- Live: `/home/gem/.ssh/id_codery_apps` + `config` were 644 → ssh refused key. Runtime `chmod 600` done (session-only).
+- Root cause: nix store normalizes modes (444); Dockerfile `chmod -R u+w /export/rootfs` → 644. The `chmod 600` inside configuration.nix never survives. Old container worked only because someone runtime-fixed it once.
+- Image fix: explicit `chmod 600` in Dockerfile.sandbox (after chown) + guard in `10-fix-home.sh`. Committed; needs image rebuild + preview + cutover.
+
+### F2: apps nginx reload broken (`getgrnam("nogroup") failed`) — stopgap live, real fix pending
+
+- Running master uses `/etc/nginx/nginx.conf` (user www-data, pid /run/nginx.pid). But `nginx -s reload` (nginx.rs exec, no -c) parses the compiled-default STORE config → default group `nogroup` missing in nix /etc/group → emerg before signaling master. Also wrong pid path in store conf.
+- Stopgap: manual `sudo nginx -s reload -c /etc/nginx/nginx.conf` in apps — done, 3 server blocks live.
+- Real fix: nginx.rs exec cmd → `["nginx","-c","/etc/nginx/nginx.conf","-s","reload"]`. Committed. Deploy path = cut codery-ci release (tag codery-ci-v0.12.0) → Release Orchestrator builds binaries → run Deploy CoderyCI workflow → daemon restart (MCP reconnects).
+
+### F3: host swap (HUMAN TASK)
+
+8GB RAM, zero swap — OOM'd the box once today. Suggested: 4GB swapfile on host:
+```
+sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
 ## Progress Log
 
 - 2026-08-23 — COMPLETE. Cutover done; all verification green (dart TLS 200, flutter pub get 76 deps exit 0, PUB_CACHE persistent, mirror removed, docs updated). Follow-ups left open: host swap (8GB RAM, none present — OOM'd during first build), apps nginx `getgrnam("nogroup")` reload failure (pre-existing, apps image).

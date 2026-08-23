@@ -94,7 +94,11 @@ async fn reload_in_active_container() -> Result<()> {
     let exec = docker.create_exec(
         &container,
         CreateExecOptions {
-            cmd: Some(vec!["nginx", "-s", "reload"]),
+            // -c is load-bearing: without it nginx parses its compiled-default
+            // (nix store) config, whose `nogroup` default group doesn't exist
+            // in the container — `getgrnam("nogroup") failed` kills the reload
+            // before the master is ever signaled.
+            cmd: Some(vec!["nginx", "-c", "/etc/nginx/nginx.conf", "-s", "reload"]),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()

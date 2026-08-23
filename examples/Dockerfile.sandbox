@@ -135,7 +135,12 @@ RUN printf '%s\n' \
         '[ -f ~/.bashrc ] && . ~/.bashrc' \
         > /export/rootfs/home/gem/.profile
 
-RUN chown -R 1000:1000 /export/rootfs/home/gem
+RUN chown -R 1000:1000 /export/rootfs/home/gem \
+    # nix store normalizes file modes (r--r--r--), and the `chmod -R u+w`
+    # above turns that into 644 — ssh refuses group/world-readable private
+    # keys, breaking sandbox->apps SSH on every fresh container.
+    && chmod 600 /export/rootfs/home/gem/.ssh/id_codery_apps \
+                /export/rootfs/home/gem/.ssh/config
 
 # --- Runtime stage: scratch + closure + artifacts ---
 FROM scratch
