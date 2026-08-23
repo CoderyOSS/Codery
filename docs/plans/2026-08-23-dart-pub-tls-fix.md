@@ -171,11 +171,11 @@ If Task 10 dart TLS STILL fails (mechanism wrong): mirror becomes permanent infr
 - Root cause: nix store normalizes modes (444); Dockerfile `chmod -R u+w /export/rootfs` → 644. The `chmod 600` inside configuration.nix never survives. Old container worked only because someone runtime-fixed it once.
 - Image fix: explicit `chmod 600` in Dockerfile.sandbox (after chown) + guard in `10-fix-home.sh`. Committed; needs image rebuild + preview + cutover.
 
-### F2: apps nginx reload broken (`getgrnam("nogroup") failed`) — stopgap live, real fix pending
+### F2: apps nginx reload broken (`getgrnam("nogroup") failed`) — FIXED
 
 - Running master uses `/etc/nginx/nginx.conf` (user www-data, pid /run/nginx.pid). But `nginx -s reload` (nginx.rs exec, no -c) parses the compiled-default STORE config → default group `nogroup` missing in nix /etc/group → emerg before signaling master. Also wrong pid path in store conf.
 - Stopgap: manual `sudo nginx -s reload -c /etc/nginx/nginx.conf` in apps — done, 3 server blocks live.
-- Real fix: nginx.rs exec cmd → `["nginx","-c","/etc/nginx/nginx.conf","-s","reload"]`. Committed. Deploy path = cut codery-ci release (tag codery-ci-v0.12.0) → Release Orchestrator builds binaries → run Deploy CoderyCI workflow → daemon restart (MCP reconnects).
+- Real fix: nginx.rs exec cmd → `["nginx","-c","/etc/nginx/nginx.conf","-s","reload"]`. Deployed via codery-ci v0.11.1 release + Deploy CoderyCI workflow (2026-08-23 21:18). Verified: reload_routes via new daemon emits no nginx error.
 
 ### F3: host swap (HUMAN TASK)
 
@@ -186,6 +186,8 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
 ## Progress Log
+
+- 2026-08-23 (evening) — FOLLOW-UPS: F1+F2 fixed in repo (commit 6e90cb0). Stopgap nginx reload applied manually (3 server blocks live). codery-ci v0.11.1 released (tag pushed, Release workflow green) + Deploy CoderyCI ran — host binary now 0.11.1, daemon restarted, `reload_routes` MCP shows NO nginx emerg → -c fix confirmed live. Sandbox image `ssh-perms-fix` built (build log step #21 shows chmod 600) + preview deployed to green (health passed). **Awaiting cutover #2 for ssh perms.** Post-cutover verify: `ls -la /home/gem/.ssh/` = 600 on key+config, `ssh gem@apps echo ok`, `flutter pub get` still green.
 
 - 2026-08-23 — COMPLETE. Cutover done; all verification green (dart TLS 200, flutter pub get 76 deps exit 0, PUB_CACHE persistent, mirror removed, docs updated). Follow-ups left open: host swap (8GB RAM, none present — OOM'd during first build), apps nginx `getgrnam("nogroup")` reload failure (pre-existing, apps image).
 
