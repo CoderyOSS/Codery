@@ -146,9 +146,15 @@ let
       printf '%s' '${pamPermit}' > $out/etc/pam.d/$f
     done
 
-    # TLS certs (OpenSSL/GnuTLS lookups) + locale archive, stable paths
-    mkdir -p $out/etc/ssl
-    ln -s ${pkgs.cacert}/etc/ssl/certs $out/etc/ssl/certs
+    # TLS certs (OpenSSL/GnuTLS lookups) + locale archive, stable paths.
+    # Real dir, NOT a symlink to the read-only store: dart's BoringSSL
+    # probes a fixed CA path list (ignores SSL_CERT_FILE/SSL_CERT_DIR env)
+    # that includes /etc/ssl/certs/ca-certificates.crt but NOT
+    # ca-bundle.crt — nixpkgs cacert only ships the latter, so every
+    # dart/pub TLS op failed while curl worked. Link both names.
+    mkdir -p $out/etc/ssl/certs
+    ln -s ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/etc/ssl/certs/ca-bundle.crt
+    ln -s ca-bundle.crt $out/etc/ssl/certs/ca-certificates.crt
     ln -s ${pkgs.glibcLocales}/lib/locale/locale-archive \
       $out/usr/lib/locale/locale-archive
 

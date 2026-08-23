@@ -126,6 +126,7 @@ RUN printf '%s\n' \
         'export NODE_OPTIONS="--require /home/gem/bin/zai-patch.js"' \
         'export SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt' \
         'export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt' \
+        'export PUB_CACHE=/home/gem/projects/.pub-cache' \
         'export LANG=en_US.UTF-8' \
         'export LC_ALL=en_US.UTF-8' \
         'PS1="\\u@\\h:\\w$ "' \
@@ -162,7 +163,8 @@ ENV PATH="/home/gem/.local/bin:/home/gem/.npm-global/bin:/usr/local/cargo/bin:/u
     LC_ALL=en_US.UTF-8 \
     LOCALE_ARCHIVE=/usr/lib/locale/locale-archive \
     SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt \
-    NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt
+    NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt \
+    PUB_CACHE=/home/gem/projects/.pub-cache
 
 WORKDIR /home/gem/projects
 ENTRYPOINT ["/entrypoint.sh"]

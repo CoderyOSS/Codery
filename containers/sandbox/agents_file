@@ -35,6 +35,24 @@ Host runs Caddy, Tailscale, supervisord. Shares host with **apps container** ser
 
 ---
 
+## Flutter / Dart
+
+Flutter SDK lives at `/home/gem/projects/flutter` (bind-mounted, survives redeploys).
+`PUB_CACHE=/home/gem/projects/.pub-cache` — persistent, never re-download cached packages.
+
+Rules:
+- Run flutter/dart ONLY in the sandbox. The apps container is `nixos/nix` base —
+  glibc binaries like `bin/cache/dart-sdk/bin/dart` CANNOT execute there
+  ("required file not found"). Never run flutter on the apps side.
+- `pub get` works directly against pub.dev. Do NOT set `PUB_HOSTED_URL`, do NOT
+  use a local mirror — the dart CA fix is baked into the image
+  (`/etc/ssl/certs/ca-certificates.crt`; dart ignores SSL_CERT_FILE env and
+  probes that fixed path).
+- Always use a timeout: `timeout 180 flutter pub get` / `timeout 600 flutter test`.
+  Hung pub/flutter_tester processes have burned 50-minute agent sessions.
+- If dart TLS ever fails again: check `ls -la /etc/ssl/certs/` for the
+  `ca-certificates.crt` link first — that is the known failure mode, not network.
+
 ## Claude Code
 
 `claude` CLI installed globally. `ANTHROPIC_API_KEY` set in environment.
