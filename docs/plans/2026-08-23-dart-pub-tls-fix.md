@@ -142,28 +142,30 @@ Rules:
 
 - [x] `codery_exec ["deploy-preview", "sandbox", "dart-ca-fix"]` → container boots + health check passes (proves rootfs builder change didn't break the image)
 
-### Task 9: Cutover [BLOCKED ON HUMAN]
+### Task 9: Cutover [DONE]
 
-- [ ] Ask user to run `codery-ci cutover sandbox` on the host shell.
+- [x] User ran `codery-ci cutover sandbox` — complete.
 
 ### Task 10: Post-cutover verification (from inside new container)
 
-- [ ] `ls -la /etc/ssl/certs/` → `ca-certificates.crt` present
-- [ ] dart default-context TLS test → 200 (no SecurityContext override)
-- [ ] `cd /home/gem/projects/CartaClient/frontend && timeout 300 ~/projects/flutter/bin/flutter pub get` → succeeds, no `PUB_HOSTED_URL`
-- [ ] `echo $PUB_CACHE` → `/home/gem/projects/.pub-cache`; cache dir populated there
+- [x] `ls -la /etc/ssl/certs/` → `ca-certificates.crt -> ca-bundle.crt` present; `55-dart-ca.sh` in `/docker-entrypoint.d/`
+- [x] dart default-context TLS test → `OK 200` (no SecurityContext override, no env tricks)
+- [x] `timeout 300 flutter pub get` in CartaClient/frontend → "Changed 76 dependencies!", exit 0, direct pub.dev, no `PUB_HOSTED_URL`
+- [x] `PUB_CACHE=/home/gem/projects/.pub-cache`, cache populated there, single clean `pub.dev` dir (old 5-dir zoo died with green container)
 
-### Task 11: Cleanup (ONLY after Task 10 passes)
+### Task 11: Cleanup [DONE]
 
-- [ ] Kill mirror: `kill 477845` (node /tmp/opencode/mirror2.cjs) + `rm /tmp/opencode/mirror2.cjs`
-- [ ] Update `/home/gem/projects/CartaClient/AGENTS.md:575-581` — drop the `PUB_HOSTED_URL=http://localhost:8123` instruction, point at sandbox AGENTS.md instead; commit that repo
-- [ ] Commit Codery plan file progress
+- [x] Mirror killed, `mirror2.cjs` + `pub_mirror*.{js,cjs}` removed, port 8123 closed
+- [x] CartaClient/AGENTS.md updated — stale 8123 instruction replaced with fixed-at-image-level note
+- [ ] Commit Codery plan file final state + push; commit CartaClient AGENTS.md
 
 ## Fallback
 
 If Task 10 dart TLS STILL fails (mechanism wrong): mirror becomes permanent infra — bake supervised mirror (v3: rewrites `archive_url` in JSON, disk cache on projects mount, launchy service) + `pub-get` wrapper. Escalate to user before building this.
 
 ## Progress Log
+
+- 2026-08-23 — COMPLETE. Cutover done; all verification green (dart TLS 200, flutter pub get 76 deps exit 0, PUB_CACHE persistent, mirror removed, docs updated). Follow-ups left open: host swap (8GB RAM, none present — OOM'd during first build), apps nginx `getgrnam("nogroup")` reload failure (pre-existing, apps image).
 
 - 2026-08-23 ~07:30 — Research complete, evidence recorded (Task 1). Plan written.
 - 2026-08-23 ~07:45 — Tasks 2-6 done: configuration.nix + 55-dart-ca.sh + PUB_CACHE + agents_file. Commit `733a9cd` on master (not pushed yet — push after cutover verification).
