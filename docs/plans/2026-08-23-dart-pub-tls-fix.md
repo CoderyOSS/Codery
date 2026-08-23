@@ -165,4 +165,10 @@ If Task 10 dart TLS STILL fails (mechanism wrong): mirror becomes permanent infr
 
 ## Progress Log
 
-- 2026-08-23 ~07:30 — Research complete, evidence recorded (Task 1). Plan written. Starting implementation.
+- 2026-08-23 ~07:30 — Research complete, evidence recorded (Task 1). Plan written.
+- 2026-08-23 ~07:45 — Tasks 2-6 done: configuration.nix + 55-dart-ca.sh + PUB_CACHE + agents_file. Commit `733a9cd` on master (not pushed yet — push after cutover verification).
+- 2026-08-23 ~07:48 — Build started: `codery_exec ["build","sandbox","dart-ca-fix"]` job `5f240006870f`, log `/var/log/codery-ci-mcp/exec-1787470710-build-5f240006870f.log`. Note: older commit fd4670d fixed this same bug in `Dockerfile.base` — dead file, the nix build never reads it; that is how the regression survived.
+- 2026-08-23 (same day, later) — **HOST OOM HARD CRASH** during first rebuild attempt (job `5f3ee8240f3d` died with the box; 8GB RAM, no swap). Power-cycled by user. Post-reboot: services healthy, mirror process dead (restarted from surviving `/tmp/opencode/mirror2.cjs`), docker layer cache partially intact. **Caution protocol for this host: no swap, 8GB RAM — monitor `MemAvailable` via `ssh gem@apps 'grep MemAvailable /proc/meminfo'` during any build; alert user if < 1.5GB.**
+- Retry build job `8764f2ebb24f`: od-build re-ran (~RAM peak fine, 3.2GB floor), nix-builder layers CACHED from pre-crash run, export done. exit 0, 324s. Image `ghcr.io/coderyoss/codery:sandbox-dart-ca-fix`.
+- deploy-preview job `87b19bf8682e`: blue container started, health check PASSED (entrypoint chain incl. new 55-dart-ca.sh ran clean — launchy up, port 3000 listening). Preview: https://sandbox-preview.rancidgrandmas.online. Note: logs show `nginx: [emerg] getgrnam("nogroup") failed` on apps reload — apps-side nix image issue, possibly pre-existing, NOT caused by this change. Port 8080 still listening.
+- **Awaiting cutover.** Verify checklist = Task 10 below.
