@@ -165,11 +165,12 @@ If Task 10 dart TLS STILL fails (mechanism wrong): mirror becomes permanent infr
 
 ## Follow-up Work (2026-08-23, post-cutover)
 
-### F1: sandbox→apps SSH broken by image (perms) — FIXED live, image fix pending
+### F1: sandbox→apps SSH broken by image (perms) — FIXED
 
 - Live: `/home/gem/.ssh/id_codery_apps` + `config` were 644 → ssh refused key. Runtime `chmod 600` done (session-only).
 - Root cause: nix store normalizes modes (444); Dockerfile `chmod -R u+w /export/rootfs` → 644. The `chmod 600` inside configuration.nix never survives. Old container worked only because someone runtime-fixed it once.
-- Image fix: explicit `chmod 600` in Dockerfile.sandbox (after chown) + guard in `10-fix-home.sh`. Committed; needs image rebuild + preview + cutover.
+- Image fix: explicit `chmod 600` in Dockerfile.sandbox (after chown) + guard in `10-fix-home.sh`.
+- VERIFIED post-cutover #2 (2026-08-23 ~21:30): green/`ssh-perms-fix` active, perms 600 image-baked (store timestamps), `ssh gem@apps` OK, dart TLS 200, CA link present.
 
 ### F2: apps nginx reload broken (`getgrnam("nogroup") failed`) — FIXED
 
@@ -187,7 +188,7 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 ## Progress Log
 
-- 2026-08-23 (evening) — FOLLOW-UPS: F1+F2 fixed in repo (commit 6e90cb0). Stopgap nginx reload applied manually (3 server blocks live). codery-ci v0.11.1 released (tag pushed, Release workflow green) + Deploy CoderyCI ran — host binary now 0.11.1, daemon restarted, `reload_routes` MCP shows NO nginx emerg → -c fix confirmed live. Sandbox image `ssh-perms-fix` built (build log step #21 shows chmod 600) + preview deployed to green (health passed). **Awaiting cutover #2 for ssh perms.** Post-cutover verify: `ls -la /home/gem/.ssh/` = 600 on key+config, `ssh gem@apps echo ok`, `flutter pub get` still green.
+- 2026-08-23 ~21:30 — COMPLETE (all follow-ups except F3). Cutover #2 done: green/ssh-perms-fix active. Verified: ssh key+config 600 image-baked, `ssh gem@apps` OK, dart TLS 200, CA fix intact. Remaining: F3 host swap (human).
 
 - 2026-08-23 — COMPLETE. Cutover done; all verification green (dart TLS 200, flutter pub get 76 deps exit 0, PUB_CACHE persistent, mirror removed, docs updated). Follow-ups left open: host swap (8GB RAM, none present — OOM'd during first build), apps nginx `getgrnam("nogroup")` reload failure (pre-existing, apps image).
 
