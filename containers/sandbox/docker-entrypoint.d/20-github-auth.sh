@@ -23,15 +23,28 @@ if [ -z "${GITHUB_APP_ID:-}" ] || [ ! -f "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ]; t
 fi
 
 # Token generation can race container networking at boot — retry.
+# The App may be installed on multiple orgs; tokens are per-installation,
+# so pass an explicit owner (GITHUB_APP_DEFAULT_OWNER from .env, or the
+# first single-installation fallback).
 GH_TOKEN=""
+OWNER="${GITHUB_APP_DEFAULT_OWNER:-}"
+if [ -z "$OWNER" ]; then
+    INSTALLS=$(github-app-token --list 2>/dev/null | awk '{print $1}' | grep -v '^$' || true)
+    N=$(printf '%s\n' "$INSTALLS" | grep -c . || true)
+    [ "$N" = "1" ] && OWNER=$(github-app-token --list 2>/dev/null | awk 'NR==1 {print $2}')
+fi
+TOKEN_ARGS=()
+[ -n "$OWNER" ] && TOKEN_ARGS=("" "$OWNER")
+
 for _ in 1 2 3 4 5; do
-  GH_TOKEN=$(github-app-token 2>/dev/null || true)
-  if [ -n "$GH_TOKEN" ] && [ "$GH_TOKEN" != "null" ]; then break; fi
-  sleep 3
+    GH_TOKEN=$(github-app-token "${TOKEN_ARGS[@]}" 2>/dev/null || true)
+    if [ -n "$GH_TOKEN" ] && [ "$GH_TOKEN" != "null" ]; then break; fi
+    sleep 3
 done
 
 if [ -z "$GH_TOKEN" ] || [ "$GH_TOKEN" = "null" ]; then
   echo "[sandbox] Warning: GitHub App token generation failed after retries"
+  echo "[sandbox]   (multiple org installations? set GITHUB_APP_DEFAULT_OWNER in /opt/codery/.env)"
   exit 0
 fi
 
