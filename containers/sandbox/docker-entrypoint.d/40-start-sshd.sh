@@ -47,3 +47,17 @@ if ! grep -q "# codery-env-passthrough" /etc/ssh/sshd_config; then
         echo "[sandbox] sshd env passthrough configured (PATH + GITHUB_APP_*)"
     fi
 fi
+
+# Belt-and-suspenders: export GITHUB_APP_* in ~/.bashrc too. SetEnv in sshd_config
+# handles PATH reliably but some sshd builds/flags drop non-PATH vars; .bashrc is
+# sourced by every interactive shell. Values are non-secret (PEM stays file-mounted).
+if ! grep -q "# codery-github-env" /home/gem/.bashrc; then
+    {
+        echo "# codery-github-env"
+        [ -n "${GITHUB_APP_ID:-}" ] && echo "export GITHUB_APP_ID=${GITHUB_APP_ID}"
+        [ -n "${GITHUB_APP_SLUG:-}" ] && echo "export GITHUB_APP_SLUG=${GITHUB_APP_SLUG}"
+        [ -n "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ] && echo "export GITHUB_APP_PRIVATE_KEY_PATH=${GITHUB_APP_PRIVATE_KEY_PATH}"
+    } >> /home/gem/.bashrc
+    chown gem:gem /home/gem/.bashrc
+    echo "[sandbox] GITHUB_APP_* exported in ~/.bashrc"
+fi
