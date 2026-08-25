@@ -23,3 +23,27 @@ fi
 
 # sshd is managed by launchy (devcontainer.json) — not started here.
 # This script only prepares host keys and authorized_keys.
+
+# Pass container environment through sshd to login shells. sshd sanitizes
+# the environment for SSH sessions (compiled-in defaults), which drops
+# /usr/local/bin from PATH and the GITHUB_APP_* vars needed by
+# github-push / github-app-token. Idempotent; rolls back if sshd -t fails.
+if ! grep -q "# codery-env-passthrough" /etc/ssh/sshd_config; then
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.codery-bak
+    BASELINE_OK=0
+    sshd -t 2>/dev/null && BASELINE_OK=1
+    {
+        echo "# codery-env-passthrough"
+        echo "SetEnv PATH=/home/gem/.local/bin:/home/gem/.npm-global/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        [ -n "${GITHUB_APP_ID:-}" ] && echo "SetEnv GITHUB_APP_ID=${GITHUB_APP_ID}"
+        [ -n "${GITHUB_APP_SLUG:-}" ] && echo "SetEnv GITHUB_APP_SLUG=${GITHUB_APP_SLUG}"
+        [ -n "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ] && echo "SetEnv GITHUB_APP_PRIVATE_KEY_PATH=${GITHUB_APP_PRIVATE_KEY_PATH}"
+    } >> /etc/ssh/sshd_config
+    if [ "$BASELINE_OK" = "1" ] && ! sshd -t 2>/dev/null; then
+        echo "[sandbox] WARNING: sshd config invalid after env passthrough — rolling back"
+        mv /etc/ssh/sshd_config.codery-bak /etc/ssh/sshd_config
+    else
+        rm -f /etc/ssh/sshd_config.codery-bak
+        echo "[sandbox] sshd env passthrough configured (PATH + GITHUB_APP_*)"
+    fi
+fi
