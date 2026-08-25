@@ -170,10 +170,12 @@ let
 
     cp ${repo}/containers/sandbox/scripts/github-app-token.sh $out/usr/local/bin/github-app-token
     cp ${repo}/containers/sandbox/scripts/github-push.sh $out/usr/local/bin/github-push
+    cp ${repo}/containers/sandbox/scripts/git-credential-codery.sh $out/usr/local/bin/git-credential-codery
     cp ${repo}/containers/sandbox/scripts/prune-opencode-diffs.sh $out/usr/local/bin/prune-opencode-diffs
     cp ${repo}/containers/sandbox/scripts/opencode-serve-guard.sh $out/usr/local/bin/opencode-serve-guard
     cp ${repo}/containers/sandbox/scripts/github-app-permissions-mcp.ts $out/usr/local/bin/github-app-permissions-mcp.ts
     chmod +x $out/usr/local/bin/github-app-token $out/usr/local/bin/github-push \
+      $out/usr/local/bin/git-credential-codery \
       $out/usr/local/bin/prune-opencode-diffs $out/usr/local/bin/opencode-serve-guard
 
     # ── Home skeleton (ownership fixed to 1000:1000 in Dockerfile) ────

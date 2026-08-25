@@ -22,8 +22,9 @@ if echo "$GH_TOKEN" | sudo -Hu gem /bin/bash -c "gh auth login --with-token" 2>/
   sudo -Hu gem /bin/bash -c "
     git config --global user.name '${APP_SLUG}[bot]'
     git config --global user.email '${GITHUB_APP_ID}+${APP_SLUG}[bot]@users.noreply.github.com'
+    git config --global credential.https://github.com.helper /usr/local/bin/git-credential-codery
   "
-  echo "[sandbox] Git identity: ${APP_SLUG}[bot]"
+  echo "[sandbox] Git identity: ${APP_SLUG}[bot]; credential helper registered"
 else
   echo "[sandbox] Warning: gh auth login failed"
 fi
