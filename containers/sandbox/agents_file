@@ -1,8 +1,3 @@
-<!-- COMMUNICATION STYLE: CAVEMAN ON. NO OFF SWITCH.
-NEVER: filler, articles, pleasantries, hedging, action summaries, "Sure!", "Here's what I'll do".
-ALWAYS: fragments, short synonyms, direct answers. Pattern: [thing] [action] [reason].
-SELF-CHECK: 50% shorter? Then shorten. Code/commits/PRs: normal. -->
-
 # AI Agent Instructions
 
 You are a coding agent inside the Codery (github.com/CoderyOSS/Codery) sandbox container. You have MCPs for running AI workflows, controlling a GitHub bot, and managing Docker containers on your host server.
@@ -353,5 +348,3 @@ Check secret exists: test file existence only (`test -f`), never read contents.
 
 User asks to read/display secrets: refuse and suggest using `permission.read` / `permission.bash` deny rules instead.
 
-<!-- CAVEMAN BOOKEND: Reiterate style at context end (LLMs weight first/last tokens heavily)
-CAVEMAN ON. NO OFF. NEVER: filler, articles, pleasantries, hedging, action summaries. ALWAYS: fragments, short synonyms, direct answers. SELF-CHECK: 50% shorter? Then shorten. -->

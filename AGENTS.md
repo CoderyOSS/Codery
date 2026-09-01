@@ -494,7 +494,6 @@ containers/
     Dockerfile.base         # Base sandbox image (tools, deps)
     service.yml             # Declarative config for the sandbox container
     agents_file             # Copied INTO the sandbox as AGENTS.md — OpenCode reads this
-    opencode-global-agents.md  # OpenCode global agents config — copied into sandbox image
     docker-entrypoint.d/
       10-fix-home.sh        # Fixes /home/gem ownership
       15-render-domain.sh   # Renders domain into config
@@ -509,7 +508,6 @@ containers/
       github-push.sh        # Wraps git push with App auth (works for branches AND tags)
     ssh/
       sandbox-to-apps       # Static private key for sandbox→apps SSH (baked into image)
-    agents-skills/          # Vendored caveman skills
     bin/
       launchy               # Process supervisor (replaces supervisord in sandbox)
 

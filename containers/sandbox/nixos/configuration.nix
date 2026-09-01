@@ -182,9 +182,6 @@ let
     cp ${repo}/containers/sandbox/agents_file $out/home/gem/AGENTS.md
     mkdir -p $out/home/gem/.config/opencode
     cp ${repo}/opencode.json $out/home/gem/.config/opencode/config.json
-    cp ${repo}/containers/sandbox/opencode-global-agents.md $out/home/gem/.config/opencode/AGENTS.md
-    mkdir -p $out/home/gem/.agents
-    cp -r ${repo}/containers/sandbox/agents-skills/. $out/home/gem/.agents/skills/
     cp ${repo}/containers/sandbox/tmux.conf $out/home/gem/.tmux.conf
 
     mkdir -p $out/home/gem/.ssh
