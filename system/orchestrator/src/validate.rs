@@ -65,9 +65,10 @@ pub async fn check_deploy(
     }
 
     // ── 4. Image availability ─────────────────────────────────────────────────
-    // Pull from registry if missing locally. Locally-built images (e.g. devbox
+    // Pull from registry if missing locally. The reference comes from the
+    // service YAML (opaque OCI ref); locally-built images (e.g. devbox
     // experiments) skip the network pull entirely.
-    if let Err(e) = images::pull_if_missing(&def.service, sha).await {
+    if let Err(e) = images::pull_if_missing(&def.image_ref(sha)).await {
         errors.push(format!("image pull failed: {e}"));
     }
 

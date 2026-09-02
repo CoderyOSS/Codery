@@ -504,6 +504,10 @@ pub(crate) async fn start_container(docker: &Docker, def: &ServiceDef, sha: &str
             Config {
                 image: Some(image),
                 env: Some(container_env),
+                cmd: def.command.clone(),
+                entrypoint: def.entrypoint.clone(),
+                user: def.user.clone(),
+                working_dir: def.workdir.clone(),
                 exposed_ports: Some(exposed_ports),
                 host_config: Some(HostConfig {
                     port_bindings: Some(port_bindings),
@@ -511,6 +515,8 @@ pub(crate) async fn start_container(docker: &Docker, def: &ServiceDef, sha: &str
                     binds: Some(binds),
                     extra_hosts: if def.extra_hosts.is_empty() { None } else { Some(def.extra_hosts.clone()) },
                     security_opt: if def.allow_privilege_escalation { None } else { Some(vec!["no-new-privileges:true".to_string()]) },
+                    init: if def.init { Some(true) } else { None },
+                    ipc_mode: def.ipc.clone(),
                     restart_policy: Some(RestartPolicy {
                         name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
                         maximum_retry_count: None,

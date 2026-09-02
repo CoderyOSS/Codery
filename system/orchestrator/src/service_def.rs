@@ -44,6 +44,26 @@ pub struct ServiceDef {
     /// If true, do NOT set "no-new-privileges" — allows sudo inside the container.
     #[serde(default)]
     pub allow_privilege_escalation: bool,
+    /// Process command as an argv array (never a shell string). Overrides the
+    /// image CMD. E.g. ["npx", "playwright", "run-server", "--port", "3000"].
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    /// Override the image ENTRYPOINT.
+    #[serde(default)]
+    pub entrypoint: Option<Vec<String>>,
+    /// Linux user the process runs as (e.g. "pwuser").
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Working directory for the process.
+    #[serde(default)]
+    pub workdir: Option<String>,
+    /// Run a tiny init (tini) as PID 1 to reap zombies.
+    #[serde(default)]
+    pub init: bool,
+    /// Docker IPC mode ("host", "private", ...). "host" is required by some
+    /// browser runtimes (Chromium) inside containers.
+    #[serde(default)]
+    pub ipc: Option<String>,
 }
 
 /// host_port = container_port + offset
@@ -574,5 +594,73 @@ network: test-net
         assert_eq!(ssh.fixed_port, Some(2222));
         let web = def.ports.iter().find(|p| p.name == "web").unwrap();
         assert_eq!(web.fixed_port, None);
+    }
+
+    #[test]
+    fn generic_process_fields_deserialize() {
+        let def: ServiceDef = serde_yaml::from_str(r#"
+service: playwright
+image: mcr.microsoft.com/playwright:v1.54.1-noble
+port_scheme:
+  blue_offset: 40000
+  green_offset: 50000
+ports:
+  - name: ws
+    container_port: 3000
+health_check:
+  type: tcp
+  port: ws
+  timeout_secs: 90
+  interval_secs: 2
+volumes: []
+network: codery-net
+network_aliases:
+  - playwright
+command:
+  - npx
+  - playwright
+  - run-server
+  - --port
+  - "3000"
+entrypoint:
+  - /bin/sh
+  - -c
+user: pwuser
+workdir: /home/pwuser
+init: true
+ipc: host
+"#).unwrap();
+        assert_eq!(def.image, "mcr.microsoft.com/playwright:v1.54.1-noble");
+        assert_eq!(
+            def.image_ref("v1.54.1"),
+            "mcr.microsoft.com/playwright:v1.54.1-noble"
+        );
+        assert_eq!(
+            def.command,
+            Some(vec![
+                "npx".into(),
+                "playwright".into(),
+                "run-server".into(),
+                "--port".into(),
+                "3000".into()
+            ])
+        );
+        assert_eq!(def.entrypoint, Some(vec!["/bin/sh".into(), "-c".into()]));
+        assert_eq!(def.user.as_deref(), Some("pwuser"));
+        assert_eq!(def.workdir.as_deref(), Some("/home/pwuser"));
+        assert!(def.init);
+        assert_eq!(def.ipc.as_deref(), Some("host"));
+        assert_eq!(def.network_aliases, vec!["playwright"]);
+    }
+
+    #[test]
+    fn generic_process_fields_default_empty() {
+        let def = sandbox_def();
+        assert_eq!(def.command, None);
+        assert_eq!(def.entrypoint, None);
+        assert_eq!(def.user, None);
+        assert_eq!(def.workdir, None);
+        assert!(!def.init);
+        assert_eq!(def.ipc, None);
     }
 }

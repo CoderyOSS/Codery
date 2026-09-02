@@ -77,8 +77,9 @@ pub fn container_name(service: &str, color: &str) -> String {
     format!("codery-{}-{}", service, color)
 }
 
-/// Returns the Docker image reference for a service+sha.
-/// Used by images.rs which hasn't been migrated to ServiceDef yet.
+/// Returns the local tag for a `codery-ci build` result. Image *pulling* does
+/// NOT use this — the pull path resolves the opaque OCI reference from the
+/// service YAML (`ServiceDef::image_ref`).
 pub fn image_ref(service: &str, sha: &str) -> String {
     format!("{}:{}-{}", REGISTRY, service, sha)
 }
