@@ -25,13 +25,27 @@ Sandbox (Nix rootfs — dev tools only)      Playwright (mcr.microsoft.com/playw
   the sandbox to make a browser start. That is the anti-pattern this boundary
   eliminates.
 
-## Version coupling (upgrade all three in one commit)
+## Version coupling (upgrade all in one commit)
 
 | Component | Pin | Where |
 |---|---|---|
 | MCP client | `@playwright/mcp@0.0.30` | `opencode.json` |
+| zod | `zod@3.24.1` | `opencode.json` (`npm exec --package`) |
+| zod-to-json-schema | `zod-to-json-schema@3.24.4` | `opencode.json` (`npm exec --package`) |
 | Playwright protocol | `playwright@1.54.1` (run-server argv) | `containers/playwright/service.yml` |
 | Browser image | `mcr.microsoft.com/playwright:v1.54.1-noble` | `containers/playwright/service.yml` |
+
+The MCP is launched as
+`npm exec -y --package=@playwright/mcp@0.0.30 --package=zod@3.24.1
+--package=zod-to-json-schema@3.24.4 -- mcp-server-playwright --config ...`
+instead of `npx @playwright/mcp@0.0.30`. The two extra `--package` pins are
+required: `@playwright/mcp@0.0.30` does not declare `zod` as a dependency, so
+npx resolves the latest (zod 4.x). `zod-to-json-schema@3.x` cannot introspect
+zod 4 schemas and emits `{"$schema": ...}` stubs with no `type`/`properties`
+for every tool. OpenCode's strict tool-schema validation then rejects all 25
+tools and the MCP shows `failed: "Failed to get tools"`. Pinning zod to the
+3.x line restores full `inputSchema`s. If a future `@playwright/mcp` release
+properly pins its own zod, the extra pins can be dropped.
 
 Mechanism: `@playwright/mcp@0.0.30` connects to the remote browser server via
 its config file `remoteEndpoint` option (`containers/sandbox/
@@ -49,9 +63,9 @@ pins must move together — a Playwright upgrade is a deliberate, single change:
 2. Confirm a matching MCR tag exists
    (`https://mcr.microsoft.com/v2/playwright/tags/list`, e.g.
    `v1.54.1-noble`). No stable MCR tag → that MCP release cannot be used.
-3. Update `opencode.json`, the `command` and `image` in
-   `containers/playwright/service.yml`, and the default in
-   `.github/workflows/deploy-playwright.yml` — one commit.
+3. Update `opencode.json` (MCP pin + zod/zod-to-json-schema pins), the
+   `command` and `image` in `containers/playwright/service.yml`, and the
+   default in `.github/workflows/deploy-playwright.yml` — one commit.
 4. Deploy: `codery-ci deploy playwright vX.Y.Z` (or the Deploy Playwright
    workflow), then deploy the sandbox image (its MCP pin changed).
 
@@ -97,9 +111,16 @@ confuse it with installing Chromium dependencies into the sandbox.
 1. **Version mismatch** — first check: does the MCP's bundled `playwright`
    version equal the image tag? Mismatch errors surface in the MCP server
    logs (`read_container_file service='sandbox' path='/tmp/opencode.log'`).
-2. **WS unreachable** — from the sandbox:
+2. **OpenCode reports `playwright: failed — "Failed to get tools"`** — the
+   MCP is sending `inputSchema` stubs without `type: "object"`. Check
+   `npm view zod version` behavior: this happens when zod 4 resolves instead
+   of the pinned zod 3 (`zod-to-json-schema` 3.x cannot read zod 4 schemas).
+   Verify the `npm exec --package=zod@3.24.1 ...` pins are intact in
+   `opencode.json`, then reconnect via `POST /mcp/playwright/connect` or
+   restart `opencode serve`.
+3. **WS unreachable** — from the sandbox:
    `node -e "new WebSocket('ws://playwright:3000/')"` or check
    `get_container_info service='playwright'`.
-3. **Chromium fails to launch** — check `docker logs` of the Playwright
+4. **Chromium fails to launch** — check `docker logs` of the Playwright
    container; verify `ipc: host` and `--headless` are in effect. Do **not**
    install libraries into the Sandbox as a fix.

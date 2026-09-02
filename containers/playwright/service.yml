@@ -1,12 +1,15 @@
 # Playwright browser runtime — Microsoft's official image, used as-is.
 #
-# VERSION COUPLING (upgrade these three together, in one commit):
-#   1. opencode.json          -> "npx -y @playwright/mcp@0.0.30"   (MCP client)
+# VERSION COUPLING (upgrade together, in one commit):
+#   1. opencode.json          -> "@playwright/mcp@0.0.30" + zod@3.24.1 +
+#                                 zod-to-json-schema@3.24.4 (npm exec pins)
 #   2. command below          -> "npx -y playwright@1.54.1"        (protocol)
 #   3. image below            -> mcr.microsoft.com/playwright:v1.54.1-noble
 # Playwright errors when client and server versions mismatch — never "fix"
-# Chromium failures by adding Linux libraries to the sandbox. See
-# docs/playwright.md for the full boundary and upgrade procedure.
+# Chromium failures by adding Linux libraries to the sandbox. The zod pin is
+# required (zod 4 breaks zod-to-json-schema 3.x tool schemas; OpenCode rejects
+# them with "Failed to get tools"). See docs/playwright.md for the full
+# boundary and upgrade procedure.
 service: playwright
 image: mcr.microsoft.com/playwright:v1.54.1-noble
 

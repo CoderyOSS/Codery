@@ -19,9 +19,11 @@
     "playwright": {
       "type": "local",
       "command": [
-        "npx",
-        "-y",
-        "@playwright/mcp@0.0.30",
+        "npm", "exec", "-y",
+        "--package=@playwright/mcp@0.0.30",
+        "--package=zod@3.24.1",
+        "--package=zod-to-json-schema@3.24.4",
+        "--", "mcp-server-playwright",
         "--config",
         "/home/gem/.config/opencode/playwright-mcp-config.json"
       ]

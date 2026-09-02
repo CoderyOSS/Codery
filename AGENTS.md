@@ -111,10 +111,12 @@ no desktop/X11). Chromium runs **only** here — never in the sandbox.
 connects via `ws://playwright:3000/` (`PLAYWRIGHT_WS_ENDPOINT`). Not exposed
 publicly. Chromium reaches apps via `http://apps:<port>` (alias `apps`).
 
-**Version coupling:** `@playwright/mcp@0.0.30` (opencode.json),
+**Version coupling:** `@playwright/mcp@0.0.30` + `zod@3.24.1` +
+`zod-to-json-schema@3.24.4` (opencode.json, `npm exec --package` pins),
 `playwright@1.54.1` (service command), image `v1.54.1-noble` move together —
-one commit. Client/server mismatch breaks automation. See
-`docs/playwright.md`.
+one commit. Client/server mismatch breaks automation. The zod pin is
+required: zod 4 makes `zod-to-json-schema` 3.x emit schema stubs that
+OpenCode rejects (`Failed to get tools`). See `docs/playwright.md`.
 
 **`localhost` is container-local.** Apps intended for browser access bind to
 `0.0.0.0:<port>`; Chromium addresses them as `http://apps:<port>`.
