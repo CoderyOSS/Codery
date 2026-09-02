@@ -12,6 +12,7 @@ mod mcp;
 mod mcp_exec;
 mod nginx;
 mod preflight;
+mod s6;
 mod service_def;
 mod state;
 mod tcp_proxy;
