@@ -29,6 +29,7 @@ of whichever container serves that subdomain.
 | Promote a verified preview | `codery-ci cutover <service>` |
 | Abort a preview deploy | `codery-ci cancel-preview <service>` |
 | Build + try new image locally | `codery-ci build <svc> <tag>` → `deploy-preview` → `cutover` |
+| Upgrade Playwright (pull-only, no build) | `codery-ci deploy playwright vX.Y.Z` — bump MCP pin + image tag together |
 | Reload routing after YAML edit | `codery-ci reload-routes` (or `reload_routes` MCP) |
 | Restart stuck container | `restart_service` MCP (no blue/green swap) |
 | Roll back to previous image | `rollback` MCP |
@@ -41,9 +42,13 @@ Detailed docs in the sections below.
 
 ## Container Roles
 
-### Sandbox (`containers/sandbox/Dockerfile.base` + `examples/Dockerfile.sandbox`)
+### Sandbox (`examples/Dockerfile.sandbox` — Nix rootfs, no Dockerfile.base)
 
 **Purpose:** AI-assisted development environment. Not a production server.
+**Package set:** declared once in `containers/sandbox/nixos/configuration.nix`
+(`toolEnv`) — adding a normal CLI tool means adding one Nix package there,
+not apt/curl installers. Browsers deliberately do NOT live here (see
+Playwright below).
 
 **Runs:**
 - `opencode serve` on container port **3000** — the AI coding assistant (accessible externally)
@@ -61,9 +66,12 @@ drops to `gem` (uid 1000) for all processes.
 Route and image changes must go through this repo.
 
 **No compiler/linker in the sandbox.** Do not attempt `cargo build`/`cargo check` here —
-there is no `cc`. The build tools live in the **apps container** (`ssh gem@apps`, has gcc;
-install rustup user-level for cargo) and on the **host** (full toolchain, used by
-`codery-ci build`). For Rust verification use the apps container or the MCP build loop.
+there is no `cc`. For Rust verification: the **apps container** can pull a current
+toolchain via nix (`ssh gem@apps`, then
+`sudo nix shell nixpkgs#rustc nixpkgs#cargo -c bash`; user-level rustup-init does
+NOT work there — glibc binaries can't execute on the Alpine/nix base) or the
+**host** (full toolchain). The GitHub release workflow (`cross`, musl) is the
+production build path.
 
 ---
 
@@ -86,6 +94,37 @@ install rustup user-level for cargo) and on the **host** (full toolchain, used b
 
 **Port range:** Apps listen on **8000-9000** inside the container (1001 ports total).
 This is the only port range CoderyCI maps. Do not use ports outside this range.
+
+---
+
+### Playwright (`containers/playwright/service.yml` — no Dockerfile, pull-only)
+
+**Purpose:** Browser runtime for automation (OpenCode playwright MCP tools,
+project E2E tests). Microsoft's official image, used as-is:
+`mcr.microsoft.com/playwright:v1.54.1-noble` — Codery owns only image
+version, argv, networking, security flags.
+
+**Runs:** `npx playwright run-server --port 3000 --host 0.0.0.0` (headless;
+no desktop/X11). Chromium runs **only** here — never in the sandbox.
+
+**Networking:** `codery-net`, DNS alias **`playwright`**. The sandbox
+connects via `ws://playwright:3000/` (`PLAYWRIGHT_WS_ENDPOINT`). Not exposed
+publicly. Chromium reaches apps via `http://apps:<port>` (alias `apps`).
+
+**Version coupling:** `@playwright/mcp@0.0.30` (opencode.json),
+`playwright@1.54.1` (service command), image `v1.54.1-noble` move together —
+one commit. Client/server mismatch breaks automation. See
+`docs/playwright.md`.
+
+**`localhost` is container-local.** Apps intended for browser access bind to
+`0.0.0.0:<port>`; Chromium addresses them as `http://apps:<port>`.
+
+**Deploy/upgrade:** `codery-ci deploy playwright <version>` on the host, or
+the manual `Deploy Playwright` workflow. No build step. Rollback = revert
+pins and redeploy (`codery-ci rollback` is GHCR-only).
+
+**Never** add Chromium shared libraries to the sandbox to fix a browser
+problem — that is the anti-pattern this service exists to eliminate.
 
 ---
 
@@ -430,9 +469,9 @@ pipelines.** The pipelines are the fallback path, not the default.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| Build Sandbox (`deploy-sandbox.yml`) | `workflow_dispatch` | Builds image, deploys via CoderyCI. Relevant paths: `examples/Dockerfile.sandbox`, `.devcontainer/devcontainer.json`, `containers/sandbox/**`, `opencode.json`. If `Dockerfile.base` changed, run Build Sandbox Base first |
-| Build Sandbox Base | `workflow_dispatch` | Builds `Dockerfile.base` base image |
+| Build Sandbox (`deploy-sandbox.yml`) | `workflow_dispatch` | Builds image, deploys via CoderyCI. Relevant paths: `examples/Dockerfile.sandbox`, `.devcontainer/devcontainer.json`, `containers/sandbox/**`, `opencode.json` |
 | Build Apps (`deploy-apps.yml`) | `workflow_dispatch` | Builds image, deploys via CoderyCI |
+| Deploy Playwright (`deploy-playwright.yml`) | `workflow_dispatch` | Syncs service YAML, deploys pinned MS image from MCR (no build — pull-only) |
 | Sync Routes | `workflow_dispatch` | Syncs route file, runs `codery-ci reload-routes` (~30s, no container rebuild) |
 | Build Orchestrator | `workflow_dispatch` | Compiles musl binary, uploads to `/opt/codery/codery-ci`, restarts codery-mcp |
 | Release Orchestrator | tag push `codery-ci-v*` or `workflow_dispatch` | Builds release binaries |
@@ -491,25 +530,30 @@ opencode.json               # OpenCode config — synced into sandbox projects d
 
 containers/
   sandbox/
-    Dockerfile.base         # Base sandbox image (tools, deps)
-    service.yml             # Declarative config for the sandbox container
-    agents_file             # Copied INTO the sandbox as AGENTS.md — OpenCode reads this
+    nixos/
+      configuration.nix    # toolEnv: the single declarative package list
+      flake.nix            # Rootfs + store closure builder
+    service.yml            # Declarative config for the sandbox container
+    agents_file            # Copied INTO the sandbox as AGENTS.md — OpenCode reads this
     docker-entrypoint.d/
-      10-fix-home.sh        # Fixes /home/gem ownership
-      15-render-domain.sh   # Renders domain into config
-      20-github-auth.sh     # Authenticates gh CLI via GitHub App
-      25-openrouter-auth.sh # Configures OpenRouter API key
-      30-init-projects.sh   # Ensures /home/gem/projects exists
-      40-start-sshd.sh      # Prepares sshd host keys and authorized_keys (sshd managed by launchy)
-      60-claude-mcp.sh      # Installs Claude MCP servers
+      10-fix-home.sh       # Fixes /home/gem ownership
+      15-render-domain.sh  # Renders domain into config
+      20-github-auth.sh    # Authenticates gh CLI via GitHub App
+      25-openrouter-auth.sh# Configures OpenRouter API key
+      30-init-projects.sh  # Ensures /home/gem/projects exists
+      40-start-sshd.sh     # Prepares sshd host keys and authorized_keys (sshd managed by launchy)
+      60-claude-mcp.sh     # Installs Claude MCP servers
     scripts/
-      entrypoint.sh         # Runs entrypoint.d/ scripts, then exec launchy
-      github-app-token.sh   # Generates a GitHub App installation token
-      github-push.sh        # Wraps git push with App auth (works for branches AND tags)
+      entrypoint.sh        # Runs entrypoint.d/ scripts, then exec launchy
+      github-app-token.sh  # Generates a GitHub App installation token
+      github-push.sh       # Wraps git push with App auth (works for branches AND tags)
     ssh/
-      sandbox-to-apps       # Static private key for sandbox→apps SSH (baked into image)
+      sandbox-to-apps      # Static private key for sandbox→apps SSH (baked into image)
     bin/
-      launchy               # Process supervisor (replaces supervisord in sandbox)
+      launchy              # Process supervisor (replaces supervisord in sandbox)
+
+  playwright/
+    service.yml            # Pinned MS Playwright image (pull-only, no Dockerfile)
 
   apps/
     Dockerfile              # Apps image (project web servers)
@@ -562,12 +606,14 @@ hosting/
 
 docs/
   customizing.md            # Customization guide (GitHub App setup, etc.)
+  playwright.md             # Browser runtime boundary + version coupling
 
 SETUP.md                      # VPS installation guide — start here for new installs
 
 .github/workflows/
   deploy-sandbox.yml        # Sandbox CI/CD
   deploy-apps.yml           # Apps CI/CD
+  deploy-playwright.yml     # Playwright CI/CD (pull-only, no build)
   release-orchestrator.yml  # CoderyCI release (tag codery-ci-v*)
   release-sandbox.yml       # Sandbox image release (tag sandbox-v*)
   release-apps.yml          # Apps image release (tag apps-v*)
