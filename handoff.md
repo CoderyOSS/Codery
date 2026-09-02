@@ -200,3 +200,65 @@ updated at `/opt/codery/codery-ci` and `codery-ci-mcp` restarted.
 
 Issue 1 is a quick win and should land first — it also makes Issue 2's
 verification (nginx route per new app) actually work.
+
+---
+
+## Verification status (2026-08-21)
+
+Checked live containers + repo on 2026-08-21. Summary: **apps is s6-only,
+sandbox is still Launchy, orchestrator is still Launchy-era.**
+
+### Live containers
+
+| Container | PID 1 | Supervisor | Evidence |
+|---|---|---|---|
+| sandbox (blue, image Aug 9) | `/sbin/launchy /etc/launchy.json` | Launchy | `opencode serve` + sshd + opendesign managed by Launchy; `15-render-domain.sh` still sed-substitutes `/etc/launchy.json` |
+| apps | `/init` → `s6-svscan` | s6-overlay v3 | `/run/service/{nginx,sshd,ssh-agent,cartaclient,cbe1,design}` all s6-svstat'd; no `/etc/launchy`, no `/run/launchy-status.json` |
+
+### Repo state
+
+- `containers/apps/` — fully s6: `Dockerfile` (`ENTRYPOINT ["/init"]`,
+  s6-overlay 3.2.3.2 tarballs), `s6-overlay/s6-rc.d/` + `user-bundles.d/`,
+  `README-NIX.md` documents s6-rc flow, `service.yml` binds
+  `/opt/codery/apps-s6.d` → `/etc/s6-overlay/apps.d`. Launchy gone from apps.
+- `containers/sandbox/` — still Launchy end-to-end: `Dockerfile.base` copies
+  `bin/launchy` to `/sbin/launchy`, `nixos/configuration.nix` copies
+  `.devcontainer/devcontainer.json` → `/etc/launchy.json`,
+  `scripts/entrypoint.sh` execs `/sbin/launchy`. No s6 anywhere in sandbox.
+  Launchy is **not** deprecated for sandbox — only for apps.
+- `system/orchestrator/` — still Launchy-era for app management. Confirmed
+  unchanged since handoff:
+  - `db.rs:317` `sync_launchy()` writes JSON bundles
+  - `mcp.rs:903,1121,1224,1340` `cat /run/launchy-status.json` (→
+    `get_app_status` returns MCP error `-32603: Launchy status file not
+    found` live)
+  - `mcp.rs:1353` `ls /etc/launchy/built-in/`
+  - `mcp.rs` tool descriptions still advertise Launchy ("Both containers
+    use Launchy as PID 1", `/var/log/launchy/{name}.log` guidance)
+  - `config.rs:7` `APPS_LAUNCHY_DIR = "/opt/codery/apps-launchy.d"`
+  - `nginx.rs:97` still `nginx -s reload` without `-c` (Issue 1 unfixed)
+
+### New drift found
+
+`config.rs:7` still points at `/opt/codery/apps-launchy.d`, but
+`containers/apps/service.yml:46` and `.github/workflows/deploy-apps.yml:81`
+now use **`/opt/codery/apps-s6.d`**. So even the Launchy-era JSON sync writes
+to a host dir that is no longer bind-mounted. Rename the constant as part of
+the Issue 2 migration (handoff plan step 6 already calls for this).
+
+### Duplicate source of truth for the 3 runtime apps
+
+SQLite (`list_apps`) and the image both define `cartaclient`, `cbe1`,
+`design`. The image copies (`containers/apps/s6-overlay/s6-rc.d/*`) are what
+actually run — baked at build time. The SQLite records date from the Launchy
+era (2026-07-23) and are ignored by s6. Decide: either keep build-time apps
+in SQLite and render bundles (Issue 2 migration), or delete the stale records.
+
+### Impact on live ops
+
+- `add_app`/`remove_app`/`restart_app`/`get_app_status` are dead against the
+  current apps image. `list_apps` works (reads SQLite on the host).
+- `reload_routes` still regenerates Caddy/Nginx config but the nginx reload
+  inside the apps container is a no-op (Issue 1).
+- Sandbox supervision is unchanged — Launchy is alive there. If a sandbox
+  s6 migration is planned, it has not started in this repo.
