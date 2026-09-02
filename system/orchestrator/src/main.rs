@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
         Some("reload-routes") => {
             let conn = db::open()?;
             db::init(&conn)?;
-            db::sync_launchy(&conn)?;
+            db::sync_s6(&conn)?;
             caddy::apply_all()?;
             nginx::generate_and_reload().await?;
             println!("[routes] Reloaded Caddyfile and Nginx");

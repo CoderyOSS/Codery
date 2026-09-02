@@ -2,9 +2,10 @@
 pub const STATE_DIR: &str = "/opt/codery/state";
 pub const CADDY_CONFIG: &str = "/etc/caddy/Caddyfile";
 pub const NGINX_CONFIG: &str = "/opt/codery/proxy/apps-nginx.conf";
-/// Host directory bind-mounted into apps container at /etc/launchy/apps.d/.
-/// MCP add_app/remove_app write JSON service configs here; Launchy picks them up on SIGHUP.
-pub const APPS_LAUNCHY_DIR: &str = "/opt/codery/apps-launchy.d";
+/// Host directory bind-mounted into the apps container at /etc/s6-overlay/apps.d/.
+/// MCP add_app/remove_app render s6 service bundles here; a boot-time oneshot
+/// in the apps image links them into supervision.
+pub const APPS_S6_DIR: &str = "/opt/codery/apps-s6.d";
 pub const ENV_FILE: &str = "/opt/codery/.env";
 pub const TAILSCALE_IP_FILE: &str = "/run/tailscale.ip";
 /// Shared projects directory. Declared in service YAMLs; kept here for documentation.

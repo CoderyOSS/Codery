@@ -18,6 +18,7 @@ pub struct AppRecord {
     pub user: String,
     pub restart: String,
     pub no_cache: bool,
+    pub source: String,
     pub created_at: String,
 }
 
@@ -52,6 +53,10 @@ pub fn init(conn: &Connection) -> Result<()> {
         "ALTER TABLE apps ADD COLUMN no_cache INTEGER NOT NULL DEFAULT 0;"
     );
 
+    let _ = conn.execute_batch(
+        "ALTER TABLE apps ADD COLUMN source TEXT NOT NULL DEFAULT 'runtime';"
+    );
+
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS previews (
             service     TEXT PRIMARY KEY,
@@ -68,8 +73,8 @@ pub fn init(conn: &Connection) -> Result<()> {
 
 pub fn insert_app(conn: &Connection, app: &AppRecord) -> Result<()> {
     conn.execute(
-        "INSERT INTO apps (name, subdomain, internal_port, command, directory, env, priority, user, restart, no_cache)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO apps (name, subdomain, internal_port, command, directory, env, priority, user, restart, no_cache, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         (
             &app.name,
             &app.subdomain,
@@ -81,6 +86,7 @@ pub fn insert_app(conn: &Connection, app: &AppRecord) -> Result<()> {
             &app.user,
             &app.restart,
             app.no_cache as i64,
+            &app.source,
         ),
     ).with_context(|| format!("failed to insert app '{}'", app.name))?;
     Ok(())
@@ -92,9 +98,16 @@ pub fn delete_app(conn: &Connection, name: &str) -> Result<bool> {
     Ok(rows > 0)
 }
 
+pub fn set_app_source(conn: &Connection, name: &str, source: &str) -> Result<bool> {
+    let rows = conn
+        .execute("UPDATE apps SET source = ?1 WHERE name = ?2", (source, name))
+        .with_context(|| format!("failed to set source for app '{}'", name))?;
+    Ok(rows > 0)
+}
+
 pub fn list_apps(conn: &Connection) -> Result<Vec<AppRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT name, subdomain, internal_port, command, directory, env, priority, user, restart, no_cache, created_at
+        "SELECT name, subdomain, internal_port, command, directory, env, priority, user, restart, no_cache, source, created_at
          FROM apps ORDER BY name"
     ).context("failed to prepare apps query")?;
     let rows = stmt.query_map([], |row| {
@@ -109,7 +122,8 @@ pub fn list_apps(conn: &Connection) -> Result<Vec<AppRecord>> {
             user: row.get(7)?,
             restart: row.get(8)?,
             no_cache: row.get::<_, i64>(9)? != 0,
-            created_at: row.get(10)?,
+            source: row.get(10)?,
+            created_at: row.get(11)?,
         })
     }).context("failed to query apps")?;
     let mut apps = Vec::new();
@@ -314,53 +328,119 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
     Ok(routes)
 }
 
-pub fn sync_launchy(conn: &Connection) -> Result<()> {
+pub fn sync_s6(conn: &Connection) -> Result<()> {
+    sync_s6_to_dir(conn, std::path::Path::new(config::APPS_S6_DIR))
+}
+
+/// Render one s6 service bundle per runtime-managed app into `dir`, and prune
+/// bundles whose app was deleted or is no longer runtime-managed.
+pub fn sync_s6_to_dir(conn: &Connection, dir: &std::path::Path) -> Result<()> {
     let apps = list_apps(conn)?;
-    let dir = std::path::Path::new(config::APPS_LAUNCHY_DIR);
     std::fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create {}", config::APPS_LAUNCHY_DIR))?;
+        .with_context(|| format!("failed to create {}", dir.display()))?;
 
-    if dir.exists() {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                if !apps.iter().any(|a| a.name == stem) {
-                    std::fs::remove_file(&path)?;
-                }
+    // Prune: any subdir that doesn't belong to a runtime app is stale.
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let managed = apps.iter().any(|a| a.name == name && a.source == "runtime");
+            if !managed {
+                std::fs::remove_dir_all(&path)
+                    .with_context(|| format!("failed to prune {:?}", path))?;
             }
         }
     }
 
-    for app in &apps {
-        let mut svc = serde_json::json!({
-            "name": app.name,
-            "command": ["bash", "-c", &app.command],
-            "directory": app.directory,
-            "user": app.user,
-            "restart": app.restart,
-            "priority": app.priority
-        });
-        if let Some(env_json) = &app.env {
-            if let Ok(env_map) = serde_json::from_str::<HashMap<String, String>>(env_json) {
-                if !env_map.is_empty() {
-                    svc.as_object_mut().unwrap().insert("env".to_string(), serde_json::json!(env_map));
-                }
-            }
-        }
-        let path = dir.join(format!("{}.json", app.name));
-        let content = serde_json::to_string_pretty(&svc).unwrap() + "\n";
-        std::fs::write(&path, &content)
-            .with_context(|| format!("failed to write {:?}", path))?;
+    for app in apps.iter().filter(|a| a.source == "runtime") {
+        write_bundle(dir, app)?;
     }
-
     Ok(())
+}
+
+fn write_bundle(dir: &std::path::Path, app: &AppRecord) -> Result<()> {
+    let bdir = dir.join(&app.name);
+    std::fs::create_dir_all(bdir.join("dependencies.d"))?;
+    std::fs::write(bdir.join("type"), "longrun\n")?;
+    std::fs::write(bdir.join("dependencies.d").join("base"), "")?;
+    // Parity with Launchy's shutdown: SIGTERM, 10s grace, SIGKILL.
+    std::fs::write(bdir.join("timeout-kill"), "10000\n")?;
+    write_executable(&bdir.join("run"), &render_run(app))?;
+    match app.restart.as_str() {
+        "always" => {
+            // s6-supervise default respawns on death; drop any stale finish.
+            let _ = std::fs::remove_file(bdir.join("finish"));
+        }
+        policy => write_executable(&bdir.join("finish"), &render_finish(policy))?,
+    }
+    Ok(())
+}
+
+fn write_executable(path: &std::path::Path, content: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, content).with_context(|| format!("failed to write {:?}", path))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn render_run(app: &AppRecord) -> String {
+    let mut s = String::new();
+    s.push_str("#!/bin/bash\n");
+    s.push_str(". /usr/local/bin/s6-load-locale-env\n");
+    s.push_str("export PATH=\"/nix/var/nix/profiles/default/bin:$PATH\"\n");
+    s.push_str("export HOME=/home/gem\n");
+    if let Some(env_json) = &app.env {
+        if let Ok(env_map) = serde_json::from_str::<HashMap<String, String>>(env_json) {
+            let mut pairs: Vec<_> = env_map.into_iter().collect();
+            pairs.sort_by(|a, b| a.0.cmp(&b.0)); // deterministic output
+            for (k, v) in pairs {
+                s.push_str(&format!("export {}={}\n", k, shell_quote(&v)));
+            }
+        }
+    }
+    s.push_str(&format!("cd {}\n", shell_quote(&app.directory)));
+    s.push_str(&format!(
+        "exec /command/s6-setuidgid {} bash -c {}\n",
+        shell_quote(&app.user),
+        shell_quote(&app.command)
+    ));
+    s
+}
+
+fn render_finish(policy: &str) -> String {
+    match policy {
+        // Respawn only on non-zero exit (or signal): down the service on clean exit.
+        "on_failure" => "#!/bin/bash\nif [ \"$1\" = \"0\" ]; then exec /command/s6-svc -d .; fi\nexit 0\n".to_string(),
+        // Never respawn: always down the service after the first exit.
+        _ => "#!/bin/bash\nexec /command/s6-svc -d .\n".to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "codery-dbtest-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
 
     fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -380,6 +460,7 @@ mod tests {
             user: "gem".to_string(),
             restart: "always".to_string(),
             no_cache: false,
+            source: "runtime".to_string(),
             created_at: String::new(),
         }
     }
@@ -451,6 +532,114 @@ mod tests {
         app2.subdomain = "same".to_string();
         app2.internal_port = 3002;
         assert!(insert_app(&conn, &app2).is_err());
+    }
+
+    // ── source column + sync_s6 ────────────────────────────────────────────
+
+    #[test]
+    fn source_defaults_to_runtime() {
+        let conn = test_conn();
+        insert_app(&conn, &sample_app("myapp")).unwrap();
+        let apps = list_apps(&conn).unwrap();
+        assert_eq!(apps[0].source, "runtime");
+    }
+
+    #[test]
+    fn set_app_source_roundtrips() {
+        let conn = test_conn();
+        insert_app(&conn, &sample_app("myapp")).unwrap();
+        assert!(set_app_source(&conn, "myapp", "build").unwrap());
+        assert_eq!(find_app_by_name(&conn, "myapp").unwrap().unwrap().source, "build");
+        assert!(!set_app_source(&conn, "ghost", "build").unwrap());
+    }
+
+    #[test]
+    fn sync_s6_renders_bundle_for_runtime_app() {
+        let conn = test_conn();
+        insert_app(&conn, &sample_app("myapp")).unwrap();
+        let dir = temp_dir("render");
+        sync_s6_to_dir(&conn, &dir).unwrap();
+
+        let b = dir.join("myapp");
+        assert_eq!(std::fs::read_to_string(b.join("type")).unwrap(), "longrun\n");
+        assert!(b.join("dependencies.d/base").exists());
+        assert_eq!(std::fs::read_to_string(b.join("timeout-kill")).unwrap(), "10000\n");
+        assert!(!b.join("finish").exists(), "restart=always needs no finish script");
+
+        let run = std::fs::read_to_string(b.join("run")).unwrap();
+        assert!(run.starts_with("#!/bin/bash\n"));
+        assert!(run.contains(". /usr/local/bin/s6-load-locale-env\n"));
+        assert!(run.contains("export PATH=\"/nix/var/nix/profiles/default/bin:$PATH\"\n"));
+        assert!(run.contains("export HOME=/home/gem\n"));
+        assert!(run.contains("cd '/home/gem/projects/myapp'\n"));
+        assert!(run.contains("exec /command/s6-setuidgid 'gem' bash -c 'bun run start'\n"));
+
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(b.join("run")).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0, "run must be executable");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sync_s6_shell_quotes_command_and_env() {
+        let conn = test_conn();
+        let mut app = sample_app("quotey");
+        app.command = "echo it's done".to_string();
+        app.env = Some(r#"{"GREETING":"va'l ue","PLAIN":"simple"}"#.to_string());
+        insert_app(&conn, &app).unwrap();
+        let dir = temp_dir("quote");
+        sync_s6_to_dir(&conn, &dir).unwrap();
+
+        let run = std::fs::read_to_string(dir.join("quotey").join("run")).unwrap();
+        assert!(run.contains("export GREETING='va'\\''l ue'\n"), "run was:\n{}", run);
+        assert!(run.contains("export PLAIN='simple'\n"), "run was:\n{}", run);
+        assert!(run.contains("bash -c 'echo it'\\''s done'\n"), "run was:\n{}", run);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sync_s6_skips_build_apps_and_prunes_stale_bundles() {
+        let conn = test_conn();
+        insert_app(&conn, &sample_app("rt")).unwrap();
+        insert_app(&conn, &sample_app("bk")).unwrap();
+        set_app_source(&conn, "bk", "build").unwrap();
+        let dir = temp_dir("prune");
+        std::fs::create_dir_all(dir.join("ghost")).unwrap(); // stale bundle
+        sync_s6_to_dir(&conn, &dir).unwrap();
+
+        assert!(dir.join("rt").is_dir(), "runtime app bundle rendered");
+        assert!(!dir.join("bk").exists(), "build app gets no bundle");
+        assert!(!dir.join("ghost").exists(), "stale bundle pruned");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sync_s6_writes_finish_for_restart_policies() {
+        let conn = test_conn();
+
+        let mut onfail = sample_app("onfail");
+        onfail.restart = "on_failure".to_string();
+        insert_app(&conn, &onfail).unwrap();
+
+        let mut never = sample_app("never");
+        never.restart = "never".to_string();
+        insert_app(&conn, &never).unwrap();
+
+        let dir = temp_dir("finish");
+        sync_s6_to_dir(&conn, &dir).unwrap();
+
+        let f1 = std::fs::read_to_string(dir.join("onfail").join("finish")).unwrap();
+        assert!(f1.contains("[ \"$1\" = \"0\" ]"), "on_failure finish was:\n{}", f1);
+        assert!(f1.contains("s6-svc -d ."), "on_failure finish was:\n{}", f1);
+
+        let f2 = std::fs::read_to_string(dir.join("never").join("finish")).unwrap();
+        assert!(f2.contains("exec /command/s6-svc -d ."), "never finish was:\n{}", f2);
+
+        // Flip back to always: finish must be removed on re-render.
+        conn.execute("UPDATE apps SET restart = 'always' WHERE name = 'onfail'", []).unwrap();
+        sync_s6_to_dir(&conn, &dir).unwrap();
+        assert!(!dir.join("onfail").join("finish").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // ── Preview tests ──────────────────────────────────────────────────────────

@@ -1101,11 +1101,12 @@ impl OrchestratorMcp {
             user: "gem".to_string(),
             restart: "always".to_string(),
             no_cache: p.no_cache.unwrap_or(false),
+            source: "runtime".to_string(),
             created_at: String::new(),
         };
 
         db::insert_app(&conn, &app).map_err(|e| tool_err(e.to_string()))?;
-        db::sync_launchy(&conn).map_err(|e| tool_err(e.to_string()))?;
+        db::sync_s6(&conn).map_err(|e| tool_err(e.to_string()))?;
 
         container_exec("apps", &["kill", "-HUP", "1"])
             .await
@@ -1181,7 +1182,7 @@ impl OrchestratorMcp {
             )));
         }
 
-        db::sync_launchy(&conn).map_err(|e| tool_err(e.to_string()))?;
+        db::sync_s6(&conn).map_err(|e| tool_err(e.to_string()))?;
 
         container_exec("apps", &["kill", "-HUP", "1"])
             .await
