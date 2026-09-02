@@ -1,0 +1,51 @@
+# Playwright browser runtime — Microsoft's official image, used as-is.
+#
+# VERSION COUPLING (upgrade these three together, in one commit):
+#   1. opencode.json          -> "npx -y @playwright/mcp@0.0.30"   (MCP client)
+#   2. command below          -> "npx -y playwright@1.54.1"        (protocol)
+#   3. image below            -> mcr.microsoft.com/playwright:v1.54.1-noble
+# Playwright errors when client and server versions mismatch — never "fix"
+# Chromium failures by adding Linux libraries to the sandbox. See
+# docs/playwright.md for the full boundary and upgrade procedure.
+service: playwright
+image: mcr.microsoft.com/playwright:v1.54.1-noble
+
+# Host port = container_port + offset (unused publicly — internal only).
+# 40000/50000 avoids sandbox (10000/20000) and apps (0/10000) ranges.
+port_scheme:
+  blue_offset: 40000
+  green_offset: 50000
+
+ports:
+  - name: ws
+    container_port: 3000
+    # No subdomain — internal browser server, reached from the sandbox via
+    # ws://playwright:3000/ over codery-net. Not exposed publicly.
+
+command:
+  - npx
+  - -y
+  - playwright@1.54.1
+  - run-server
+  - --port
+  - "3000"
+  - --host
+  - 0.0.0.0
+
+user: pwuser
+workdir: /home/pwuser
+init: true
+ipc: host
+
+health_check:
+  type: tcp
+  port: ws
+  timeout_secs: 90
+  interval_secs: 2
+
+volumes: []
+required_env: []
+
+network: codery-net
+network_aliases:
+  - playwright

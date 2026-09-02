@@ -83,8 +83,11 @@ let
     ln -sf ${toolEnv}/bin/bash $out/bin/sh
 
     # FHS dynamic loader: non-nix ELF binaries (opencode/claude npm bins,
-    # Playwright browsers) hardcode /lib64/ld-linux-x86-64.so.2 as PT_INTERP.
+    # rustup toolchains) hardcode /lib64/ld-linux-x86-64.so.2 as PT_INTERP.
     # Missing loader surfaces as execve ENOENT ("No such file or directory").
+    # NOTE: Playwright browsers intentionally do NOT run here — they live in
+    # Microsoft's official Playwright container (containers/playwright/).
+    # Do not extend this rootfs with Chromium's shared-library dependencies.
     ln -sf ${pkgs.glibc}/lib/ld-linux-x86-64.so.2 $out/lib64/ld-linux-x86-64.so.2
 
     # sshd canonical path (devcontainer.json launches /usr/sbin/sshd)

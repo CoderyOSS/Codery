@@ -18,7 +18,16 @@
     },
     "playwright": {
       "type": "local",
-      "command": ["npx", "-y", "@playwright/mcp@latest"]
+      "command": [
+        "npx",
+        "-y",
+        "@playwright/mcp@0.0.30",
+        "--endpoint",
+        "ws://playwright:3000/",
+        "--headless",
+        "--browser",
+        "chromium"
+      ]
     }
   },
   "permission": {

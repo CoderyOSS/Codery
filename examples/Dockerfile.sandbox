@@ -127,6 +127,7 @@ RUN printf '%s\n' \
         'export SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt' \
         'export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt' \
         'export PUB_CACHE=/home/gem/projects/.pub-cache' \
+        'export PLAYWRIGHT_WS_ENDPOINT=ws://playwright:3000/' \
         'export LANG=en_US.UTF-8' \
         'export LC_ALL=en_US.UTF-8' \
         'PS1="\\u@\\h:\\w$ "' \
