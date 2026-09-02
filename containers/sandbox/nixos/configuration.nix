@@ -185,6 +185,11 @@ let
     cp ${repo}/containers/sandbox/agents_file $out/home/gem/AGENTS.md
     mkdir -p $out/home/gem/.config/opencode
     cp ${repo}/opencode.json $out/home/gem/.config/opencode/config.json
+    # Playwright MCP config: connects to the browser server in the dedicated
+    # Playwright container (ws://playwright:3000/) instead of launching
+    # browsers inside this rootfs.
+    cp ${repo}/containers/sandbox/playwright-mcp-config.json \
+      $out/home/gem/.config/opencode/playwright-mcp-config.json
     cp ${repo}/containers/sandbox/tmux.conf $out/home/gem/.tmux.conf
 
     mkdir -p $out/home/gem/.ssh

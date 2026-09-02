@@ -33,6 +33,14 @@ Sandbox (Nix rootfs — dev tools only)      Playwright (mcr.microsoft.com/playw
 | Playwright protocol | `playwright@1.54.1` (run-server argv) | `containers/playwright/service.yml` |
 | Browser image | `mcr.microsoft.com/playwright:v1.54.1-noble` | `containers/playwright/service.yml` |
 
+Mechanism: `@playwright/mcp@0.0.30` connects to the remote browser server via
+its config file `remoteEndpoint` option (`containers/sandbox/
+playwright-mcp-config.json`, baked to
+`/home/gem/.config/opencode/playwright-mcp-config.json`). Note: 0.0.30 does
+NOT support a `--endpoint` CLI flag — `remoteEndpoint` is the supported
+remote-server mechanism at this version, so the MCP *client* runs in the
+sandbox while Chromium itself runs in the Playwright container.
+
 Playwright refuses to run when client and server versions mismatch. All three
 pins must move together — a Playwright upgrade is a deliberate, single change:
 
@@ -46,6 +54,17 @@ pins must move together — a Playwright upgrade is a deliberate, single change:
    `.github/workflows/deploy-playwright.yml` — one commit.
 4. Deploy: `codery-ci deploy playwright vX.Y.Z` (or the Deploy Playwright
    workflow), then deploy the sandbox image (its MCP pin changed).
+
+## Sandboxing note
+
+`playwright-mcp-config.json` sets `chromiumSandbox: false` (Playwright's
+`--no-sandbox` equivalent). Docker's default seccomp profile blocks the user
+namespaces Chromium's sandbox needs, and the Codery Playwright service runs
+with `no-new-privileges` — the browser process would fail to start otherwise.
+This is the standard, documented setting for Chromium in CI containers: the
+container itself is unprivileged, internal-only (no public route), and runs
+no user data. It is a security *flag*, not a library dependency — do not
+confuse it with installing Chromium dependencies into the sandbox.
 
 ## Networking semantics
 

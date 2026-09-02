@@ -51,6 +51,8 @@ Rules:
 - `0.0.30` is the newest MCP release that bundles a *stable* Playwright
   (1.54.1). Its tool list is identical to newer MCP releases
   (`browser_find`, `browser_snapshot`, `browser_drop`, etc. all present).
+  It connects to the remote browser server via the config-file
+  `browser.remoteEndpoint` option (no `--endpoint` CLI flag at this version).
 - If Playwright misbehaves: check client/server version match and the WS
   connection first. **Never** respond by adding more Linux libraries to the
   Sandbox.
@@ -95,7 +97,14 @@ Playwright is pull-only: rollback = revert the pin and redeploy.
 ## Sandbox changes
 
 - `opencode.json` playwright MCP:
-  `["npx","-y","@playwright/mcp@0.0.30","--endpoint","ws://playwright:3000/","--headless","--browser","chromium"]`
+  `["npx","-y","@playwright/mcp@0.0.30","--config","/home/gem/.config/opencode/playwright-mcp-config.json"]`
+  — 0.0.30 has no `--endpoint` flag; its supported remote-server mechanism is
+  the config file `browser.remoteEndpoint`
+  (`containers/sandbox/playwright-mcp-config.json`, baked into the rootfs).
+- `playwright-mcp-config.json`: `remoteEndpoint: ws://playwright:3000/`,
+  `headless: true`, `channel: null` (the MCP default is `channel: chrome`,
+  which is absent in the MS image), `chromiumSandbox: false` (Docker seccomp
+  blocks Chromium's user-namespace sandbox; standard CI-container setting).
 - `containers/sandbox/service.yml`: `env_overrides.PLAYWRIGHT_WS_ENDPOINT:
   ws://playwright:3000/`
 - `examples/Dockerfile.sandbox`: export `PLAYWRIGHT_WS_ENDPOINT` in `.bashrc`

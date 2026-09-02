@@ -22,11 +22,8 @@
         "npx",
         "-y",
         "@playwright/mcp@0.0.30",
-        "--endpoint",
-        "ws://playwright:3000/",
-        "--headless",
-        "--browser",
-        "chromium"
+        "--config",
+        "/home/gem/.config/opencode/playwright-mcp-config.json"
       ]
     }
   },
