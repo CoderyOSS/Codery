@@ -127,6 +127,9 @@ struct AddAppParams {
     env: Option<HashMap<String, String>>,
     #[schemars(description = "If true, Caddy and Nginx will send Cache-Control: no-store and related headers to prevent client caching")]
     no_cache: Option<bool>,
+    /// 'runtime' (default): orchestrator-managed process via s6 bundle.
+    /// 'build': image-baked app — registers routing only, no process management.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1090,7 +1093,7 @@ impl OrchestratorMcp {
             if e.is_empty() { None } else { Some(serde_json::to_string(e).unwrap()) }
         });
 
-        let app = db::AppRecord {
+        let record = db::AppRecord {
             name: p.name.clone(),
             subdomain: p.subdomain.clone(),
             internal_port: p.internal_port,
@@ -1101,40 +1104,59 @@ impl OrchestratorMcp {
             user: "gem".to_string(),
             restart: "always".to_string(),
             no_cache: p.no_cache.unwrap_or(false),
-            source: "runtime".to_string(),
+            source: p.source.clone().unwrap_or_else(|| "runtime".to_string()),
             created_at: String::new(),
         };
 
-        db::insert_app(&conn, &app).map_err(|e| tool_err(e.to_string()))?;
+        let source = p.source.clone().unwrap_or_else(|| "runtime".to_string());
+        if source != "runtime" && source != "build" {
+            return Err(tool_err(format!(
+                "invalid source '{}' — must be 'runtime' or 'build'",
+                source
+            )));
+        }
+
+        db::insert_app(&conn, &record).map_err(|e| tool_err(e.to_string()))?;
         db::sync_s6(&conn).map_err(|e| tool_err(e.to_string()))?;
 
-        container_exec("apps", &["kill", "-HUP", "1"])
-            .await
-            .map_err(|e| tool_err(format!("failed to signal Launchy: {}", e)))?;
+        if source == "runtime" {
+            // Link the freshly rendered bundle into supervision. s6-svlink is
+            // race-free by design: it blocks until s6-supervise is spawned.
+            let bundle = format!("/etc/s6-overlay/apps.d/{}", p.name);
+            container_exec("apps", &["/command/s6-svlink", "/run/service", &bundle])
+                .await
+                .map_err(|e| tool_err(format!("failed to link s6 service: {}", e)))?;
 
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // Wait until the service reports up (s6-svstat -o up => "true").
+            let svc = format!("/run/service/{}", p.name);
+            let mut up = false;
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Ok(out) =
+                    container_exec("apps", &["/command/s6-svstat", "-o", "up", &svc]).await
+                {
+                    if out.trim() == "true" {
+                        up = true;
+                        break;
+                    }
+                }
+            }
+            if !up {
+                return Err(tool_err(format!(
+                    "App '{}' config written and route added, but service did not come up. \
+                     Service output goes to container stdout — inspect with \
+                     get_container_info service='apps'.",
+                    p.name
+                )));
+            }
+        }
 
-        caddy::apply_all().map_err(|e| tool_err(e.to_string()))?;
-        nginx::generate_and_reload()
-            .await
-            .map_err(|e| tool_err(e.to_string()))?;
-
-        let status_output = container_exec("apps", &["cat", "/run/launchy-status.json"])
-            .await
-            .unwrap_or_else(|e| format!("(status read failed: {})", e));
-        let running = if !status_output.starts_with("[exited") && !status_output.starts_with("(") {
-            status_output.contains(&format!("\"{}\"", &p.name))
-                || status_output.contains(&format!("\"name\":\"{}\"", &p.name))
-        } else {
-            false
-        };
-
-        if !running {
-            return Err(tool_err(format!(
-                "App '{}' config written and route added, but app not found in Launchy status. \
-                 Check logs: read_container_file service='apps' path='/var/log/launchy/{}.log'",
-                p.name, p.name
-            )));
+        // Register routes (Caddy + Nginx) — unchanged from before.
+        if let Err(e) = caddy::apply_all() {
+            return Err(tool_err(format!("app added but Caddy reload failed: {}", e)));
+        }
+        if let Err(e) = nginx::generate_and_reload().await {
+            return Err(tool_err(format!("app added but Nginx reload failed: {}", e)));
         }
 
         let response = json!({
@@ -1142,7 +1164,7 @@ impl OrchestratorMcp {
             "subdomain": p.subdomain,
             "internal_port": p.internal_port,
             "directory": p.directory,
-            "no_cache": app.no_cache,
+            "no_cache": record.no_cache,
             "status": "running",
             "guidance": {
                 "what": "App started instantly via Launchy. No container rebuild.",
@@ -1150,7 +1172,7 @@ impl OrchestratorMcp {
                 "to_remove": "remove_app name='{}' — stops process, deletes config, removes route",
                 "to_restart": "restart_app name='{}' — kills process, Launchy respawns it; route and config preserved",
                 "to_check": "get_app_status shows per-app process state",
-                "to_read_logs": "read_container_file service='apps' path='/var/log/launchy/{name}.log'"
+                "to_read_logs": "Service output goes to container stdout — use get_container_info service='apps'"
             }
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
