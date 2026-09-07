@@ -466,37 +466,15 @@ impl OrchestratorMcp {
         &self,
         Parameters(ServiceParam { service }): Parameters<ServiceParam>,
     ) -> Result<CallToolResult, McpError> {
-        let def = ServiceDef::load(&service)
-            .map_err(|e| tool_err(format!("unknown service '{}': {}", service, e)))?;
-
-        let color = state::read_active(&service).unwrap_or_else(|_| "blue".to_string());
-        let container = config::container_name(&service, &color);
-        let sha = state::read_active_sha(&service).ok_or_else(|| {
-            tool_err(format!(
-                "no active SHA recorded for service '{}' — run a full deploy first",
-                service
-            ))
-        })?;
-
-        let docker = bollard::Docker::connect_with_socket_defaults()
-            .map_err(|e| tool_err(format!("failed to connect to Docker: {}", e)))?;
-
-        deploy::remove_container_if_exists(&docker, &container)
+        let info = deploy::recreate_active_container(&service)
             .await
-            .map_err(|e| tool_err(format!("failed to remove container '{}': {}", container, e)))?;
-
-        deploy::start_container(&docker, &def, &sha, &color)
-            .await
-            .map_err(|e| tool_err(format!("failed to start container '{}': {}", container, e)))?;
-
-        caddy::apply_all()
-            .map_err(|e| tool_err(format!("container started but caddy reload failed: {}", e)))?;
+            .map_err(|e| tool_err(format!("recreate failed for '{}': {:#}", service, e)))?;
 
         let response = json!({
-            "service": service,
-            "color": color,
-            "container": container,
-            "sha": sha,
+            "service": info.service,
+            "color": info.color,
+            "container": info.container,
+            "sha": info.sha,
             "guidance": {
                 "what": "Container recreated with current image. Brief downtime occurred.",
                 "to_verify": "get_status shows new state",

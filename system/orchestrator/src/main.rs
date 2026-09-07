@@ -363,6 +363,26 @@ async fn main() -> Result<()> {
             }
             println!("[cancel-preview] {} preview cancelled — active untouched.", service);
         }
+        Some("recreate") => {
+            // Usage: codery-ci recreate <service>
+            //
+            // Recreate the active color container in-place from its current
+            // image: remove + start fresh + reload Caddy. Brief downtime by
+            // design — no blue/green swap, no rollback. Use to pick up volume,
+            // env, or network changes in the service YAML, or to recover a
+            // wedged container. For zero-downtime deploys use `deploy`.
+            let service = args
+                .get(2)
+                .ok_or_else(|| anyhow!("missing service argument"))?;
+
+            let info = deploy::recreate_active_container(service).await?;
+
+            println!(
+                "[recreate] {} container {} (color={}, sha={}) recreated",
+                info.service, info.container, info.color, info.sha
+            );
+            println!("[recreate] Verify with: codery-ci diagnose");
+        }
         Some("mcp-exec") => {
             // Usage: codery-ci mcp-exec <enable|disable|status>
             //
@@ -398,21 +418,58 @@ async fn main() -> Result<()> {
             }
         }
         _ => {
-            eprintln!(
-                "Usage: codery-ci [--version | preflight | deploy <service> <sha> | \
-                 validate <service> <sha> | reload-routes | diagnose [--json] | daemon | \
-                 serve [--port N] | serve-ui [--port N] | serve-tcp-proxy | \
-                 build <service> <tag> [--dockerfile PATH] [--context PATH] | \
-                 deploy-preview <service> <sha> [--port N] | \
-                 cutover <service> [--sha <sha>] | \
-                 cancel-preview <service> | \
-                 mcp-exec <enable|disable|status>]"
-            );
-            eprintln!("\nRun `codery-ci <command> --help` for focused usage on any subcommand.");
-            std::process::exit(1);
+            match args.get(1).map(|s| s.as_str()) {
+                None => {
+                    print_main_help();
+                    // Bare `codery-ci` is a help request, not an error.
+                }
+                Some(unknown) => {
+                    eprintln!("error: unrecognized command '{}'\n", unknown);
+                    print_main_help();
+                    std::process::exit(1);
+                }
+            }
         }
     }
     Ok(())
+}
+
+// ── Main help ────────────────────────────────────────────────────────────────
+
+fn print_main_help() {
+    println!(
+        "\
+codery-ci {} — blue/green container orchestration for Codery
+
+Deploy & preview:
+  deploy <service> <sha>                      Full blue/green deploy: pull, start, health-check, cutover
+  deploy-preview <service> <sha> [--port N]   Start inactive color + preview route; verify before promoting
+  cutover <service> [--sha <sha>]             Promote the inactive color / staged preview to active
+  cancel-preview <service>                    Abort a preview deploy; active container untouched
+  recreate <service>                          Recreate the active container from its image (brief downtime)
+  validate <service> <sha>                    Dry-run deploy preconditions; changes nothing
+
+Build & routes:
+  build <service> <tag> [--dockerfile PATH] [--context PATH]
+                                              docker build with the canonical image tag
+  reload-routes                               Regenerate Caddyfile + Nginx and reload in place
+
+Diagnostics:
+  diagnose [--json]                           Detect state/route/preview mismatches (exit 1 on issues)
+  preflight                                   Health-check supervisord, Tailscale, Caddy admin API
+
+Servers:
+  daemon                                      MCP + deploy UI + TCP proxy in one process
+  serve [--port N]                            MCP server only
+  serve-ui [--port N]                         Deploy-progress UI only
+  serve-tcp-proxy                             Stable SSH port proxy only
+
+MCP exec gate:
+  mcp-exec <enable|disable|status>            Toggle the codery_exec allowlist
+
+Run `codery-ci <command> --help` for detailed usage of any subcommand.",
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 // ── Per-subcommand --help ────────────────────────────────────────────────────
@@ -578,6 +635,24 @@ Example:
 
 Docs: AGENTS.md → \"Preview Deploys\"
 ",
+        "recreate" => "\
+codery-ci recreate <service>
+
+Recreate the active color container in-place from its current image: remove,
+start fresh, reload Caddy. Brief downtime by design — no blue/green swap and
+no rollback. For zero-downtime deploys use `codery-ci deploy`.
+
+Use to pick up volume, env, or network changes from the service YAML without a
+full deploy, or to recover a wedged container.
+
+Arguments:
+  <service>  Service name (sandbox, apps, ...)
+
+Example:
+  codery-ci recreate sandbox
+
+Docs: AGENTS.md → \"Service Declarations\"
+",
         "mcp-exec" => "\
 codery-ci mcp-exec <enable|disable|status>
 
@@ -629,8 +704,8 @@ Run the orchestrator daemon (background coordinator mode).
         _ => {
             eprintln!(
                 "No help for '{}'. Known subcommands: preflight, deploy, validate, \
-                 reload-routes, diagnose, build, deploy-preview, cutover, cancel-preview, \
-                 mcp-exec, serve, serve-ui, serve-tcp-proxy, daemon.",
+                 recreate, reload-routes, diagnose, build, deploy-preview, cutover, \
+                 cancel-preview, mcp-exec, serve, serve-ui, serve-tcp-proxy, daemon.",
                 sub
             );
             return;

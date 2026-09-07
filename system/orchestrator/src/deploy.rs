@@ -629,6 +629,52 @@ pub(crate) async fn remove_container_if_exists(docker: &Docker, name: &str) -> R
     }
 }
 
+/// Result of a successful in-place container recreation.
+#[derive(Debug)]
+pub(crate) struct RecreateInfo {
+    pub service: String,
+    pub color: String,
+    pub container: String,
+    pub sha: String,
+}
+
+/// Recreate the active color container in-place from its image (no blue/green
+/// swap). Removes the container and starts a fresh one from the same SHA, then
+/// reloads Caddy. Brief downtime by design — for zero-downtime deploys use the
+/// full blue/green path instead. Shared by the `recreate` CLI subcommand and
+/// the `restart_service` MCP tool.
+pub(crate) async fn recreate_active_container(service: &str) -> Result<RecreateInfo> {
+    let def = ServiceDef::load(service)?;
+    let color = state::read_active(service).unwrap_or_else(|_| "blue".to_string());
+    let container = config::container_name(service, &color);
+    let sha = state::read_active_sha(service).with_context(|| {
+        format!(
+            "no active SHA recorded for service '{}' — run a full deploy first",
+            service
+        )
+    })?;
+
+    let docker = Docker::connect_with_socket_defaults()
+        .context("failed to connect to Docker")?;
+
+    println!(
+        "[recreate] Removing {} and starting fresh from {}",
+        container,
+        config::image_ref(service, &sha)
+    );
+    remove_container_if_exists(&docker, &container).await?;
+    start_container(&docker, &def, &sha, &color).await?;
+
+    caddy::apply_all().context("container started but Caddy reload failed")?;
+
+    Ok(RecreateInfo {
+        service: service.to_string(),
+        color,
+        container,
+        sha,
+    })
+}
+
 /// Stop a container gracefully. No-op if container does not exist (404) or is already stopped (304).
 /// Does NOT remove the container — caller is responsible for that.
 pub(crate) async fn stop_container(docker: &Docker, name: &str) -> Result<()> {
