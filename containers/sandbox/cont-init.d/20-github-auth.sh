@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/command/with-contenv bash
 set -e
 
 # This script runs as root (so it can read the root-owned PEM).

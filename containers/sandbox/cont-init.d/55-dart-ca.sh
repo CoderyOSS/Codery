@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/command/with-contenv bash
 # Dart's BoringSSL probes a fixed CA path list (ignores SSL_CERT_FILE env):
 # /etc/ssl/certs/ca-certificates.crt is probed; ca-bundle.crt is not.
 # Without this link every dart/pub TLS op fails while curl works.

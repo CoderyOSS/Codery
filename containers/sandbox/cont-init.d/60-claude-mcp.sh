@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/command/with-contenv bash
 set -e
 
 sudo -Hu gem /bin/bash -c "

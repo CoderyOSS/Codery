@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/command/with-contenv bash
 set -e
 USER="gem"
 USER_UID="1000"

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/command/with-contenv bash
 set -e
 USER="gem"
 PROJECTS_DIR="/home/${USER}/projects"

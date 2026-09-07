@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/command/with-contenv bash
 set -e
 
 # Generate SSH host keys if not already present (fast no-op on rebuild)
@@ -21,8 +21,11 @@ else
     echo "[sandbox]   Put your public key in /opt/codery/ssh/authorized_keys on the host"
 fi
 
-# sshd is managed by launchy (devcontainer.json) — not started here.
+# sshd runs as an s6-rc longrun (containers/sandbox/s6-overlay/s6-rc.d/sshd).
 # This script only prepares host keys and authorized_keys.
+
+# sshd privilege-separation runtime dir (s6-overlay symlinks /var/run -> /run)
+mkdir -p /run/sshd
 
 # Pass container environment through sshd to login shells. sshd sanitizes
 # the environment for SSH sessions (compiled-in defaults), which drops

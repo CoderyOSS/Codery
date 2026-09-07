@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/command/with-contenv bash
 set -e
 
 # OpenWiki CLI provider config. Derived from ZAI_API_KEY (already required_env
