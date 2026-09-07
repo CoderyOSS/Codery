@@ -20,6 +20,15 @@ RUN pnpm --filter @open-design/daemon build \
     && pnpm --filter @open-design/web build \
     && pnpm --filter @open-design/daemon deploy --legacy --prod /build/deploy/daemon
 
+# --- s6-overlay download stage (bookworm has tar+xz; the nix-builder may not) ---
+FROM docker.io/library/node:24-bookworm-slim AS s6-dl
+ARG S6_OVERLAY_VERSION=3.2.3.2
+ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp/
+ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz /tmp/
+RUN mkdir -p /s6 \
+ && tar -C /s6 -Jxpf /tmp/s6-overlay-noarch.tar.xz \
+ && tar -C /s6 -Jxpf /tmp/s6-overlay-x86_64.tar.xz
+
 # --- Nix build stage: rootfs + store closure from the flake ---
 FROM docker.io/nixos/nix:latest AS nix-builder
 RUN printf '%s\n' \
@@ -100,7 +109,7 @@ RUN export HOME=/export/rootfs/home/gem \
 RUN printf '#!/bin/sh\nexec node /home/gem/open-design/apps/daemon/bin/od.mjs "$@"\n' \
       > /export/rootfs/usr/local/bin/od && chmod +x /export/rootfs/usr/local/bin/od
 
-# setuid helper: sudo (github-push reads the root-owned PEM; entrypoint
+# setuid helper: sudo (github-push reads the root-owned PEM; cont-init
 # scripts drop to gem via sudo -Hu). Real binary must be copied out of the
 # store: setuid bits don't survive nix. Note: no su — nixpkgs shadow doesn't
 # ship it, and sudo covers every use.
@@ -151,6 +160,9 @@ COPY --from=nix-builder /export/rootfs /
 COPY --from=nix-builder /export/rustup /usr/local/rustup
 COPY --from=nix-builder /export/cargo /usr/local/cargo
 
+# s6-overlay (PID 1 + supervision binaries, static)
+COPY --from=s6-dl /s6 /
+
 # Open Design runtime artifacts (built in od-build stage)
 COPY --from=od-build --chown=1000:1000 /build/deploy/daemon         /home/gem/open-design/apps/daemon
 COPY --from=od-build --chown=1000:1000 /build/apps/web/out          /home/gem/open-design/apps/web/out
@@ -170,7 +182,10 @@ ENV PATH="/home/gem/.local/bin:/home/gem/.npm-global/bin:/usr/local/cargo/bin:/u
     LOCALE_ARCHIVE=/usr/lib/locale/locale-archive \
     SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt \
     NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt \
-    PUB_CACHE=/home/gem/projects/.pub-cache
+    PUB_CACHE=/home/gem/projects/.pub-cache \
+    S6_BEHAVIOUR_IF_STAGE2_FAILS=1 \
+    S6_KILL_GRACETIME=250 \
+    S6_KILL_FINISH_MAXTIME=1000
 
 WORKDIR /home/gem/projects
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/init"]
