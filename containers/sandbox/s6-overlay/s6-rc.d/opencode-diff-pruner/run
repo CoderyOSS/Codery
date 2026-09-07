@@ -1,0 +1,5 @@
+#!/bin/bash
+# opencode-diff-pruner — prunes oversized stale session_diff files (hourly).
+. /usr/local/bin/s6-import-container-env
+export HOME=/home/gem
+exec /command/s6-setuidgid gem /usr/local/bin/prune-opencode-diffs

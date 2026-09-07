@@ -1,0 +1,6 @@
+#!/bin/bash
+# opencode serve — the AI coding assistant (OpenCode HTTP API/UI on :3000).
+. /usr/local/bin/s6-import-container-env
+export HOME=/home/gem
+cd /home/gem/projects
+exec /command/s6-setuidgid gem opencode serve --hostname 0.0.0.0 --port 3000

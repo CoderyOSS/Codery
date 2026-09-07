@@ -1,0 +1,4 @@
+#!/bin/bash
+# sshd — interactive shell access (host TCP proxy → :2222 → active color).
+# Host keys + authorized_keys are prepared by cont-init 40-start-sshd.sh.
+exec /usr/sbin/sshd -D -e

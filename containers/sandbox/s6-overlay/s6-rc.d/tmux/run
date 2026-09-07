@@ -1,0 +1,6 @@
+#!/bin/bash
+# tmux — persistent main session for interactive/agent shells.
+. /usr/local/bin/s6-import-container-env
+export HOME=/home/gem
+cd /home/gem/projects
+exec /command/s6-setuidgid gem bash -c 'tmux new-session -d -s main 2>/dev/null || true; exec sleep infinity'

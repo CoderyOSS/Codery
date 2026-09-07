@@ -1,0 +1,6 @@
+#!/bin/bash
+# opencode-serve-guard — kills a bloated or wedged opencode serve so the
+# supervisor respawns a fresh process.
+. /usr/local/bin/s6-import-container-env
+export HOME=/home/gem
+exec /command/s6-setuidgid gem /usr/local/bin/opencode-serve-guard
