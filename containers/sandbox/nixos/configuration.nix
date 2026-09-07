@@ -2,8 +2,9 @@
 #
 # toolEnv: every runtime tool, one declarative list. Add a package here and
 #          rebuild — no more curl|bash chains in the Dockerfile.
-# rootfs:  FHS skeleton (/bin, /etc, /usr/sbin/sshd, entrypoint, launchy,
-#          home skeleton) as symlinks into the nix store closure.
+# rootfs:  FHS skeleton (/bin, /etc, /usr/sbin/sshd, cont-init hooks,
+#          s6-overlay service dirs, home skeleton) as symlinks into the nix
+#          store closure.
 { pkgs, repo }:
 
 let
@@ -69,7 +70,8 @@ let
     mkdir -p $out/lib64
     mkdir -p $out/usr/{bin,sbin,lib/locale}
     mkdir -p $out/usr/local/bin
-    mkdir -p $out/var/run/sshd
+    mkdir -p $out/var
+    ln -sfn /run $out/var/run
     mkdir -p $out/var/empty
     mkdir -p $out/home/gem
     chmod 1777 $out/tmp
@@ -90,7 +92,7 @@ let
     # Do not extend this rootfs with Chromium's shared-library dependencies.
     ln -sf ${pkgs.glibc}/lib/ld-linux-x86-64.so.2 $out/lib64/ld-linux-x86-64.so.2
 
-    # sshd canonical path (devcontainer.json launches /usr/sbin/sshd)
+    # sshd canonical path (s6-rc.d/sshd runs /usr/sbin/sshd)
     ln -sf ${toolEnv}/bin/sshd $out/usr/sbin/sshd
 
     # ── /etc ──────────────────────────────────────────────────────────
@@ -129,10 +131,6 @@ let
     # Populated at image build time (network needed for ssh-keyscan)
     touch $out/etc/ssh/ssh_known_hosts
 
-    # Launchy service definitions (rendered by 15-render-domain.sh, which
-    # edits /etc/launchy.json — entrypoint execs launchy with that path)
-    cp ${repo}/.devcontainer/devcontainer.json $out/etc/launchy.json
-
     # sudo: only github-push, passwordless (reads root-owned PEM)
     mkdir -p $out/etc/sudoers.d
     cat > $out/etc/sudoers <<'EOF'
@@ -161,25 +159,23 @@ let
     ln -s ${pkgs.glibcLocales}/lib/locale/locale-archive \
       $out/usr/lib/locale/locale-archive
 
-    # ── Entrypoint + helper scripts ───────────────────────────────────
-    cp -r ${repo}/containers/sandbox/docker-entrypoint.d $out/docker-entrypoint.d
-    chmod +x $out/docker-entrypoint.d/*.sh
-    cp ${repo}/containers/sandbox/scripts/entrypoint.sh $out/entrypoint.sh
-    chmod +x $out/entrypoint.sh
-
-    # Launchy PID 1 (static binary)
-    cp ${repo}/containers/sandbox/bin/launchy $out/sbin/launchy
-    chmod +x $out/sbin/launchy
+    # ── s6-overlay: cont-init hooks + service definitions ────────────
+    cp -r ${repo}/containers/sandbox/cont-init.d $out/etc/cont-init.d
+    chmod +x $out/etc/cont-init.d/*.sh
+    cp -r ${repo}/containers/sandbox/s6-overlay $out/etc/s6-overlay
+    chmod +x $out/etc/s6-overlay/s6-rc.d/*/run
 
     cp ${repo}/containers/sandbox/scripts/github-app-token.sh $out/usr/local/bin/github-app-token
     cp ${repo}/containers/sandbox/scripts/github-push.sh $out/usr/local/bin/github-push
     cp ${repo}/containers/sandbox/scripts/git-credential-codery.sh $out/usr/local/bin/git-credential-codery
     cp ${repo}/containers/sandbox/scripts/prune-opencode-diffs.sh $out/usr/local/bin/prune-opencode-diffs
     cp ${repo}/containers/sandbox/scripts/opencode-serve-guard.sh $out/usr/local/bin/opencode-serve-guard
+    cp ${repo}/containers/sandbox/scripts/s6-import-container-env.sh $out/usr/local/bin/s6-import-container-env
     cp ${repo}/containers/sandbox/scripts/github-app-permissions-mcp.ts $out/usr/local/bin/github-app-permissions-mcp.ts
     chmod +x $out/usr/local/bin/github-app-token $out/usr/local/bin/github-push \
       $out/usr/local/bin/git-credential-codery \
-      $out/usr/local/bin/prune-opencode-diffs $out/usr/local/bin/opencode-serve-guard
+      $out/usr/local/bin/prune-opencode-diffs $out/usr/local/bin/opencode-serve-guard \
+      $out/usr/local/bin/s6-import-container-env
 
     # ── Home skeleton (ownership fixed to 1000:1000 in Dockerfile) ────
     cp ${repo}/containers/sandbox/agents_file $out/home/gem/AGENTS.md

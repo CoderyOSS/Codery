@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
-    # Repo content (scripts, configs, launchy binary, SSH keys). The Docker
+    # Repo content (scripts, configs, s6-overlay service dirs, SSH keys). The Docker
     # build context is the repo root; this input makes it visible to the flake.
     # NOTE: .git must be excluded from the Docker context (.dockerignore),
     # otherwise nix treats this as a git repo and uncommitted files vanish.
