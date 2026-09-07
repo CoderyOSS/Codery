@@ -210,16 +210,16 @@ Codery MCP server pre-configured in `opencode.json`. Use `codery.*` tools direct
 | `rollback` | Deploy previous cached image via full blue/green deploy |
 | `reload_routes` | Regenerate Caddyfile from all service YAMLs + route JSON files, reload Caddy in-place |
 | `run_preflight` | Check supervisord, Tailscale, and Caddy admin API health |
-| `add_app` | Hot-add an app: Launchy config + route, starts instantly |
-| `remove_app` | Hot-remove an app: stops process, deletes config and route |
-| `restart_app` | Restart an app process (Launchy respawns) — route and config preserved |
+| `add_app` | Hot-add an app: renders an s6 bundle, links it into the running container, registers the route |
+| `remove_app` | Hot-remove an app: stops process, unlinks the bundle, deletes config and route |
+| `restart_app` | Restart an app process (`s6-svc -t` — s6 respawns) — route and config preserved |
 | `list_apps` | List all apps registered in the apps container |
-| `get_app_status` | Per-app process state from Launchy (pid, uptime) |
+| `get_app_status` | Per-app process state from s6 (`s6-svstat`: up, pid, uptime) |
 
 ### Restarting an app
 
 To restart an app (pick up code/env changes), use `restart_app name='myapp'`.
-It kills the process and Launchy respawns it — the route and config stay intact.
+It kills the process and s6 respawns it — the route and config stay intact.
 
 **NEVER remove_app + add_app to restart.** That drops and recreates the route;
 a wrong re-add breaks the URL.
@@ -227,16 +227,16 @@ a wrong re-add breaks the URL.
 ### When to use reload_routes vs full redeploy
 
 - Route JSON change only (new app subdomain) -> `reload_routes`
-- Container code, Dockerfile, supervisor config, or service YAML change -> **local build** (`codery_exec`: build → deploy-preview → cutover). Pipeline (`gh workflow run`) only as fallback.
+- Container code, Dockerfile, service bundle, or service YAML change -> **local build** (`codery_exec`: build → deploy-preview → cutover). Pipeline (`gh workflow run`) only as fallback.
 
 ---
 
 ## Apps Container
 
 **Apps container** (Codery repo -> `containers/apps/Dockerfile`) runs:
-- Bun/Node project servers
+- Bun/Node project servers (each supervised by an s6-overlay longrun)
 - SSH agent
-- Supervisor managing per-project processes
+- Nginx (internal reverse proxy by Host header)
 
 Project servers listen on ports **8000-9000** inside container (mapped to same range on host for active color). Caddy routes subdomains to these ports.
 
@@ -258,50 +258,45 @@ ssh gem@apps
 
 Useful commands:
 ```bash
-ssh gem@apps supervisorctl -c /etc/supervisor/projects.conf status
-ssh gem@apps tail -f /var/log/supervisor/myapp.log
-ssh gem@apps "ps aux | grep bun"
+ssh gem@apps /command/s6-svstat -o up,pid,updownfor /run/s6-rc/s6-rc.d/ 2>/dev/null || true
+ssh gem@apps docker exec codery-apps-blue /command/s6-svstat -o up,pid /run/service/design
+ssh gem@apps "ps aux | grep bun" 2>/dev/null || ssh gem@apps 'for p in /proc/[0-9]*/cmdline; do tr "\0" " " < $p; echo; done | grep bun'
 ```
 
 ---
 
 ## Adding a New App
 
-Declare apps in `.devcontainer/devcontainer.json` under `customizations.codery.apps`:
+**Runtime (instant, preferred):** `add_app` MCP tool:
 
-```json
-{
-  "customizations": {
-    "codery": {
-      "apps": [
-        {
-          "name": "myapp",
-          "subdomain": "myapp",
-          "internal_port": 3001,
-          "command": "bun run start",
-          "directory": "/home/gem/projects/myapp",
-          "env": {}
-        }
-      ]
-    }
-  }
-}
+```
+add_app name='myapp' subdomain='myapp' internal_port=3001 command='bun run start' directory='/home/gem/projects/myapp'
 ```
 
-Push to `main`, then build + deploy locally (`codery_exec`: build → deploy-preview → ask user to `cutover`, ~3-4 min) or via `Build Apps` pipeline (~8 min, fallback):
-- Bakes supervisord conf into image (starts the process)
+Pre-flight checks: directory must exist, port must be free, name must be unique. The app starts immediately — no container rebuild. Runtime apps persist across container restarts (SQLite on host → s6 bundle re-linked at boot).
+
+**Build-time (bundle in repo):** create `containers/apps/s6-overlay/s6-rc.d/<name>/{type,run}` (see existing bundles for the pattern) + an empty `user-bundles.d/user/contents.d/<name>` file. Add the route to `proxy/apps-routes.json`. Push to `main`, then build + deploy (`codery_exec`: build → deploy-preview → ask user to `cutover`, ~3-4 min) or via `Build Apps` pipeline (~8 min, fallback):
+- Bakes the s6 bundle into the image (s6-rc starts it at boot)
 - Syncs `apps-routes.json` to VPS (Caddy subdomain)
 - Orchestrator reloads Nginx (internal routing to port 3001)
 - App is live at `myapp.{DOMAIN_NAME}`
 
 **Fields:**
-- `name` — supervisord program name (no spaces)
+- `name` — s6 service / SQLite app name (no spaces)
 - `subdomain` — DNS subdomain prefix (or full FQDN)
 - `internal_port` — port the app process listens on (any free port inside the container)
 - `command` — start command run from `directory`
 - `env` — extra env vars (merged on top of `.env`)
 
 **Route-only change (no rebuild):** edit `proxy/apps-routes.json` directly → push → Sync Routes (~30s).
+
+### App lifecycle tiers (apps container, s6-overlay)
+
+1. **Build-time** — bundle checked into `containers/apps/s6-overlay/s6-rc.d/`, baked into the image; SQLite row `source='build'` provides routing only.
+2. **Previous session** — SQLite `source='runtime'` rows are rendered to `/opt/codery/apps-s6.d` and re-linked at every container boot.
+3. **Current session** — `add_app` renders + links the bundle into the live container instantly (`s6-svlink`); `remove_app` unlinks it; `restart_app` does `s6-svc -t`.
+
+`/opt/codery/codery.db` (`apps` table) is the host-side source of truth for tiers 2-3.
 
 ---
 

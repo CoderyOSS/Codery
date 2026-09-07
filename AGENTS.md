@@ -54,8 +54,9 @@ Playwright below).
 - `opencode serve` on container port **3000** — the AI coding assistant (accessible externally)
 - `sshd` on container port **22** — SSH access from host (stable proxy port 2222 via CoderyCI TCP proxy)
 
-**User:** Starts as root (entrypoint reads root-owned PEM for GitHub auth), then `launchy`
-drops to `gem` (uid 1000) for all processes.
+**User:** Starts as root (cont-init hooks run as root — GitHub auth reads the
+root-owned PEM), then s6-overlay runs the services, each dropping to `gem`
+(uid 1000) via `s6-setuidgid`.
 
 **Key mounts:**
 - `/opt/codery/projects` → `/home/gem/projects` — shared project files
@@ -79,9 +80,13 @@ production build path.
 
 **Purpose:** Runs the actual web applications for hosted projects.
 
-**Runs:** Any number of Bun/Node/etc. servers, each managed by a supervisord program config.
+**Runs:** Any number of Bun/Node/etc. servers, each supervised by an s6-overlay
+(s6-rc) longrun service. Supervision layout is described in
+[Apps container — 3-tier app lifecycle](#apps-container--3-tier-app-lifecycle).
 
-**User:** `gem` (uid 1000) — same as sandbox, owns the shared projects volume. supervisord runs as root and drops to `gem` for app processes.
+**User:** `gem` (uid 1000) — same as sandbox, owns the shared projects volume. s6
+services run as root where needed (nginx, sshd) and drop to `gem` via
+`s6-setuidgid` in each app's `run` script.
 
 **Also runs:**
 - sshd on port 22 — accepts connections from sandbox only (Docker network boundary)
@@ -267,12 +272,38 @@ before committing.
 
 ---
 
+### Apps container — 3-tier app lifecycle
+
+Apps run in the apps container under **s6-overlay** (s6-rc). Three installation
+tiers exist; `/opt/codery/codery.db` (`apps` table) is the host-side source of
+truth for all of them, with a `source` column (`build` | `runtime`) separating
+tier 1 from tiers 2/3:
+
+| Tier | What | How it runs |
+|------|------|-------------|
+| 1. Build-time | Bundles checked into `containers/apps/s6-overlay/s6-rc.d/<name>/` (+ `user-bundles.d/user/contents.d/<name>` link). SQLite row marked `source='build'` supplies **routing only**. | Baked into the image; s6-overlay compiles its rc database at boot → auto-starts |
+| 2. Previous session (persists) | SQLite row `source='runtime'` → `codery-ci sync_s6` renders an s6 bundle into `/opt/codery/apps-s6.d` (bind-mounted to `/etc/s6-overlay/apps.d`) | Boot-time `runtime-apps` oneshot in the image `s6-svlink`s every bundle there |
+| 3. Current session (hot-add) | `add_app` MCP: SQLite insert → `sync_s6` render → `docker exec s6-svlink` into the live rc db → poll `s6-svstat` until up | Removal: `remove_app` (`s6-svunlink`, refuses `build` rows). Restart: `restart_app` (`s6-svc -t`, escalate `-k`) |
+
+Bundle format (both baked and rendered): `type` = `longrun`, `run` script
+(sets env, `cd`s, `exec /command/s6-setuidgid <user> <cmd>`),
+`timeout-kill` = `10000` (SIGTERM → 10s → SIGKILL parity), `dependencies.d/base`;
+a `finish` script exists only for `restart: on_failure|never` (absent = s6
+default respawn = `always`).
+
+Routing (subdomain → port) is independent of process supervision:
+`proxy/apps-routes.json` → Caddy/Nginx — reload with `reload-routes`.
+
 ### Adding a new web app to the apps container
 
-Declare in `.devcontainer/devcontainer.json` (`customizations.codery.apps` array). Push, then run `Build Apps` manually:
-1. CI runs `gen-supervisor-conf.py` → supervisord conf baked into image (manages the process)
-2. CI runs `gen-apps-routes.py` → `proxy/apps-routes.json` synced to VPS
-3. CoderyCI deploys new apps image; `reload-routes` generates Nginx config + reloads
+**Build-time (bundle in repo):** create `containers/apps/s6-overlay/s6-rc.d/<name>/{type,run}`
+(see existing bundles for the pattern) + an empty
+`user-bundles.d/user/contents.d/<name>` link file. Add the route to
+`proxy/apps-routes.json`. Push, then run `Build Apps` manually — the image
+bakes the bundles; CoderyCI deploys and `reload-routes` regenerates Nginx.
+
+**Runtime (instant, no rebuild):** `add_app` MCP tool — renders the bundle,
+links it into the running container, and registers the route in one step.
 
 **Route-only change** (app process already running, just updating subdomain/port): edit `proxy/apps-routes.json` directly → push → run `Sync Routes` workflow manually (~30s, no image rebuild), or call `reload_routes` via MCP (no push needed).
 
@@ -286,7 +317,9 @@ Connection chain: `client → :2222 (codery-ci TCP proxy) → :10xx2 (docker) �
 
 Prerequisite: `ufw allow 2222/tcp` on the host. Port 2222 is not in the default `cloud-init.yaml` firewall rules.
 
-sshd runs as a launchy-managed service (`devcontainer.json`, `user: "root"`, `restart: "always"`, `priority: 10`, flags `-D -e`). The entrypoint script `40-start-sshd.sh` only prepares host keys and authorized_keys — it does not start sshd.
+sshd runs as an s6-rc longrun (`containers/sandbox/s6-overlay/s6-rc.d/sshd`,
+run as root with flags `-D -e`). The cont-init script `40-start-sshd.sh` only
+prepares host keys and authorized_keys — it does not start sshd.
 
 **Sandbox → apps:** `ssh gem@apps` from inside the sandbox — no flags, no credentials needed. Keypair baked into both images at build time (no runtime generation). Works via Docker network alias `apps` on `codery-net`. Security: only reachable from inside the Docker network.
 
@@ -471,7 +504,7 @@ pipelines.** The pipelines are the fallback path, not the default.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| Build Sandbox (`deploy-sandbox.yml`) | `workflow_dispatch` | Builds image, deploys via CoderyCI. Relevant paths: `examples/Dockerfile.sandbox`, `.devcontainer/devcontainer.json`, `containers/sandbox/**`, `opencode.json` |
+| Build Sandbox (`deploy-sandbox.yml`) | `workflow_dispatch` | Builds image, deploys via CoderyCI. Relevant paths: `examples/Dockerfile.sandbox`, `containers/sandbox/s6-overlay/**`, `containers/sandbox/cont-init.d/**`, `opencode.json` |
 | Build Apps (`deploy-apps.yml`) | `workflow_dispatch` | Builds image, deploys via CoderyCI |
 | Deploy Playwright (`deploy-playwright.yml`) | `workflow_dispatch` | Syncs service YAML, deploys pinned MS image from MCR (no build — pull-only) |
 | Sync Routes | `workflow_dispatch` | Syncs route file, runs `codery-ci reload-routes` (~30s, no container rebuild) |
@@ -537,22 +570,27 @@ containers/
       flake.nix            # Rootfs + store closure builder
     service.yml            # Declarative config for the sandbox container
     agents_file            # Copied INTO the sandbox as AGENTS.md — OpenCode reads this
-    docker-entrypoint.d/
+    s6-overlay/
+      s6-rc.d/             # Service bundles: sshd, opencode, opencode-diff-pruner,
+                           # opencode-serve-guard, tmux, opendesign
+      user-bundles.d/      # contents.d links — what the user bundle starts
+    cont-init.d/
       10-fix-home.sh       # Fixes /home/gem ownership
-      15-render-domain.sh  # Renders domain into config
+      15-render-domain.sh  # Renders domain into /run/env/opendesign.env
       20-github-auth.sh    # Authenticates gh CLI via GitHub App
       25-openrouter-auth.sh# Configures OpenRouter API key
       30-init-projects.sh  # Ensures /home/gem/projects exists
-      40-start-sshd.sh     # Prepares sshd host keys and authorized_keys (sshd managed by launchy)
+      40-start-sshd.sh     # Prepares sshd host keys and authorized_keys (sshd managed by s6-rc)
+      45-opencode-assert.sh# Fails boot loudly if the opencode binary is broken
+      55-dart-ca.sh        # Dart TLS CA setup
       60-claude-mcp.sh     # Installs Claude MCP servers
     scripts/
-      entrypoint.sh        # Runs entrypoint.d/ scripts, then exec launchy
+      s6-import-container-env.sh # Sources docker env into s6 run scripts
+      opencode-serve-guard.sh    # RSS + port-liveness watchdog for opencode serve
       github-app-token.sh  # Generates a GitHub App installation token
       github-push.sh       # Wraps git push with App auth (works for branches AND tags)
     ssh/
       sandbox-to-apps      # Static private key for sandbox→apps SSH (baked into image)
-    bin/
-      launchy              # Process supervisor (replaces supervisord in sandbox)
 
   playwright/
     service.yml            # Pinned MS Playwright image (pull-only, no Dockerfile)
@@ -560,12 +598,10 @@ containers/
   apps/
     Dockerfile              # Apps image (project web servers)
     service.yml             # Declarative config for the apps container
-    supervisor/
-      supervisord.conf      # Main supervisord (runs as root)
-      projects.conf         # Secondary supervisord for project servers
-      conf.d/               # Per-project supervisor configs go here
+    s6-overlay/
+      s6-rc.d/              # Service bundles (nginx, sshd, ssh-agent + baked apps)
+      user-bundles.d/       # contents.d links — what the user bundle starts
     scripts/
-      entrypoint.sh
       healthcheck.sh        # Used by Docker HEALTHCHECK
       ssh-agent-add-keys.sh
     ssh/
