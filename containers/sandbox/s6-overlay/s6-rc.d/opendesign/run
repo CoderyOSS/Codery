@@ -3,13 +3,9 @@
 # /run/env/opendesign.env (rendered at boot by cont-init 15-render-domain.sh,
 # which substitutes DOMAIN_NAME) — skip those keys when importing the
 # container env so the rendered file wins.
-{
-  echo "[s6dbg] $(date -Iseconds) opendesign run start (uid=$(id -u))"
-  export S6_IMPORT_SKIP="NODE_ENV NODE_OPTIONS OD_BIND_HOST OD_PORT OD_DISABLE_API_AUTH OD_ALLOWED_ORIGINS"
-  . /usr/local/bin/s6-import-container-env
-  . /run/env/opendesign.env || echo "[s6dbg] opendesign.env missing: $?"
-  export HOME=/home/gem
-  cd /home/gem/open-design || echo "[s6dbg] cd failed: $?"
-  echo "[s6dbg] node=$(command -v node || echo MISSING)"
-  exec /command/s6-setuidgid gem node /home/gem/open-design/apps/daemon/dist/cli.js --no-open
-} &>> /home/gem/projects/.s6-dbg-opendesign.log
+export S6_IMPORT_SKIP="NODE_ENV NODE_OPTIONS OD_BIND_HOST OD_PORT OD_DISABLE_API_AUTH OD_ALLOWED_ORIGINS"
+. /usr/local/bin/s6-import-container-env
+. /run/env/opendesign.env
+export HOME=/home/gem
+cd /home/gem/open-design
+exec /command/s6-setuidgid gem node /home/gem/open-design/apps/daemon/dist/cli.js --no-open

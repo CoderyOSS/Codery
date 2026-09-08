@@ -1,11 +1,6 @@
 #!/bin/bash
 # opencode serve — the AI coding assistant (OpenCode HTTP API/UI on :3000).
-{
-  echo "[s6dbg] $(date -Iseconds) opencode run start (uid=$(id -u) gid=$(id -g))"
-  . /usr/local/bin/s6-import-container-env
-  export HOME=/home/gem
-  cd /home/gem/projects || echo "[s6dbg] cd failed: $?"
-  echo "[s6dbg] PATH=$PATH"
-  echo "[s6dbg] opencode=$(command -v opencode || echo MISSING)"
-  exec /command/s6-setuidgid gem opencode serve --hostname 0.0.0.0 --port 3000
-} &>> /home/gem/projects/.s6-dbg-opencode.log
+. /usr/local/bin/s6-import-container-env
+export HOME=/home/gem
+cd /home/gem/projects
+exec /command/s6-setuidgid gem opencode serve --hostname 0.0.0.0 --port 3000

@@ -1,5 +1,9 @@
 #!/command/with-contenv bash
 set -e
+# BuildKit COPY does not reliably preserve the sticky bit on /tmp (the old
+# entrypoint.sh carried this same workaround). Without it, gem-user services
+# crash on mkdir /tmp/* (opencode, opendesign uploads).
+chmod 1777 /tmp
 USER="gem"
 USER_UID="1000"
 USER_GID="1000"
