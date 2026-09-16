@@ -12,4 +12,7 @@ set -a
 set +a
 export HOME=/home/gem
 cd /home/gem/open-design
+# Protected from host OOM, but less than opencode — the daemon is expendable
+# next to a live session.
+echo -600 > /proc/self/oom_score_adj 2>/dev/null || true
 exec /command/s6-setuidgid gem node /home/gem/open-design/apps/daemon/dist/cli.js --no-open

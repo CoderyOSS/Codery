@@ -61,6 +61,12 @@ env_overrides:
   # requests so langchain's stream aggregator stays happy. Inert for non-Z.ai
   # traffic (the patch inspects URL + body shape before mutating).
   NODE_OPTIONS: --require /home/gem/bin/zai-patch.js
+  # opencode-serve-guard leak backstop: SIGTERM opencode when RSS crosses
+  # this (s6 respawns in seconds; history survives). Lowered from the 1.5 GiB
+  # script default so the guard fires BEFORE host memory pressure builds —
+  # the host has no swap and docker builds + opencode peaks were colliding
+  # into global OOM kills (Sep 16: 13 kills in one evening).
+  OPENCORE_SERVE_KILL_KB: "1200000"
 
 required_env:
   - GHCR_USERNAME

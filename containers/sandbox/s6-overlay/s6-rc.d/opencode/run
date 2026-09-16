@@ -3,4 +3,8 @@
 . /usr/local/bin/s6-import-container-env
 export HOME=/home/gem
 cd /home/gem/projects
+# Protect from host OOM-killer: the kernel should kill build processes, not
+# the user's live coding session. Children inherit this score. (Must run as
+# root — before setuidgid — since lowering the score needs privileges.)
+echo -800 > /proc/self/oom_score_adj 2>/dev/null || true
 exec /command/s6-setuidgid gem opencode serve --hostname 0.0.0.0 --port 3000
