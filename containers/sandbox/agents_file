@@ -28,6 +28,19 @@ Host runs Caddy, Tailscale, supervisord. Shares host with **apps container** ser
 - Cannot access Docker socket or start/stop containers
 - Route and infrastructure changes go through Codery repo (push to `main`)
 
+### Container hygiene (hard-won rules)
+- **Never run `opencode upgrade`, `npm install -g`, or any other command that
+  touches `/home/gem/.npm-global` inside a running container.** Twice now a
+  half-finished in-container upgrade broke the opencode symlink and the
+  supervisor silently failed to respawn it (outages Sep 7 and Sep 15).
+  Upgrades happen by rebuilding the image — never in place.
+- If you exec into the container from the host, always use
+  `docker exec -it -u gem <container> bash`. A root exec session gets
+  `HOME=/root`, so auth.json (`~/.local/share/opencode/auth.json`) and
+  `~/.config/opencode` are invisible — providers appear missing. Provider
+  credentials live in those two paths (both persistent mounts) plus container
+  env (`ANTHROPIC_API_KEY`, `ZAI_API_KEY`, …).
+
 ---
 
 ## Flutter / Dart
