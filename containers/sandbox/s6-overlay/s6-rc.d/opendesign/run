@@ -4,8 +4,12 @@
 # which substitutes DOMAIN_NAME) — skip those keys when importing the
 # container env so the rendered file wins.
 export S6_IMPORT_SKIP="NODE_ENV NODE_OPTIONS OD_BIND_HOST OD_PORT OD_DISABLE_API_AUTH OD_ALLOWED_ORIGINS"
+# set -a: sourced vars must be EXPORTED — without this the daemon sees no
+# OD_BIND_HOST and silently binds 127.0.0.1:7456 (Caddy 502).
+set -a
 . /usr/local/bin/s6-import-container-env
 . /run/env/opendesign.env
+set +a
 export HOME=/home/gem
 cd /home/gem/open-design
 exec /command/s6-setuidgid gem node /home/gem/open-design/apps/daemon/dist/cli.js --no-open
