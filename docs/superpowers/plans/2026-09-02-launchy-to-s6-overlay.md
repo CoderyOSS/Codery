@@ -1,5 +1,12 @@
 # Launchy → s6-overlay Migration Implementation Plan
 
+> **STATUS: COMPLETE (2026-09-16).** All tasks implemented and verified live:
+> sandbox runs s6 (`sandbox-s6-migration`, blue), apps run s6
+> (`apps-s6-restore-oneshot`, green) with the `runtime-apps` restore oneshot,
+> codery-ci v0.13.0 released and deployed (s6 MCP tools + `set-app-source`),
+> e2e add/restart/remove verified. Checkbox state below was not maintained
+> during execution — read this banner, not the boxes.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove Launchy entirely and put every Codery container on s6-overlay, with s6 providing a full equivalent for every Launchy API the orchestrator consumes.
