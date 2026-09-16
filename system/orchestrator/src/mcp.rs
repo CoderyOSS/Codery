@@ -106,7 +106,7 @@ struct PortParam {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct AddAppParams {
     #[schemars(
-        description = "Unique app name — used as Launchy service name and config filename (no spaces, slashes, or dots)"
+        description = "Unique app name — used as s6 service name and bundle directory name (no spaces, slashes, or dots)"
     )]
     name: String,
     #[schemars(
@@ -208,6 +208,16 @@ async fn container_exec(service: &str, cmd: &[&str]) -> Result<String, String> {
     let mut args = vec!["exec", container.as_str()];
     args.extend_from_slice(cmd);
     shell_output("docker", &args).await
+}
+
+/// Read per-service status from an s6-based container. Err if the container
+/// isn't s6-based (no /command/s6-svstat or /run/service).
+async fn svc_stats(service: &str) -> Result<Vec<crate::s6::SvcStat>, String> {
+    let out = container_exec(service, &["bash", "-c", crate::s6::SVSTAT_BATCH_CMD]).await?;
+    if out.starts_with("[exited") {
+        return Err(format!("s6 status read failed: {}", out));
+    }
+    Ok(crate::s6::parse_svstat_batch(&out))
 }
 
 fn tool_ok(s: impl Into<String>) -> Result<CallToolResult, McpError> {
@@ -580,7 +590,7 @@ impl OrchestratorMcp {
             "logs": log_lines,
             "guidance": {
                 "next_steps": "If exit_code != 0 or running=false, check logs in 'logs' field",
-                "app_logs": "For app logs: read_container_file service='apps' path='/var/log/launchy/{name}.log'",
+                "app_logs": "App logs go to container stdout — use get_container_info service='apps'",
                 "to_restart": "restart_service service='apps' recreates container (brief downtime)"
             }
         });
@@ -871,31 +881,40 @@ impl OrchestratorMcp {
 
     // ── Diagnostic tools ──────────────────────────────────────────────────────
 
-    /// Read Launchy status file or run `supervisorctl status` inside a container.
+    /// Read s6 service status or run `supervisorctl status` inside a container.
     #[tool(
-        description = "Get process status inside a container. For apps: reads Launchy status file. \
-                        For other services: falls back to supervisorctl. Shows process state and uptime."
+        description = "Get process status inside a container. For s6-based containers: per-service \
+                        svstat output. For other services: falls back to supervisorctl. Shows process state and uptime."
     )]
     async fn get_supervisor_status(
         &self,
         Parameters(ServiceParam { service }): Parameters<ServiceParam>,
     ) -> Result<CallToolResult, McpError> {
-        if service == "apps" {
-            let output = container_exec(&service, &["cat", "/run/launchy-status.json"])
-                .await
-                .map_err(|e| tool_err(e))?;
-            tool_ok(format!(
-                "{}\n\n---\nGuidance: Launchy status for apps container. Use get_app_status for structured output.",
-                output
-            ))
-        } else {
-            let output = container_exec(&service, &["supervisorctl", "status"])
-                .await
-                .map_err(|e| tool_err(e))?;
-            tool_ok(format!(
-                "{}\n\n---\nGuidance: Process status inside {} container.",
-                output, service
-            ))
+        match svc_stats(&service).await {
+            Ok(stats) => {
+                let response = serde_json::json!({
+                    "service": service,
+                    "supervisor": "s6-overlay",
+                    "services": stats,
+                });
+                let json =
+                    serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
+                tool_ok(json)
+            }
+            Err(_) => {
+                // Not an s6 container (e.g. playwright).
+                let output = container_exec(&service, &["supervisorctl", "status"])
+                    .await
+                    .map_err(|e| tool_err(format!("failed to get supervisor status: {}", e)))?;
+                let response = serde_json::json!({
+                    "service": service,
+                    "supervisor": "supervisord-or-none",
+                    "raw": output,
+                });
+                let json =
+                    serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
+                tool_ok(json)
+            }
         }
     }
 
@@ -1022,11 +1041,11 @@ impl OrchestratorMcp {
     }
 
     /// Register a new app in the apps container without rebuilding the image.
-    /// Writes a Launchy JSON config, signals Launchy to start the process,
+    /// Renders an s6 bundle, links it into s6 supervision, registers the route,
     /// adds a Caddy+Nginx route, then reloads both so the app is immediately live.
     /// The app's code must already exist at `directory` in the shared volume.
     #[tool(
-        description = "Add an app to the apps container: write Launchy config, register \
+        description = "Add an app to the apps container: render s6 bundle, register \
                           subdomain→port route, reload Nginx and Caddy. The app process starts \
                           immediately. Code must already exist in /home/gem/projects."
     )]
@@ -1145,10 +1164,10 @@ impl OrchestratorMcp {
             "no_cache": record.no_cache,
             "status": "running",
             "guidance": {
-                "what": "App started instantly via Launchy. No container rebuild.",
+                "what": "App started instantly via s6-svlink. No container rebuild.",
                 "persistence": "Runtime apps persist across container restarts AND blue/green redeploys (stored in SQLite)",
                 "to_remove": "remove_app name='{}' — stops process, deletes config, removes route",
-                "to_restart": "restart_app name='{}' — kills process, Launchy respawns it; route and config preserved",
+                "to_restart": "restart_app name='{}' — signals service, s6 respawns it; route and config preserved",
                 "to_check": "get_app_status shows per-app process state",
                 "to_read_logs": "Service output goes to container stdout — use get_container_info service='apps'"
             }
@@ -1157,10 +1176,10 @@ impl OrchestratorMcp {
         tool_ok(json)
     }
 
-    /// Remove an app added via add_app. Stops the process via Launchy config removal,
+    /// Remove an app added via add_app. Downs the service via s6-svunlink,
     /// removes the route, and reloads Nginx and Caddy.
     #[tool(
-        description = "Remove an app from the apps container: stop process, delete Launchy \
+        description = "Remove an app from the apps container: stop process, delete s6 bundle \
                           config, remove subdomain route, reload Nginx and Caddy. \
                           Do NOT use this just to restart an app — use restart_app instead, \
                           which preserves the route and config."
@@ -1174,26 +1193,37 @@ impl OrchestratorMcp {
 
         let subdomain = p.subdomain.unwrap_or_else(|| p.name.clone());
 
-        let deleted = db::delete_app(&conn, &p.name).map_err(|e| tool_err(e.to_string()))?;
-        if !deleted {
+        let app = db::find_app_by_name(&conn, &p.name)
+            .map_err(|e| tool_err(e.to_string()))?
+            .ok_or_else(|| tool_err(format!("app '{}' not found in database", p.name)))?;
+
+        if app.source == "build" {
             return Err(tool_err(format!(
-                "app '{}' not found in database",
-                p.name
+                "'{}' is image-baked (source=build); its process is not orchestrator-managed. \
+                 Row left untouched. To fully remove it: delete its bundle from \
+                 containers/apps/s6-overlay/s6-rc.d + user-bundles.d, rebuild the apps image, \
+                 then run `codery-ci set-app-source {} runtime` on the host and retry remove_app.",
+                p.name, p.name
             )));
         }
 
+        // Unlink first while the bundle still exists. s6-svunlink downs the
+        // service and waits for the supervisor to exit; warn-and-continue so
+        // removal is idempotent even if the service was never linked.
+        if let Err(e) = container_exec("apps", &["/command/s6-svunlink", "/run/service", &p.name]).await {
+            eprintln!("[remove_app] s6-svunlink warning (continuing): {}", e);
+        }
+
+        db::delete_app(&conn, &p.name).map_err(|e| tool_err(e.to_string()))?;
         db::sync_s6(&conn).map_err(|e| tool_err(e.to_string()))?;
 
-        container_exec("apps", &["kill", "-HUP", "1"])
-            .await
-            .map_err(|e| tool_err(format!("failed to signal Launchy: {}", e)))?;
-
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-        caddy::apply_all().map_err(|e| tool_err(e.to_string()))?;
-        nginx::generate_and_reload()
-            .await
-            .map_err(|e| tool_err(e.to_string()))?;
+        if let Err(e) = caddy::apply_all() {
+            return Err(tool_err(format!("app removed but Caddy reload failed: {}", e)));
+        }
+        if let Err(e) = nginx::generate_and_reload().await {
+            return Err(tool_err(format!("app removed but Nginx reload failed: {}", e)));
+        }
 
         let response = json!({
             "name": p.name,
@@ -1209,10 +1239,10 @@ impl OrchestratorMcp {
     }
 
     /// Restart an app process in the apps container without touching its route or config.
-    /// Kills the process; Launchy respawns it automatically (restart=always).
+    /// Signals the s6 service; s6-supervise respawns it automatically.
     #[tool(
-        description = "Restart an app in the apps container: kills the process and Launchy \
-                          respawns it automatically. Route, Launchy config, and SQLite record \
+        description = "Restart an app in the apps container: signals the s6 service and \
+                          s6 respawns it automatically. Route, s6 bundle, and SQLite record \
                           are untouched — the subdomain keeps working throughout. \
                           ALWAYS use this instead of remove_app+add_app when you only need a \
                           restart (e.g. to pick up code or env changes)."
@@ -1221,90 +1251,54 @@ impl OrchestratorMcp {
         &self,
         Parameters(p): Parameters<RestartAppParams>,
     ) -> Result<CallToolResult, McpError> {
-        let read_status = || async {
-            let out = container_exec("apps", &["cat", "/run/launchy-status.json"]).await.ok()?;
-            serde_json::from_str::<serde_json::Value>(&out).ok()
-        };
-        let find_pid = |status: &serde_json::Value, name: &str| -> Option<u64> {
-            status
-                .get("services")?
-                .as_array()?
-                .iter()
-                .find(|s| s.get("name").and_then(|n| n.as_str()) == Some(name))?
-                .get("pid")?
-                .as_u64()
+        let svc = format!("/run/service/{}", p.name);
+
+        let pid_of = || async {
+            container_exec("apps", &["/command/s6-svstat", "-o", "pid", &svc])
+                .await
+                .ok()
+                .and_then(|out| out.trim().parse::<i64>().ok())
         };
 
-        let status = read_status()
+        let old_pid = pid_of().await.unwrap_or(-1);
+        if old_pid <= 0 {
+            return Err(tool_err(format!(
+                "App '{}' is not up (or not supervised by s6). \
+                 Check get_app_status for current state.",
+                p.name
+            )));
+        }
+
+        // SIGTERM; s6-supervise respawns automatically (restart=always bundles).
+        container_exec("apps", &["/command/s6-svc", "-t", &svc])
             .await
-            .ok_or_else(|| tool_err("Launchy status file not found — is the apps container running?"))?;
+            .map_err(|e| tool_err(format!("failed to signal service: {}", e)))?;
 
-        let old_pid = match find_pid(&status, &p.name) {
-            Some(pid) => pid,
-            None => {
-                let names: Vec<&str> = status
-                    .get("services")
-                    .and_then(|s| s.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                return Err(tool_err(format!(
-                    "app '{}' not found in Launchy status. Running apps: {}",
-                    p.name,
-                    names.join(", ")
-                )));
-            }
-        };
-
-        let old_pid_str = old_pid.to_string();
-        container_exec("apps", &["kill", &old_pid_str])
-            .await
-            .map_err(|e| tool_err(format!("failed to kill app process: {}", e)))?;
-
-        // Poll for a new pid. If the old pid is still alive after ~2s, escalate to SIGKILL.
-        let mut new_pid: Option<u64> = None;
-        for attempt in 0..10 {
+        for attempt in 1..=10u32 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if attempt == 3 {
-                if let Some(st) = read_status().await {
-                    if find_pid(&st, &p.name) == Some(old_pid) {
-                        let _ = container_exec("apps", &["kill", "-9", &old_pid_str]).await;
-                    }
-                }
+            let new_pid = pid_of().await.unwrap_or(-1);
+            if new_pid > 0 && new_pid != old_pid {
+                let response = json!({
+                    "restarted": p.name,
+                    "old_pid": old_pid,
+                    "new_pid": new_pid,
+                    "note": "Route, bundle, and SQLite record untouched.",
+                });
+                let json =
+                    serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
+                return tool_ok(json);
             }
-            if let Some(st) = read_status().await {
-                if let Some(pid) = find_pid(&st, &p.name) {
-                    if pid != old_pid {
-                        new_pid = Some(pid);
-                        break;
-                    }
-                }
+            if attempt == 3 {
+                // App ignored SIGTERM — escalate to SIGKILL.
+                let _ = container_exec("apps", &["/command/s6-svc", "-k", &svc]).await;
             }
         }
 
-        let new_pid = new_pid.ok_or_else(|| {
-            tool_err(format!(
-                "App '{}' killed (pid {}) but did not come back within 5s. \
-                 Check logs: read_container_file service='apps' path='/var/log/launchy/{}.log'",
-                p.name, old_pid, p.name
-            ))
-        })?;
-
-        let response = json!({
-            "name": p.name,
-            "old_pid": old_pid,
-            "new_pid": new_pid,
-            "status": "restarted",
-            "guidance": {
-                "what": "Process killed and respawned by Launchy. Route and config untouched.",
-                "to_verify": "get_app_status shows uptime/reset; check your subdomain responds"
-            }
-        });
-        let json = serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
-        tool_ok(json)
+        Err(tool_err(format!(
+            "App '{}' did not restart within 5s (pid still {}). \
+             Inspect with get_container_info service='apps'.",
+            p.name, old_pid
+        )))
     }
 
     /// List all apps currently registered in SQLite.
@@ -1331,65 +1325,42 @@ impl OrchestratorMcp {
     }
 
     /// Get structured status for all apps in the apps container.
-    /// Reads Launchy's status file and cross-references with build-in configs.
+    /// Reads s6 service state via svstat and cross-references SQLite records.
     #[tool(
         description = "Get structured status for all apps in the apps container. \
-                          Reads Launchy's status file — shows name, pid, status, uptime for each app. \
+                          Reads s6 service status — shows name, pid, status, uptime for each app. \
                           Also indicates whether each app is a build-time or runtime app."
     )]
     async fn get_app_status(&self) -> Result<CallToolResult, McpError> {
-        let status_output = container_exec("apps", &["cat", "/run/launchy-status.json"])
+        let conn = db::open().map_err(|e| tool_err(e.to_string()))?;
+        db::init(&conn).map_err(|e| tool_err(e.to_string()))?;
+        let apps = db::list_apps(&conn).map_err(|e| tool_err(e.to_string()))?;
+
+        let stats = svc_stats("apps")
             .await
-            .map_err(|e| tool_err(format!("failed to read Launchy status: {}", e)))?;
+            .map_err(|e| tool_err(format!("failed to read s6 service status: {}", e)))?;
 
-        if status_output.starts_with("[exited") {
-            return Err(tool_err(
-                "Launchy status file not found — is the apps container running?",
-            ));
-        }
-
-        let status: serde_json::Value = serde_json::from_str(&status_output)
-            .map_err(|e| tool_err(format!("failed to parse Launchy status: {}", e)))?;
-
-        let builtin_output = container_exec("apps", &["ls", "/etc/launchy/built-in/"])
-            .await
-            .unwrap_or_default();
-        let builtin_names: Vec<&str> = builtin_output
-            .lines()
-            .filter(|l| l.ends_with(".json"))
-            .filter_map(|l| l.strip_suffix(".json"))
-            .collect();
-
-        let services = if let Some(services) = status.get("services").and_then(|s| s.as_array()) {
-            services
-                .iter()
-                .map(|svc| {
-                    let name = svc
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("unknown");
-                    let source = if builtin_names.contains(&name) {
-                        "build"
-                    } else {
-                        "runtime"
-                    };
-                    let mut annotated = svc.clone();
-                    annotated
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("source".to_string(), json!(source));
-                    annotated
+        let services: Vec<_> = stats
+            .iter()
+            .map(|st| {
+                let rec = apps.iter().find(|a| a.name == st.name);
+                serde_json::json!({
+                    "name": st.name,
+                    "pid": st.pid,
+                    "status": if st.up { "running" } else { "down" },
+                    "uptime_secs": st.uptime_secs,
+                    "source": rec.map(|a| a.source.as_str()).unwrap_or("build"),
+                    "subdomain": rec.map(|a| a.subdomain.as_str()),
+                    "internal_port": rec.map(|a| a.internal_port),
                 })
-                .collect::<Vec<_>>()
-        } else {
-            vec![]
-        };
+            })
+            .collect();
 
         let response = json!({
             "services": services,
             "guidance": {
-                "build_vs_runtime": "build = baked into image. runtime = added via add_app (persists across redeploys on host bind mounts).",
-                "to_read_logs": "read_container_file service='apps' path='/var/log/launchy/{name}.log'",
+                "build_vs_runtime": "build = baked into image (routing-only). runtime = added via add_app (persists across redeploys).",
+                "to_read_logs": "App logs go to container stdout — use get_container_info service='apps'",
                 "to_add": "add_app name='myapp' subdomain='myapp' internal_port=3001 command='...' directory='...'",
                 "to_restart": "restart_app name='myapp' — restarts process, route and config preserved"
             }
@@ -1497,7 +1468,7 @@ The Codery infrastructure has three layers:
 
 1. **Host layer** — Caddy (reverse proxy + TLS), Tailscale (VPN), supervisord
 2. **Sandbox container** — AI coding environment (OpenCode on port 3000)
-3. **Apps container** — Project web servers, each managed by Launchy (Rust process manager)
+3. **Apps container** — Project web servers, supervised by s6-overlay (s6-rc bundles)
 
 ### Traffic flow for apps
 
@@ -1511,10 +1482,14 @@ Internet → Tailscale VPN → Caddy (host) → Nginx (container:8080) → App p
 
 ### Process management
 
-Both containers use **Launchy** (Rust binary) as PID 1:
-- Manages all services via include-directory configs
-- Hot-reload on SIGHUP (add/remove services without restart)
-- Writes status to /run/launchy-status.json (read by MCP tools)
+Both containers use **s6-overlay** as PID 1 (s6-svscan + s6-rc):
+- Build-time services are s6-rc bundles baked into the image
+  (/etc/s6-overlay/s6-rc.d, started via the user bundle)
+- Runtime apps are s6 bundles in /etc/s6-overlay/apps.d (host
+  /opt/codery/apps-s6.d), linked into /run/service via s6-svlink
+- Status: s6-svstat; control: s6-svc; logs: container stdout (docker logs)
+- A boot-time oneshot (runtime-apps) re-links runtime bundles after
+  container restarts and blue/green redeploys
 
 ## Available tools
 
@@ -1537,11 +1512,11 @@ Both containers use **Launchy** (Rust binary) as PID 1:
 
 | Tool | What it does |
 |---|---|
-| `add_app` | Hot-add an app: writes Launchy config, registers route, starts process (instant) |
-| `remove_app` | Hot-remove an app: stops process, deletes config, removes route |
-| `restart_app` | Restart an app process (Launchy respawns) — route and config preserved |
+| `add_app` | Hot-add an app: renders s6 bundle + s6-svlink, registers route, starts process (instant) |
+| `remove_app` | Hot-remove an app: s6-svunlink, deletes bundle, removes route |
+| `restart_app` | Restart an app process (s6-svc -t, s6 respawns) — route and config preserved |
 | `list_apps` | List all apps from SQLite |
-| `get_app_status` | Per-app status from Launchy (pid, uptime, build vs runtime) |
+| `get_app_status` | Per-app status from s6-svstat (pid, uptime, build vs runtime) |
 
 ### Deploy/Rollback
 
@@ -1589,9 +1564,10 @@ Pre-flight checks: directory must exist, port must be free, name must be unique.
 The app starts immediately. No container rebuild needed.
 
 **Runtime apps persist across container restarts and blue/green redeploys.**
-Configs are stored in SQLite at `/opt/codery/codery.db` and regenerated as
-Launchy JSON files and route configs on every mutation.
-Launchy reads `include_dirs` on startup, so runtime apps auto-restore.
+SQLite (/opt/codery/codery.db) is the source of truth; sync_s6 renders bundles
+to /opt/codery/apps-s6.d on every mutation; the runtime-apps oneshot links
+them into supervision at boot. Image-baked apps (source='build') are routed
+but never process-managed by the orchestrator.
 
 ### Restart an app
 
@@ -1599,7 +1575,7 @@ Launchy reads `include_dirs` on startup, so runtime apps auto-restore.
 restart_app name='myapp'
 ```
 
-Kills the process; Launchy respawns it automatically. Route, Launchy config, and
+Signals the service (s6-svc -t); s6 respawns it automatically. Route, bundle, and
 SQLite record are untouched — the subdomain keeps working. Use this to pick up code
 or env changes. **Never use remove_app+add_app to restart** — that drops and
 recreates the route, and a wrong re-add breaks the URL.
@@ -1610,7 +1586,8 @@ recreates the route, and a wrong re-add breaks the URL.
 remove_app name='myapp'
 ```
 
-Stops the process, deletes the config, removes the route, reloads Caddy + Nginx.
+s6-svunlink downs the service, deletes the bundle, removes the route, reloads Caddy + Nginx.
+Refuses image-baked apps (source='build').
 
 ### Check app health
 
@@ -1621,14 +1598,16 @@ list_apps         → shows routing info (subdomain, internal_port)
 
 ### Read app logs
 
+App logs go to container stdout:
+
 ```
-read_container_file service='apps' path='/var/log/launchy/myapp.log'
+get_container_info service='apps'
 ```
 
 ## Diagnostic workflow: "app not responding"
 
 1. `get_app_status` → is the app running?
-2. If not running: `read_container_file service='apps' path='/var/log/launchy/{name}.log'` → crash reason; after fixing, `restart_app name='{name}'`
+2. If not running: `get_container_info service='apps'` → crash reason in container stdout tail; after fixing, `restart_app name='{name}'`
 3. If running: `get_routes` → verify routing (subdomain → host_port → internal_port)
 4. `check_port_listening port={host_port}` → verify Caddy can reach container
 5. `get_caddyfile` → verify Caddy has the route

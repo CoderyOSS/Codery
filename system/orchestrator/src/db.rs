@@ -367,7 +367,7 @@ fn write_bundle(dir: &std::path::Path, app: &AppRecord) -> Result<()> {
     std::fs::create_dir_all(bdir.join("dependencies.d"))?;
     std::fs::write(bdir.join("type"), "longrun\n")?;
     std::fs::write(bdir.join("dependencies.d").join("base"), "")?;
-    // Parity with Launchy's shutdown: SIGTERM, 10s grace, SIGKILL.
+    // Shutdown parity: SIGTERM, 10s grace, SIGKILL.
     std::fs::write(bdir.join("timeout-kill"), "10000\n")?;
     write_executable(&bdir.join("run"), &render_run(app))?;
     match app.restart.as_str() {

@@ -116,6 +116,29 @@ async fn main() -> Result<()> {
             nginx::generate_and_reload().await?;
             println!("[routes] Reloaded Caddyfile and Nginx");
         }
+        Some("set-app-source") => {
+            // codery-ci set-app-source <name> <build|runtime>
+            // 'build' rows are routing-only: sync_s6 renders no bundle and any
+            // existing bundle is pruned. Process state is never touched here.
+            let name = args.get(2).cloned().unwrap_or_default();
+            let source = args.get(3).cloned().unwrap_or_default();
+            if name.is_empty() || !matches!(source.as_str(), "build" | "runtime") {
+                eprintln!("usage: codery-ci set-app-source <name> <build|runtime>");
+                std::process::exit(2);
+            }
+            let conn = db::open()?;
+            db::init(&conn)?;
+            if db::set_app_source(&conn, &name, &source)? {
+                db::sync_s6(&conn)?;
+                println!(
+                    "[db] app '{}' source set to '{}' (bundles re-rendered)",
+                    name, source
+                );
+            } else {
+                eprintln!("app '{}' not found", name);
+                std::process::exit(1);
+            }
+        }
         Some("diagnose") => {
             // Usage: codery-ci diagnose [--json]
             //
@@ -453,6 +476,7 @@ Build & routes:
   build <service> <tag> [--dockerfile PATH] [--context PATH]
                                               docker build with the canonical image tag
   reload-routes                               Regenerate Caddyfile + Nginx and reload in place
+  set-app-source <name> <build|runtime>       Mark an app image-baked (routing-only) or orchestrator-managed
 
 Diagnostics:
   diagnose [--json]                           Detect state/route/preview mismatches (exit 1 on issues)

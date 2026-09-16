@@ -465,13 +465,14 @@ mod tests {
         std::fs::write(&toggle, "1\n").unwrap();
         let log_dir = dir.join("logs");
 
-        // /bin/true simulates codery-ci succeeding.
+        // "true" (PATH-resolved) simulates codery-ci succeeding. Bare name on
+        // purpose: /bin/true does not exist in the nix-based apps container.
         let resp = spawn_with(
             vec!["build".to_string(), "sandbox".to_string(), "t".to_string()],
             10,
             &toggle,
             log_dir,
-            "/bin/true",
+            "true",
         )
         .await
         .expect("spawn should succeed");
