@@ -135,6 +135,56 @@ problem — that is the anti-pattern this service exists to eliminate.
 
 ---
 
+## Host Memory & OOM Prevention
+
+The host has 8 GiB RAM and (unless swap was added) **no swap**. On Sep 16 2026
+a docker build colliding with a running apps-preview + a bloated opencode
+produced 13 kernel OOM kills in one evening — every one killed `opencode serve`
+in the sandbox (biggest RSS process) and each kill surfaced as 502 toasts.
+
+### Measured RAM budget
+
+| Component | Steady | Peak |
+|---|---|---|
+| Host stack (dockerd, Caddy, Tailscale) | ~1.5 GiB | ~2 GiB |
+| Sandbox (opencode grows with session state) | ~1.4 GiB | ~2.4 GiB |
+| Apps container | ~1 GiB | ~1.5 GiB |
+| Playwright (chromium) | 0.5–1 GiB | 1.5+ GiB when used |
+| Docker build spike (buildkit) | — | +1.5–2.5 GiB |
+| Worst case (preview + build + full stack) | | **~8.5+ GiB — exceeds the box** |
+
+**Verdict: 16 GB is the comfortable size.** 8 GB stays workable only with the
+mitigations below.
+
+### Protections in place (shipped in the sandbox image)
+
+- `oom_score_adj=-800` (opencode) / `-600` (opendesign) set in their s6 run
+  scripts before `setuidgid` — kernel prefers killing build processes over the
+  live session.
+- `OPENCORE_SERVE_KILL_KB: "1200000"` in `containers/sandbox/service.yml`
+  env_overrides — opencode-serve-guard SIGTERMs opencode at 1.2 GiB RSS
+  (default was 1.5 GiB) so the leak backstop fires *before* host pressure
+  builds. s6 respawns in ~15 s; sessions and history survive.
+
+### Rules
+
+1. **Add swap on the host** (one-time):
+   `sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile && echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab`
+2. **Never run `codery-ci build` while an apps/sandbox preview is up** — a
+   preview is a full second container (~+1 GiB); the build spike + preview +
+   active stack is what caused the Sep 16 OOM storm. Cancel previews promptly
+   (`codery-ci cancel-preview <svc>`).
+3. **Keep playwright stopped when browser tools aren't needed** —
+   `docker start codery-playwright-green` only when required; chromium is the
+   single largest consumer when actively used.
+4. Diagnosing future 502-toast storms: check
+   `cat /sys/fs/cgroup/memory.events` inside the sandbox (`oom_kill` counter),
+   `grep -E 'MemAvailable|SwapTotal' /proc/meminfo`, and correlate opencode
+   restart times (config-load lines in
+   `~/.local/share/opencode/log/opencode.log`) with docker build windows.
+
+---
+
 ## Port Scheme
 
 This is critical to understand before adding any service.
