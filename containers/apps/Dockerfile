@@ -1,8 +1,8 @@
 # Apps container — Nix-managed toolchain + s6-overlay process supervision.
 #
 # Pinned, reproducible Nix profile driven by containers/apps/flake.nix.
-# Process supervision via s6-overlay (s6-rc) — replaces the previous
-# Launchy-based process manager. See README-NIX.md for the bump/verify workflow.
+# Process supervision via s6-overlay (s6-rc). See README-NIX.md for the
+# bump/verify workflow.
 #
 # Base image note: nixos/nix is Alpine Linux. Everything else
 # (rust, elixir, bun, gcc, nvim, nginx, sshd, etc.) comes from nixpkgs.

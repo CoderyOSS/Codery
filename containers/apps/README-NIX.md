@@ -18,7 +18,7 @@ All packages come from a pinned nixpkgs revision; NvChad is cloned at a pinned c
 
 ## Process supervision (s6-overlay)
 
-s6-overlay replaces Launchy as PID 1. Services are defined as s6-rc source definition
+s6-overlay is PID 1. Services are defined as s6-rc source definition
 directories under `containers/apps/s6-overlay/s6-rc.d/` and included in the `user` bundle.
 
 | Service | Type | Description |
