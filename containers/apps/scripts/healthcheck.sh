@@ -1,6 +1,5 @@
 #!/bin/bash
 # healthcheck.sh — Exits 0 only if the apps container is correctly configured.
-# Updated for Launchy migration.
 set -e
 
 fail() {

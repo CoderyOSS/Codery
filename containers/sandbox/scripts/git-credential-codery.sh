@@ -4,7 +4,7 @@
 #   credential.https://github.com.helper = /usr/local/bin/git-credential-codery
 # Makes git pull / fetch / clone / push work without prompts.
 # Needs GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_PATH in env (sshd SetEnv
-# passthrough + ~/.bashrc exports cover SSH sessions; launchy children
+# passthrough + ~/.bashrc exports cover SSH sessions; s6 services
 # inherit container env).
 #
 # The GitHub App may be installed on multiple orgs — tokens are

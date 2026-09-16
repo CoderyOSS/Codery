@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Watch opencode serve health. Two failure modes, both fixed by SIGTERM (the
-# supervisor respawns a fresh process; opencode persists sessions to disk, so
+# Watch opencode serve health. Two failure modes, both fixed by SIGTERM (s6
+# respawns a fresh process; opencode persists sessions to disk, so
 # a kill only drops in-flight LLM streams — history survives):
 #
 # 1. Memory bloat: RSS above threshold → SIGTERM.

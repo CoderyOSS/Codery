@@ -186,7 +186,9 @@ Check container logs:
 docker logs codery-sandbox-<color> --tail 50
 ```
 
-Look for launchy output showing which service is failing and why.
+Find the failing service with
+`docker exec codery-sandbox-<color> /command/s6-svstat /run/service/<name>`,
+then read its output in the container logs above.
 
 ### CoderyCI MCP tools not responding
 The codery-ci daemon must be running on the host:

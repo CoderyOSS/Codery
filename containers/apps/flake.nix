@@ -66,7 +66,7 @@
         fd
         fzf
 
-        # --- Infra used by entrypoint / launchy-managed services ---
+        # --- Infra used by entrypoint / s6-managed services ---
         nginx
         openssh
         git
