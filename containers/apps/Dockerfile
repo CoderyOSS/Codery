@@ -223,7 +223,11 @@ COPY containers/apps/scripts/ssh-agent-add-keys.sh /usr/local/bin/ssh-agent-add-
 # ENV to longruns). Pulls LANG/LC_ALL/ELIXIR_ERL_OPTIONS/LOCALE_ARCHIVE from
 # /run/s6/container_environment so beam.smp gets +fnu and Elixir stops warning.
 COPY containers/apps/scripts/s6-load-locale-env.sh /usr/local/bin/s6-load-locale-env
-RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.sh /usr/local/bin/s6-load-locale-env
+# runtime-apps oneshot: re-links orchestrator-managed app bundles
+# (/etc/s6-overlay/apps.d, rendered from SQLite by codery-ci) into /run/service
+# at every boot — restores runtime apps after restarts and blue/green redeploys.
+COPY containers/apps/scripts/runtime-apps-restore.sh /usr/local/bin/runtime-apps-restore
+RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.sh /usr/local/bin/s6-load-locale-env /usr/local/bin/runtime-apps-restore
 
 # GitHub host key for git operations.
 RUN ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true

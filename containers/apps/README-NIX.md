@@ -132,15 +132,23 @@ codery-ci cutover apps
 
 ## Runtime app management via s6
 
-To hot-add an app at runtime (without rebuilding):
+Fully wired through the codery-ci MCP tools — no manual steps needed:
 
-1. Create an s6 service directory at `/etc/s6-overlay/apps.d/<name>/` with `type`, `run`, and `dependencies.d/base`
-2. Link it into s6 supervision: `s6-svlink /run/service /etc/s6-overlay/apps.d/<name>`
-3. To remove: `s6-svunlink /run/service/<name>` and delete the service directory
+- `add_app` renders an s6 bundle to `/etc/s6-overlay/apps.d/<name>/` (host
+  `/opt/codery/apps-s6.d`, generated from SQLite) and links it via
+  `s6-svlink /run/service`
+- `remove_app` runs `s6-svunlink` and prunes the bundle
+- `restart_app` runs `s6-svc -t` (SIGTERM + respawn, escalating to `-k`)
+- Status comes from `s6-svstat -o up,pid,updownfor`
 
-This replaces the previous Launchy `add_app`/`remove_app` mechanism. The codery-ci MCP tools
-(`add_app`, `remove_app`) need corresponding updates to write s6 service directories and run
-`s6-svlink`/`s6-svunlink` inside the container.
+**Persistence:** the `runtime-apps` oneshot (in the user bundle) re-links every
+bundle in `/etc/s6-overlay/apps.d/` at boot, so runtime apps survive container
+restarts and blue/green redeploys. Image-baked apps (cartaclient, cbe1, design)
+are marked `source='build'` in SQLite — routed, but never process-managed by
+the orchestrator.
+
+Manual equivalent (debugging only): `s6-svlink /run/service /etc/s6-overlay/apps.d/<name>`
+to start, `s6-svunlink /run/service <name>` to stop.
 
 ## Installing extra apps in the container
 
