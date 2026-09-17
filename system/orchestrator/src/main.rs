@@ -7,6 +7,7 @@ mod diagnose;
 mod db;
 mod deploy;
 mod deploy_lock;
+mod host_metrics;
 mod images;
 mod mcp;
 mod mcp_exec;
