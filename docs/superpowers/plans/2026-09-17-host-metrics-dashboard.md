@@ -1187,17 +1187,30 @@ cd /home/gem/projects/Codery && git add system/orchestrator/src/ui.rs && git com
 
 ---
 
-### Task 5: Frontend — `HostPanel` + wiring
+### Task 5: Frontend — Host Health rail (OpenDesign Option A "Instrument strip")
 
 **Files:**
 - Modify: `system/orchestrator/ui/src/types.ts`
-- Create: `system/orchestrator/ui/src/HostPanel.tsx`
+- Create: `system/orchestrator/ui/src/HostRail.tsx`
 - Modify: `system/orchestrator/ui/src/App.tsx`
 - Modify: `system/orchestrator/ui/src/App.css`
 
 **Interfaces:**
-- Consumes: `GET /api/metrics/stream` JSON shape = Task 3 `HostMetrics` (snake_case).
-- Produces: `<HostPanel metrics={...} />` component rendered above the sections in `App.tsx`; TS type `HostMetrics` in `types.ts`.
+- Consumes: `GET /api/metrics/stream` JSON = Task 3 `HostMetrics` (snake_case).
+- Produces: `<HostRail metrics={hostMetrics | null} />` — the 322 px right sidebar rail.
+- **Visual source of truth:** `docs/design/host-health-option-a.html` (committed mock, Option A rail only — the `railA()` partials + `.rail--a` CSS; the state-switcher / option-B/C chrome is mock-only, do NOT implement). All class names below are taken from the mock so the CSS can be transcribed nearly verbatim.
+
+Design decisions locked by the approved mock:
+- Desktop: `.page` becomes a 2-column grid — console content left, `.rail` (322 px) right. Rail sections top-to-bottom: STATUS (pill + reasons list + OOM row), MEMORY (bar + numbers + swap), PRESSURE · PSI (3 rows), OFFENDERS (grid table).
+- Tablet ≤1020 px: rail becomes a full-width band ABOVE the console content, sections in a 2-column grid (`.band`).
+- Phone ≤640 px: single stack; offenders table shows top 4 with a "Show all N" toggle.
+- Health pill labels: green=`Healthy`, yellow=`Strained`, red=`Critical`; pill reuses the conn-pill idiom; reasons render as a visible `.pill-reasons` list (border-left tinted by status), not hover-only.
+- Memory bar: used fill colored by avail% (`membar--warn` <20%, `membar--danger` <10%, else accent); cached+buffers rendered as a hatched overlay inside the used segment; numbers line = "`<big>free MB</big> free · total MB total`" + note "cache + buffers N MB reclaimable (hatched)".
+- Swap: `swap_total_mb = 0` → `.tag--warn` "NO SWAP" + "swap disabled on this host"; else 64 px `.swapbar` with tone (ok ≤25%, warn ≤60%, danger >60%) + "used / total MB swap".
+- PSI rows: grid `56px 1fr 40px`; fill = avg10, tick = avg60, `title` = "avg60 X% · avg300 Y% (5-min)"; tone on avg10: calm <2, warn ≥2, danger ≥10; value right-aligned mono. `psi: null` → `.hh-empty` dashed placeholder box "PSI unavailable" + explainer sentence.
+- OOM row: dot (off when 0, danger when >0) + mono count + "OOM kills since boot"; when the count **increments between samples**, show `.oom-bump` "+1" badge (animation `bumpIn`) for 5 s.
+- Offenders: rows `1fr 46px 52px 40px`; name ellipsized at 130 px with container badge (`host` badge dimmer); RSS mini-bar scaled to max; rows with rss < 5% of max get `trow--tiny` (bar hidden, text dimmed).
+- Every element keeps its mock `data-od-id` (`host-health-rail`, `host-health-pill`, `host-health-reasons`, `host-oom-badge`, `host-oom-bump`, `host-memory-bar`, `host-memory-nums`, `host-swap`, `host-psi-cpu|memory|io`, `host-psi-placeholder`).
 
 - [ ] **Step 1: Add types**
 
@@ -1225,132 +1238,220 @@ export interface HostMetrics {
 }
 ```
 
-- [ ] **Step 2: Build `HostPanel.tsx`**
+- [ ] **Step 2: Build `HostRail.tsx`**
 
 ```tsx
+import { useEffect, useRef, useState } from 'react';
 import { HostMetrics, TopProcess } from './types';
 
-function fmtMb(mb: number): string {
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)}G` : `${Math.round(mb)}M`;
+const HEALTH_LABEL = { green: 'Healthy', yellow: 'Strained', red: 'Critical' } as const;
+const fmt = (n: number) => n.toLocaleString('en-US');
+
+const memTone = (availPct: number) =>
+  availPct < 10 ? 'membar--danger' : availPct < 20 ? 'membar--warn' : '';
+const psiTone = (v: number) => (v >= 10 ? 'psi--danger' : v >= 2 ? 'psi--warn' : 'psi--calm');
+const swapTone = (pct: number) =>
+  pct > 60 ? 'swapbar--danger' : pct > 25 ? 'swapbar--warn' : 'swapbar--ok';
+
+function Pill({ m }: { m: HostMetrics }) {
+  const h = m.health;
+  return (
+    <span className={`pill pill--${h.status}`} data-od-id="host-health-pill"
+      title={h.reasons.join(' · ') || 'No active triggers'}>
+      <i className="pill-dot" />{HEALTH_LABEL[h.status]}
+    </span>
+  );
 }
 
-function PsiBar({ label, resource, odId }: { label: string; resource: { some: { avg10: number; avg60: number; avg300: number } } | undefined; odId: string }) {
-  if (!resource) return null;
-  const { avg10, avg60, avg300 } = resource.some;
+function Reasons({ m }: { m: HostMetrics }) {
+  if (m.health.reasons.length === 0) return null;
   return (
-    <div className="psi-row" data-od-id={odId} title={`avg10 ${avg10.toFixed(1)}% · avg60 ${avg60.toFixed(1)}% · avg300 ${avg300.toFixed(1)}%`}>
-      <span className="psi-label">{label}</span>
-      <div className="psi-track">
-        <div className="psi-fill" style={{ width: `${Math.min(avg10, 100)}%` }} />
-        <div className="psi-marker" style={{ left: `${Math.min(avg60, 100)}%` }} />
-      </div>
-      <span className="psi-value">{avg10.toFixed(1)}%</span>
+    <ul className="pill-reasons" data-od-id="host-health-reasons">
+      {m.health.reasons.map((r) => <li key={r}>{r}</li>)}
+    </ul>
+  );
+}
+
+function Oom({ m, bump }: { m: HostMetrics; bump: boolean }) {
+  return (
+    <div className={`oom ${m.oom_kills > 0 ? 'oom--hot' : ''}`} data-od-id="host-oom-badge">
+      <i className="oom-dot" />
+      <span className="mono oom-count">{m.oom_kills}</span>
+      <span>OOM kills since boot</span>
+      {bump && <span className="oom-bump" data-od-id="host-oom-bump">+1</span>}
     </div>
   );
 }
 
-function OffenderRow({ p, maxRss }: { p: TopProcess; maxRss: number }) {
-  const badge = p.container.startsWith('codery-')
-    ? p.container.replace(/^codery-/, '').replace(/-blue$/, '-blue').replace(/-green$/, '-green')
-    : p.container;
+function MemorySection({ m }: { m: HostMetrics }) {
+  const { memory: mem } = m;
+  const used = Math.max(mem.total_mb - mem.available_mb, 0);
+  const usedPct = mem.total_mb > 0 ? (used / mem.total_mb) * 100 : 0;
+  const cachePct = mem.total_mb > 0 ? ((mem.cached_mb + mem.buffers_mb) / mem.total_mb) * 100 : 0;
+  const cacheInUsed = usedPct > 0 ? (cachePct / usedPct) * 100 : 0;
+  const swapUsed = Math.max(mem.swap_total_mb - mem.swap_free_mb, 0);
+  const swapPct = mem.swap_total_mb > 0 ? (swapUsed / mem.swap_total_mb) * 100 : 0;
   return (
-    <tr data-od-id="host-offender-row">
-      <td className="off-comm">{p.comm}</td>
-      <td className="off-rss">
-        <div className="rss-track"><div className="rss-fill" style={{ width: `${maxRss > 0 ? (p.rss_mb / maxRss) * 100 : 0}%` }} /></div>
-        <span className="num">{p.rss_mb >= 1024 ? `${(p.rss_mb / 1024).toFixed(2)}G` : `${Math.round(p.rss_mb)}M`}</span>
-      </td>
-      <td className="off-cpu num">{p.cpu_pct.toFixed(1)}%</td>
-      <td><span className="container-badge">{badge}</span></td>
-    </tr>
+    <>
+      <div className={`membar ${memTone((mem.available_mb / mem.total_mb) * 100)}`}
+        data-od-id="host-memory-bar"
+        role="img" aria-label={`${fmt(used)} MB used of ${fmt(mem.total_mb)} MB`}>
+        <div className="membar-used" style={{ width: `${usedPct.toFixed(1)}%` }}>
+          <div className="membar-cached" title="cached + buffers"
+            style={{ width: `${Math.min(cacheInUsed, 100).toFixed(1)}%` }} />
+        </div>
+      </div>
+      <div className="mem-nums" data-od-id="host-memory-nums">
+        <span className="mono big">{fmt(mem.available_mb)} MB</span> <span className="mut">free</span>
+        <span className="mut"> · {fmt(mem.total_mb)} MB total</span>
+      </div>
+      <div className="mem-note mut">
+        cache + buffers {fmt(mem.cached_mb + mem.buffers_mb)} MB reclaimable (hatched)
+      </div>
+      {mem.swap_total_mb > 0 ? (
+        <div className="swap" data-od-id="host-swap">
+          <div className={`swapbar ${swapTone(swapPct)}`}><i style={{ width: `${swapPct.toFixed(1)}%` }} /></div>
+          <span className="mono">{fmt(swapUsed)}</span>
+          <span className="mut">/ {fmt(mem.swap_total_mb)} MB swap</span>
+        </div>
+      ) : (
+        <div className="swap" data-od-id="host-swap">
+          <span className="tag tag--warn">NO SWAP</span>
+          <span className="mut">swap disabled on this host</span>
+        </div>
+      )}
+    </>
   );
 }
 
-export function HostPanel({ metrics }: { metrics: HostMetrics | null }) {
-  if (!metrics) return <section className="section host-panel" data-od-id="host-health-panel"><div className="section-label">Host Health</div><p className="loading">Loading metrics…</p></section>;
-  const { health, memory, psi, oom_kills, top_processes } = metrics;
-  const usedMb = Math.max(memory.total_mb - memory.available_mb, 0);
-  const usedPct = memory.total_mb > 0 ? (usedMb / memory.total_mb) * 100 : 0;
-  const cachePct = memory.total_mb > 0 ? ((memory.cached_mb + memory.buffers_mb) / memory.total_mb) * 100 : 0;
-  const swapUsed = Math.max(memory.swap_total_mb - memory.swap_free_mb, 0);
-  const swapPct = memory.swap_total_mb > 0 ? (swapUsed / memory.swap_total_mb) * 100 : 0;
-  const maxRss = Math.max(...top_processes.map(p => p.rss_mb), 1);
-
+function PsiRow({ name, r, id }: { name: string; r: { some: { avg10: number; avg60: number; avg300: number } }; id: string }) {
+  const a = r.some;
   return (
-    <section className="section host-panel" data-od-id="host-health-panel">
-      <div className="section-label">Host Health</div>
-      <div className="card host-card">
-        <div className="host-top">
-          <span className={`conn-pill health-${health.status}`} data-od-id="host-health-pill" title={health.reasons.join(' · ') || 'all clear'}>
-            <span className="conn-dot" />{health.status}
-          </span>
-          {health.reasons.length > 0 && <span className="health-reasons">{health.reasons.join(' · ')}</span>}
-          <span className={`oom-badge ${oom_kills > 0 ? 'oom-hot' : ''}`} data-od-id="host-oom-badge">
-            {oom_kills} OOM kills since boot
-          </span>
-        </div>
+    <div className={`psi-row ${psiTone(a.avg10)}`} data-od-id={`host-psi-${id}`}
+      title={`avg60 ${a.avg60}% · avg300 ${a.avg300}% (5-min)`}>
+      <span className="psi-name">{name}</span>
+      <span className="psi-bar">
+        <i className="psi-fill" style={{ width: `${Math.min(100, a.avg10).toFixed(1)}%` }} />
+        <i className="psi-tick" style={{ left: `${Math.min(100, a.avg60).toFixed(1)}%` }} />
+      </span>
+      <span className="psi-val mono">{a.avg10.toFixed(1)}</span>
+    </div>
+  );
+}
 
-        <div className="host-grid">
-          <div className="mem-block" data-od-id="host-memory-block">
-            <div className="mem-numbers num">
-              {fmtMb(usedMb)} used · {fmtMb(memory.available_mb)} free · {fmtMb(memory.total_mb)} total
-            </div>
-            <div className="mem-track" data-od-id="host-memory-bar">
-              <div className="mem-cache" style={{ width: `${Math.min(cachePct, 100)}%` }} />
-              <div className="mem-fill" style={{ width: `${Math.min(usedPct, 100)}%` }} />
-            </div>
-            {memory.swap_total_mb > 0 ? (
-              <>
-                <div className="mem-numbers num swap-numbers" data-od-id="host-swap-bar">
-                  swap {fmtMb(swapUsed)} / {fmtMb(memory.swap_total_mb)}
-                </div>
-                <div className="swap-track"><div className="swap-fill" style={{ width: `${swapPct}%` }} /></div>
-              </>
-            ) : (
-              <div className="no-swap-tag" data-od-id="host-no-swap">no swap</div>
-            )}
-          </div>
-
-          <div className="psi-block" data-od-id="host-psi-block">
-            {psi ? (
-              <>
-                <PsiBar label="CPU" resource={psi.cpu.some ? psi.cpu : undefined} odId="host-psi-cpu" />
-                <PsiBar label="Mem" resource={psi.memory} odId="host-psi-memory" />
-                <PsiBar label="IO" resource={psi.io} odId="host-psi-io" />
-              </>
-            ) : (
-              <div className="psi-unavailable">PSI unavailable</div>
-            )}
-          </div>
-        </div>
-
-        <table className="offenders" data-od-id="host-offenders-table">
-          <thead>
-            <tr><th>process</th><th>rss</th><th className="off-cpu">cpu</th><th>container</th></tr>
-          </thead>
-          <tbody>
-            {top_processes.map(p => <OffenderRow key={`${p.pid}-${p.comm}`} p={p} maxRss={maxRss} />)}
-          </tbody>
-        </table>
+function PsiSection({ m }: { m: HostMetrics }) {
+  if (!m.psi) {
+    return (
+      <div className="hh-empty" data-od-id="host-psi-placeholder">
+        <b>PSI unavailable</b>
+        <span>kernel doesn't expose pressure stall reports — CPU / memory / IO stall can't be shown</span>
       </div>
-    </section>
+    );
+  }
+  return (
+    <>
+      <PsiRow name="CPU" r={m.psi.cpu} id="cpu" />
+      <PsiRow name="Memory" r={m.psi.memory} id="memory" />
+      <PsiRow name="IO" r={m.psi.io} id="io" />
+    </>
+  );
+}
+
+function OffendersSection({ m }: { m: HostMetrics }) {
+  const procs = m.top_processes;
+  const max = Math.max(...procs.map((p) => p.rss_mb), 1);
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <div className="thead"><span>process</span><span></span><span>rss</span><span>cpu%</span></div>
+      <div className={`twrap${open ? ' open' : ''}`} data-tablewrap>
+        {procs.map((p: TopProcess, i) => {
+          const tiny = p.rss_mb < max * 0.05;
+          const hide = i >= 4 ? ' trow--hide' : '';
+          const badge = p.container.startsWith('codery-')
+            ? p.container.replace(/^codery-/, '')
+            : p.container;
+          return (
+            <div key={`${p.pid}-${p.comm}`} className={`trow${tiny ? ' trow--tiny' : ''}${hide}`}>
+              <span className="tname">
+                <span className="pname">{p.comm}</span>
+                <span className={`pbadge pbadge--${p.container === 'host' ? 'host' : 'ctr'}`}>{badge}</span>
+              </span>
+              <span className="tbar"><i style={{ width: `${((p.rss_mb / max) * 100).toFixed(1)}%` }} /></span>
+              <span className="trss mono">{p.rss_mb.toFixed(0)}</span>
+              <span className="tcpu mono">{p.cpu_pct.toFixed(1)}</span>
+            </div>
+          );
+        })}
+      </div>
+      {procs.length > 4 && (
+        <button className="tmore" data-toggle-rows onClick={() => setOpen(!open)}>
+          {open ? 'Show top 4' : `Show all ${procs.length}`}
+        </button>
+      )}
+    </>
+  );
+}
+
+export function HostRail({ metrics }: { metrics: HostMetrics | null }) {
+  const [bump, setBump] = useState(false);
+  const prevOom = useRef<number | null>(null);
+  useEffect(() => {
+    if (!metrics) return;
+    const prev = prevOom.current;
+    prevOom.current = metrics.oom_kills;
+    if (prev !== null && metrics.oom_kills > prev) {
+      setBump(true);
+      const t = setTimeout(() => setBump(false), 5000);
+      return () => clearTimeout(t);
+    }
+  }, [metrics]);
+
+  if (!metrics) {
+    return (
+      <aside className="rail rail--a" data-od-id="host-health-rail">
+        <section className="hh-section"><p className="hh-empty"><b>Loading metrics…</b></p></section>
+      </aside>
+    );
+  }
+  return (
+    <aside className="rail rail--a" data-od-id="host-health-rail">
+      <section className="hh-section">
+        <div className="hh-label">Status</div>
+        <Pill m={metrics} />
+        <Reasons m={metrics} />
+        <Oom m={metrics} bump={bump} />
+      </section>
+      <section className="hh-section">
+        <div className="hh-label">Memory</div>
+        <MemorySection m={metrics} />
+      </section>
+      <section className="hh-section">
+        <div className="hh-label">Pressure · PSI<span className="hh-legend">fill avg10 · tick avg60 · hover 5-min</span></div>
+        <PsiSection m={metrics} />
+      </section>
+      <section className="hh-section">
+        <div className="hh-label">Offenders<span className="hh-legend">top {metrics.top_processes.length} by RSS</span></div>
+        <OffendersSection m={metrics} />
+      </section>
+    </aside>
   );
 }
 ```
 
-(Note: `PsiBar` receives `psi.cpu` whose `full` is null for CPU — the prop type only reads `.some`; pass `psi.cpu` directly for all three rows: `resource={psi.cpu}` works since the prop type is structural. Simplify: change the `resource` prop type to `{ some: { avg10: number; avg60: number; avg300: number } } | undefined` and pass `psi.cpu`, `psi.memory`, `psi.io` directly.)
-
 - [ ] **Step 3: Wire into `App.tsx`**
+
+Imports: add `HostMetrics` to the types import and `HostRail`:
 
 ```tsx
 import { useEffect, useState } from 'react';
 import { Container, HostMetrics } from './types';
 import { ContainerCard } from './ContainerCard';
-import { HostPanel } from './HostPanel';
+import { HostRail } from './HostRail';
 import './App.css';
 ```
 
-Inside `App()`, add state + a second EventSource (below the existing one):
+Inside `App()`, add the metrics state + second EventSource (beside the existing one):
 
 ```tsx
   const [hostMetrics, setHostMetrics] = useState<HostMetrics | null>(null);
@@ -1365,69 +1466,155 @@ Inside `App()`, add state + a second EventSource (below the existing one):
   }, []);
 ```
 
-Render it above the sections (between header and the sections map):
+Wrap the return in the 2-column grid — the rail is the second column; on narrow widths CSS reorders it above the console as a band/stack:
 
 ```tsx
-      <HostPanel metrics={hostMetrics} />
+  return (
+    <div className="page-flex">
+      <div className="page-main">
+        {/* ── everything the current App() renders today: header + sections ── */}
+        <div className="page">
+          …existing header/summary/sections JSX unchanged…
+        </div>
+      </div>
+      <HostRail metrics={hostMetrics} />
+    </div>
+  );
 ```
 
-- [ ] **Step 4: Add styles to `App.css`**
-
-Append (existing tokens only — final look subject to the OpenDesign mock):
+- [ ] **Step 4: Add styles to `App.css`** (transcribed from the mock's `.rail--a` block)
 
 ```css
-/* ── Host Health panel ──────────────────────────────────────────────────────── */
+/* ── Host Health rail (OpenDesign Option A) ─────────────────────────────────── */
 
-.host-panel .host-card { display: flex; flex-direction: column; gap: 14px; padding: 14px 16px; }
-.host-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.health-green .conn-dot { background: var(--ok); }
-.health-yellow .conn-dot { background: var(--warn); }
-.health-red .conn-dot { background: var(--danger); }
-.health-reasons { color: var(--muted); font-size: 12px; }
-.oom-badge { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); }
-.oom-badge.oom-hot { color: var(--danger); font-weight: 650; }
+.page-flex { max-width: 1240px; margin: 0 auto; padding: 24px; display: grid;
+  grid-template-columns: minmax(0, 1fr) 322px; gap: 20px; align-items: start; }
+.page-main { min-width: 0; }
+.page-main .page { padding: 0; max-width: none; }
 
-.host-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-@media (max-width: 800px) { .host-grid { grid-template-columns: 1fr; } }
+.rail { background: var(--surface); border-left: 1px solid var(--border); overflow-y: auto; }
+.hh-section { padding: 13px 15px; border-bottom: 1px solid var(--border); }
+.hh-section:last-child { border-bottom: 0; }
+.hh-label { font-size: 10.5px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted); display: flex; justify-content: space-between; align-items: baseline;
+  gap: 8px; margin-bottom: 9px; }
+.hh-legend { font-size: 10px; letter-spacing: .02em; text-transform: none; font-weight: 500; color: var(--off); }
 
-.mem-numbers { font-family: var(--mono); font-size: 12px; color: var(--fg); margin-bottom: 6px; }
-.mem-track, .swap-track, .psi-track, .rss-track { position: relative; height: 10px; background: var(--surface-2); border-radius: 5px; overflow: hidden; }
-.mem-cache { position: absolute; inset: 0 auto 0 0; background: var(--surface-2); background: color-mix(in oklab, var(--accent) 25%, var(--surface-2)); }
-.mem-fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: 0.85; }
-.swap-track { height: 6px; margin-top: 4px; }
-.swap-fill { position: absolute; inset: 0 auto 0 0; background: var(--warn); }
-.no-swap-tag { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 6px; }
+.pill { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600;
+  padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); }
+.pill-dot { width: 8px; height: 8px; border-radius: 50%; }
+.pill--green { color: var(--ok); }   .pill--green .pill-dot { background: var(--ok); }
+.pill--yellow { color: var(--warn); } .pill--yellow .pill-dot { background: var(--warn); }
+.pill--red { color: var(--danger); }  .pill--red .pill-dot { background: var(--danger); }
+.pill-reasons { list-style: none; margin-top: 9px; background: var(--surface-2);
+  border-left: 2px solid var(--border); border-radius: 0 6px 6px 0; padding: 7px 10px;
+  display: grid; gap: 4px; }
+.pill--red + .pill-reasons { border-left-color: var(--danger); }
+.pill--yellow + .pill-reasons { border-left-color: var(--warn); }
+.pill-reasons li { font-size: 12px; color: var(--fg); }
 
-.psi-row { display: grid; grid-template-columns: 40px 1fr 52px; align-items: center; gap: 8px; margin: 6px 0; }
-.psi-label { font-size: 12px; color: var(--muted); }
-.psi-fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: 0.7; }
-.psi-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--fg); opacity: 0.6; }
-.psi-value { font-family: var(--mono); font-size: 12px; text-align: right; color: var(--fg); }
-.psi-unavailable { font-size: 12px; color: var(--muted); font-style: italic; }
+.oom { display: flex; align-items: center; gap: 8px; margin-top: 11px; font-size: 12.5px; color: var(--muted); }
+.oom-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--off); flex: none; }
+.oom--hot { color: var(--danger); }
+.oom--hot .oom-dot { background: var(--danger); }
+.oom-count { font-weight: 600; }
+.oom-bump { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--danger);
+  border: 1px solid var(--danger); border-radius: 4px; padding: 1px 5px; margin-left: 2px;
+  animation: bumpIn .55s cubic-bezier(.2,.8,.3,1.3) both .15s; }
+@keyframes bumpIn { 0% { transform: scale(.5); opacity: 0; } 60% { transform: scale(1.18); }
+  100% { transform: scale(1); opacity: 1; } }
 
-.offenders { width: 100%; border-collapse: collapse; font-size: 12px; }
-.offenders th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border); }
-.offenders td { padding: 5px 8px 5px 0; border-bottom: 1px solid color-mix(in oklab, var(--border) 40%, transparent); }
-.off-comm { font-family: var(--mono); color: var(--fg); }
-.off-cpu { text-align: right; font-family: var(--mono); }
-.rss-track { display: inline-block; vertical-align: middle; width: 120px; height: 6px; margin-right: 8px; }
-.rss-fill { position: absolute; inset: 0 auto 0 0; background: var(--warn); opacity: 0.6; }
-.num { font-family: var(--mono); }
-.container-badge { font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--surface-2); border-radius: 4px; padding: 2px 6px; }
+.membar { height: 10px; border-radius: 5px; background: var(--surface-2);
+  border: 1px solid var(--border); overflow: hidden; }
+.membar-used { height: 100%; position: relative; background: var(--accent); color: var(--accent); min-width: 2px; }
+.membar--warn .membar-used { background: var(--warn); color: var(--warn); }
+.membar--danger .membar-used { background: var(--danger); color: var(--danger); }
+.membar-cached { position: absolute; right: 0; top: 0; bottom: 0;
+  background: repeating-linear-gradient(45deg, transparent 0 3px,
+    color-mix(in srgb, currentColor 60%, transparent) 3px 5px); }
+.mem-nums { margin-top: 8px; font-size: 13px; }
+.mem-nums .big { font-size: 15px; font-weight: 600; }
+.mem-note { font-size: 11.5px; margin-top: 3px; }
+.swap { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; flex-wrap: wrap; }
+.swapbar { width: 64px; height: 4px; border-radius: 2px; background: var(--surface-2);
+  border: 1px solid var(--border); overflow: hidden; flex: none; }
+.swapbar i { display: block; height: 100%; }
+.swapbar--ok i { background: var(--ok); } .swapbar--warn i { background: var(--warn); }
+.swapbar--danger i { background: var(--danger); }
+.tag { font-size: 10px; font-weight: 700; letter-spacing: .08em; border-radius: 4px;
+  padding: 2px 6px; border: 1px solid; }
+.tag--warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+
+.psi-row { display: grid; grid-template-columns: 56px 1fr 40px; gap: 9px; align-items: center; padding: 4px 0; }
+.psi-name { font-size: 12px; color: var(--muted); }
+.psi-bar { position: relative; height: 7px; border-radius: 3.5px; background: var(--surface-2);
+  border: 1px solid var(--border); }
+.psi-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; min-width: 1px; }
+.psi--calm .psi-fill { background: color-mix(in srgb, var(--fg) 52%, transparent); }
+.psi--warn .psi-fill { background: var(--warn); }
+.psi--danger .psi-fill { background: var(--danger); }
+.psi-tick { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--fg); opacity: .85; }
+.psi-val { text-align: right; font-size: 12px; }
+.hh-empty { background: var(--surface-2); border: 1px dashed var(--border); border-radius: 8px;
+  padding: 10px 12px; display: grid; gap: 2px; }
+.hh-empty b { font-size: 12.5px; font-weight: 600; }
+.hh-empty span { font-size: 11.5px; color: var(--muted); }
+
+.thead, .trow { display: grid; grid-template-columns: minmax(0,1fr) 46px 52px 40px; gap: 8px; align-items: center; }
+.thead { font-size: 9.5px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--off); padding-bottom: 5px; border-bottom: 1px solid var(--border); }
+.thead span:nth-child(3), .thead span:nth-child(4), .trow .trss, .trow .tcpu { text-align: right; }
+.trow { padding: 5px 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent); }
+.trow:last-of-type { border-bottom: 0; }
+.tname { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.pname { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px; }
+.pbadge { font-family: var(--mono); font-size: 9.5px; border-radius: 4px; padding: 1px 5px;
+  border: 1px solid var(--border); color: var(--muted); background: var(--surface-2); white-space: nowrap; }
+.pbadge--host { color: var(--off); }
+.tbar { height: 5px; border-radius: 2.5px; background: var(--surface-2); position: relative; overflow: hidden; }
+.tbar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px;
+  background: color-mix(in srgb, var(--fg) 55%, transparent); }
+.trow--tiny .tbar i { opacity: .4; }
+.trow--tiny .tbar { background: transparent; border: 0; }
+.trss, .tcpu { font-size: 12px; }
+.trow--tiny .trss, .trow--tiny .tcpu { color: var(--off); }
+.tmore { background: none; border: 0; color: var(--accent); font-size: 12px; font-weight: 500;
+  cursor: pointer; padding: 6px 0 0; width: 100%; text-align: left; }
+
+/* collapse to top-4 unless expanded — phone only */
+.trow--hide { display: none; }
+.twrap.open .trow--hide { display: grid; }
+
+/* Tablet: rail becomes a band above the console (mock `a-tablet`) */
+@media (max-width: 1020px) {
+  .page-flex { grid-template-columns: 1fr; }
+  .rail { order: -1; border-left: 0; border: 1px solid var(--border); border-radius: 10px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0 22px; }
+  .hh-section { border-bottom: 1px solid var(--border); }
+  .rail .hh-section:nth-last-child(-n+2) { border-bottom: 0; }
+}
+/* Phone: single stack (mock `a-phone`) */
+@media (max-width: 640px) {
+  .rail { display: block; }
+  .tmore { display: block; }
+}
+@media (min-width: 641px) {
+  .tmore { display: none; }
+  .trow--hide { display: grid; }
+}
 ```
 
 - [ ] **Step 5: Build the frontend**
 
 Run: `cd /home/gem/projects/Codery/system/orchestrator/ui && npm ci && npm run build` (sandbox fallback: `bun install && bun run build`)
-Expected: `tsc -b` passes, `vite build` emits `dist/index.html`. Fix all TS errors — none may be suppressed with `any` casts beyond the existing style.
+Expected: `tsc -b` passes, `vite build` emits `dist/index.html`. No `any` casts beyond existing style. Fix all TS errors before committing.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /home/gem/projects/Codery && git add system/orchestrator/ui/src && git commit -m "feat(ui): Host Health panel — memory/PSI/OOM meters + worst-offenders table"
+cd /home/gem/projects/Codery && git add system/orchestrator/ui/src && git commit -m "feat(ui): Host Health rail (OpenDesign Option A) — memory/PSI/OOM meters + offenders"
 ```
 
----
 
 ### Task 6: Release 0.14.0 + deploy + live verification
 

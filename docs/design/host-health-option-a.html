@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Host Health — sidebar design options</title>
+<style>
+:root{
+  --bg:        oklch(0.16 0.01 260);
+  --surface:   oklch(0.20 0.01 260);
+  --surface-2: oklch(0.23 0.01 260);
+  --fg:        oklch(0.92 0.01 260);
+  --muted:     oklch(0.65 0.02 260);
+  --border:    oklch(0.30 0.01 260);
+  --accent:    oklch(0.70 0.15 250);
+  --ok:        oklch(0.72 0.17 150);
+  --warn:      oklch(0.75 0.15 80);
+  --danger:    oklch(0.63 0.20 25);
+  --off:       oklch(0.55 0.02 260);
+  --mono:      ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+  --sans:      system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:auto}
+body{background:var(--bg);color:var(--fg);font:400 14px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
+.page{max-width:1240px;margin:0 auto;padding:28px 28px 64px}
+.mono{font-family:var(--mono)}
+.mut{color:var(--muted)}
+button{font-family:var(--sans)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+
+/* ---------- page chrome ---------- */
+.page-head h1{font-size:18px;font-weight:650;letter-spacing:-.01em}
+.page-head .sub{color:var(--muted);font-size:13px;margin-top:4px;max-width:760px}
+.statebar{position:sticky;top:0;z-index:50;background:var(--bg);border-bottom:1px solid var(--border);
+  margin:20px -28px 0;padding:12px 28px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.seg-btn{background:transparent;border:0;border-left:1px solid var(--border);color:var(--muted);
+  padding:7px 14px;font-size:13px;font-weight:500;cursor:pointer}
+.seg-btn:first-child{border-left:0}
+.seg-btn:hover{color:var(--fg)}
+.seg-btn[aria-pressed="true"]{background:var(--surface-2);color:var(--fg)}
+.state-caption{font-size:12.5px;color:var(--muted)}
+.state-caption b{color:var(--fg);font-weight:600}
+
+.opt{margin-top:44px}
+.opt-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.opt-head h2{font-size:15px;font-weight:650}
+.rec-chip{font-size:10.5px;font-weight:650;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:2px 7px}
+.opt-thesis{color:var(--muted);font-size:13px;margin-top:6px;max-width:820px}
+.opt-notes{display:flex;gap:28px;flex-wrap:wrap;margin-top:10px}
+.opt-notes div{font-size:12.5px;color:var(--muted);max-width:380px}
+.opt-notes b{color:var(--fg);font-weight:600}
+
+/* ---------- device frames ---------- */
+.frame{margin-top:18px}
+.frame-label{font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:8px}
+.frame-body{border:1px solid var(--border);border-radius:12px;background:var(--bg);overflow:hidden;position:relative}
+.frame--desktop .frame-body{display:flex;height:566px}
+.frame--tablet .frame-body{max-width:820px;margin-inline:auto;padding:16px}
+.frame--phone .frame-body{max-width:390px;margin-inline:auto;padding:12px}
+
+/* ---------- console skeleton (context, not the deliverable) ---------- */
+.sk{padding:18px 22px;min-width:0}
+.frame--desktop .sk{flex:1;overflow:hidden;opacity:.78}
+.frame--tablet .frame-body > .sk,.frame--phone .frame-body > .sk{padding:4px 2px;opacity:.78}
+.sk-head{display:flex;justify-content:space-between;align-items:baseline}
+.sk-title{font-size:15px;font-weight:650}
+.sk-live{font-size:11.5px;color:var(--ok);display:inline-flex;align-items:center;gap:5px}
+.sk-live i{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+.sk-sum{font-size:11.5px;color:var(--muted);margin-top:2px}
+.sk-label{font-size:10px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+  margin:14px 0 6px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+.sk-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 11px;margin-bottom:8px}
+.sk-line{display:flex;align-items:center;gap:7px;font-size:12px}
+.sk-line b{font-weight:600}
+.sk-line em{font-style:normal;color:var(--muted);font-size:11px}
+.dot{width:7px;height:7px;border-radius:50%;flex:none}
+.dot--ok{background:var(--ok)} .dot--off{background:var(--off)}
+.sk-meta{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sk-actions{display:flex;gap:6px;margin-top:7px}
+.sk-actions span{font-size:10.5px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:2px 8px}
+
+/* ---------- host-health rail (shared) ---------- */
+.rail{background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;flex:none}
+.rail--a{width:322px} .rail--b{width:302px} .rail--c{width:342px}
+.hh-section{padding:13px 15px;border-bottom:1px solid var(--border)}
+.hh-section:last-child{border-bottom:0}
+.hh-label{font-size:10.5px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+  display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:9px}
+.hh-legend{font-size:10px;letter-spacing:.02em;text-transform:none;font-weight:500;color:var(--off)}
+
+/* health pill — reuses conn-pill idiom */
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;
+  padding:5px 11px;border:1px solid var(--border);border-radius:999px;background:var(--surface-2)}
+.pill-dot{width:8px;height:8px;border-radius:50%}
+.pill--green{color:var(--ok)}   .pill--green .pill-dot{background:var(--ok)}
+.pill--yellow{color:var(--warn)}.pill--yellow .pill-dot{background:var(--warn)}
+.pill--red{color:var(--danger)} .pill--red .pill-dot{background:var(--danger)}
+.pill-reasons{list-style:none;margin-top:9px;background:var(--surface-2);border-left:2px solid var(--border);
+  border-radius:0 6px 6px 0;padding:7px 10px;display:grid;gap:4px}
+.pill--red + .pill-reasons{border-left-color:var(--danger)}
+.pill--yellow + .pill-reasons{border-left-color:var(--warn)}
+.pill-reasons li{font-size:12px;color:var(--fg)}
+
+/* OOM */
+.oom{display:flex;align-items:center;gap:8px;margin-top:11px;font-size:12.5px;color:var(--muted)}
+.oom-dot{width:7px;height:7px;border-radius:50%;background:var(--off);flex:none}
+.oom--hot{color:var(--danger)}
+.oom--hot .oom-dot{background:var(--danger)}
+.oom-bump{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--danger);
+  border:1px solid var(--danger);border-radius:4px;padding:1px 5px;margin-left:2px;
+  animation:bumpIn .55s cubic-bezier(.2,.8,.3,1.3) both .15s}
+@keyframes bumpIn{0%{transform:scale(.5);opacity:0}60%{transform:scale(1.18)}100%{transform:scale(1);opacity:1}}
+
+/* memory */
+.membar{height:10px;border-radius:5px;background:var(--surface-2);border:1px solid var(--border);overflow:hidden}
+.membar-used{height:100%;position:relative;background:var(--accent);color:var(--accent);min-width:2px}
+.membar--warn .membar-used{background:var(--warn);color:var(--warn)}
+.membar--danger .membar-used{background:var(--danger);color:var(--danger)}
+.membar-cached{position:absolute;right:0;top:0;bottom:0;
+  background:repeating-linear-gradient(45deg,transparent 0 3px,color-mix(in srgb,currentColor 60%,transparent) 3px 5px)}
+.mem-nums{margin-top:8px;font-size:13px}
+.mem-nums .big{font-size:15px;font-weight:600}
+.mem-note{font-size:11.5px;margin-top:3px}
+.swap{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;flex-wrap:wrap}
+.swapbar{width:64px;height:4px;border-radius:2px;background:var(--surface-2);border:1px solid var(--border);overflow:hidden;flex:none}
+.swapbar i{display:block;height:100%}
+.swapbar--ok i{background:var(--ok)} .swapbar--warn i{background:var(--warn)} .swapbar--danger i{background:var(--danger)}
+.tag{font-size:10px;font-weight:700;letter-spacing:.08em;border-radius:4px;padding:2px 6px;border:1px solid}
+.tag--warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,transparent)}
+
+/* PSI */
+.psi-row{display:grid;grid-template-columns:56px 1fr 40px;gap:9px;align-items:center;padding:4px 0}
+.psi-name{font-size:12px;color:var(--muted)}
+.psi-bar{position:relative;height:7px;border-radius:3.5px;background:var(--surface-2);border:1px solid var(--border)}
+.psi-fill{position:absolute;left:0;top:0;bottom:0;border-radius:3px;min-width:1px}
+.psi--calm .psi-fill{background:color-mix(in srgb,var(--fg) 52%,transparent)}
+.psi--warn .psi-fill{background:var(--warn)}
+.psi--danger .psi-fill{background:var(--danger)}
+.psi-tick{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--fg);opacity:.85}
+.psi-val{text-align:right;font-size:12px}
+.hh-empty{background:var(--surface-2);border:1px dashed var(--border);border-radius:8px;padding:10px 12px;
+  display:grid;gap:2px}
+.hh-empty b{font-size:12.5px;font-weight:600}
+.hh-empty span{font-size:11.5px;color:var(--muted)}
+
+/* offenders table */
+.thead,.trow{display:grid;grid-template-columns:minmax(0,1fr) 46px 52px 40px;gap:8px;align-items:center}
+.thead{font-size:9.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--off);
+  padding-bottom:5px;border-bottom:1px solid var(--border)}
+.thead span:nth-child(3),.thead span:nth-child(4),.trow .trss,.trow .tcpu{text-align:right}
+.trow{padding:5px 0;border-bottom:1px solid color-mix(in srgb,var(--border) 45%,transparent)}
+.trow:last-of-type{border-bottom:0}
+.tname{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}
+.pname{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}
+.pbadge{font-family:var(--mono);font-size:9.5px;border-radius:4px;padding:1px 5px;border:1px solid var(--border);
+  color:var(--muted);background:var(--surface-2);white-space:nowrap}
+.pbadge--host{color:var(--off)}
+.tbar{height:5px;border-radius:2.5px;background:var(--surface-2);position:relative;overflow:hidden}
+.tbar i{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:color-mix(in srgb,var(--fg) 55%,transparent)}
+.trow--tiny .tbar i{opacity:.4}
+.trow--tiny .tbar{background:transparent;border:0}
+.trss,.tcpu{font-size:12px}
+.trow--tiny .trss,.trow--tiny .tcpu{color:var(--off)}
+.trow--hide{display:none}
+.twrap.open .trow--hide{display:grid}
+.tmore{background:none;border:0;color:var(--accent);font-size:12px;font-weight:500;cursor:pointer;
+  padding:6px 0 0;width:100%;text-align:left}
+
+/* tablet band + phone stack wrappers (options A / C) */
+.band{display:grid;grid-template-columns:1fr 1fr;gap:4px 22px;background:var(--surface);
+  border:1px solid var(--border);border-radius:10px;padding:6px 8px;margin-bottom:14px}
+.band .hh-section--wide{grid-column:1/-1}
+.stack{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:2px 4px;margin-bottom:14px}
+
+/* option B specifics */
+.glance{padding:13px 15px;border-bottom:1px solid var(--border)}
+.glance-mem{display:flex;align-items:baseline;gap:8px;margin-top:10px}
+.gbig{font-size:26px;font-weight:650;letter-spacing:-.02em}
+.gbig small{font-size:13px;color:var(--muted);font-weight:500}
+.gfree{font-size:11.5px}
+.membar--thin{height:7px;margin-top:7px}
+.glance-row{display:flex;align-items:center;gap:10px;margin-top:11px;font-size:12px;flex-wrap:wrap}
+.gsep{flex:1}
+.btabs{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--border)}
+.btab{background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);
+  font-size:12px;font-weight:600;padding:9px 4px;cursor:pointer}
+.btab[aria-pressed="true"]{color:var(--fg);border-bottom-color:var(--accent)}
+.bpanel{padding:11px 15px}
+.drawer-backdrop{position:absolute;inset:0;background:oklch(0.08 0.01 260 / .55)}
+.drawer{position:absolute;top:0;right:0;bottom:0;width:302px;background:var(--surface);
+  border-left:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
+.drawer .glance,.drawer .bpanel{flex:none}
+.drawer-cap{position:absolute;left:0;right:302px;bottom:10px;text-align:center;font-size:11px;color:var(--muted)}
+.sheet{position:absolute;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--border);
+  border-radius:14px 14px 0 0;box-shadow:0 -8px 24px oklch(0 0 0 / .4)}
+.sheet-handle{width:36px;height:4px;border-radius:2px;background:var(--off);margin:8px auto 2px}
+.sheet-peek{display:flex;align-items:center;gap:10px;padding:6px 16px 12px;font-size:12.5px}
+.sheet-note{font-size:10.5px;color:var(--muted);text-align:center;padding-bottom:8px}
+
+/* option C ledger */
+.lg{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:4px 0}
+.lg-k{font-size:12px;color:var(--muted)}
+.lg-v{font-family:var(--mono);font-size:12.5px}
+.lg-meter{height:3px;border-radius:1.5px;background:var(--surface-2);border:0;position:relative;overflow:visible;margin:3px 0 7px}
+.lg-meter i{position:absolute;left:0;top:0;bottom:0;border-radius:1.5px}
+.lg-r{font-size:11.5px;color:var(--fg);padding:2px 0 2px 10px;border-left:2px solid var(--danger);margin:4px 0}
+.optc .thead span{font-family:var(--mono);letter-spacing:.06em}
+.optc .trow{padding:3px 0}
+.optc .pname{font-family:var(--mono);font-size:12px}
+
+/* responsive: the options page itself */
+@media (max-width:760px){
+  .page{padding:20px 16px 48px}
+  .statebar{margin:16px -16px 0;padding:10px 16px}
+  .frame--desktop .frame-body{flex-direction:column;height:auto}
+  .frame--desktop .rail{width:auto;border-left:0;border-top:1px solid var(--border)}
+  .frame--desktop .sk{max-height:200px;overflow:hidden}
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="page-head" data-od-id="options-header">
+    <h1>Host Health panel — sidebar design options</h1>
+    <p class="sub">Three directions for the host-metrics rail beside the Deploy Console, all on the existing
+      slate tokens. Each is shown in context at desktop, then tablet (820) and phone (390).
+      Use the switcher to flip every mock between the brief's states: nominal, red storm, PSI unavailable, first sample.</p>
+  </header>
+
+  <div class="statebar" data-od-id="state-switcher">
+    <div class="seg" role="group" aria-label="Sample state">
+      <button class="seg-btn" data-state="nominal" aria-pressed="true">Nominal</button>
+      <button class="seg-btn" data-state="red" aria-pressed="false">Red storm</button>
+      <button class="seg-btn" data-state="psiNull" aria-pressed="false">PSI unavailable</button>
+      <button class="seg-btn" data-state="first" aria-pressed="false">First sample</button>
+    </div>
+    <p class="state-caption" id="stateCaption"></p>
+  </div>
+
+  <main>
+    <!-- ============ OPTION A ============ -->
+    <section class="opt" data-od-id="option-instrument-strip">
+      <div class="opt-head"><h2>A — Instrument strip</h2><span class="rec-chip">Recommended</span></div>
+      <p class="opt-thesis">A 322 px rail that mirrors the console's section-label rhythm: STATUS, MEMORY, PRESSURE,
+        OFFENDERS stacked top-to-bottom in the brief's priority order. Nothing hidden behind tabs or drawers —
+        every slot from the data contract is visible at once, the rail scrolls independently of the console.</p>
+      <div class="opt-notes">
+        <div><b>Why</b> — glanceable in one fixation per section; zero interaction to reach the offenders table;
+          degrades to a 2-column band on tablet and a single stack on phone with no pattern change.</div>
+        <div><b>Watch out</b> — the rail is tall; on short viewports the offenders table is below the fold of the rail
+          (it scrolls). Main column narrows to ~740 px on desktop — container rows reflow, they were designed as rows.</div>
+      </div>
+      <div class="frame frame--desktop">
+        <div class="frame-label">Desktop · rail beside console</div>
+        <div class="frame-body" data-render="a-desktop"></div>
+      </div>
+      <div class="frame frame--tablet">
+        <div class="frame-label">Tablet · 820 — rail becomes a band above services</div>
+        <div class="frame-body" data-render="a-tablet"></div>
+      </div>
+      <div class="frame frame--phone">
+        <div class="frame-label">Phone · 390 — single stack; table shows top 4, expandable</div>
+        <div class="frame-body" data-render="a-phone"></div>
+      </div>
+    </section>
+
+    <!-- ============ OPTION B ============ -->
+    <section class="opt" data-od-id="option-glance-drawer">
+      <div class="opt-head"><h2>B — Glance + drawer</h2></div>
+      <p class="opt-thesis">A 302 px rail split in two: a pinned glance card (pill, used-% readout, swap, OOM count)
+        and a tabbed lower half for Pressure / Processes. On tablet the panel becomes a slide-over drawer;
+        on phone, a peeking bottom sheet.</p>
+      <div class="opt-notes">
+        <div><b>Why</b> — narrowest desktop footprint; the glance answers priorities 1–2 (headroom, health) with zero
+          scroll; drawer/sheet scale gracefully on touch.</div>
+        <div><b>Watch out</b> — offenders sit behind a tab (priority 4 costs a click), and a closed drawer/sheet means
+          the host is invisible — risky for a panel whose whole point is memory pressure.</div>
+      </div>
+      <div class="frame frame--desktop">
+        <div class="frame-label">Desktop · glance rail, Pressure tab active</div>
+        <div class="frame-body" data-render="b-desktop"></div>
+      </div>
+      <div class="frame frame--tablet">
+        <div class="frame-label">Tablet · slide-over drawer (shown open; closed by default)</div>
+        <div class="frame-body" data-render="b-tablet"></div>
+      </div>
+      <div class="frame frame--phone">
+        <div class="frame-label">Phone · bottom sheet peek</div>
+        <div class="frame-body" data-render="b-phone"></div>
+      </div>
+    </section>
+
+    <!-- ============ OPTION C ============ -->
+    <section class="opt optc" data-od-id="option-ledger">
+      <div class="opt-head"><h2>C — Ledger readout</h2></div>
+      <p class="opt-thesis">Same stack as A, but typeset as a terminal ledger: labels left, values right in mono,
+        hairline meters, no sub-panels. ~20% denser than A — all twelve offenders and every PSI number fit
+        without scrolling on a 900 px-tall display.</p>
+      <div class="opt-notes">
+        <div><b>Why</b> — maximum density with minimum chrome; matches the ops-console DNA; pill idiom still carried
+          for health so it doesn't read as raw syslog.</div>
+        <div><b>Watch out</b> — dense mono rows are slower to scan for non-terminal folks; the memory bar loses the
+          big numeric readout's prominence. Same band/stack responsive strategy as A.</div>
+      </div>
+      <div class="frame frame--desktop">
+        <div class="frame-label">Desktop · ledger rail</div>
+        <div class="frame-body" data-render="c-desktop"></div>
+      </div>
+      <div class="frame frame--tablet">
+        <div class="frame-label">Tablet · 820 — band</div>
+        <div class="frame-body" data-render="c-tablet"></div>
+      </div>
+      <div class="frame frame--phone">
+        <div class="frame-label">Phone · 390 — stack</div>
+        <div class="frame-body" data-render="c-phone"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer style="margin-top:48px;border-top:1px solid var(--border);padding-top:16px">
+    <p class="mut" style="font-size:13px;max-width:820px">Pick a direction (A / B / C) — and note the tablet/phone
+      strategy you prefer where they differ (A/C stack in place; B goes drawer + bottom sheet). I'll then produce
+      the full mock suite for the winner: nominal, red, offenders close-up, and the edge variants, per the brief.</p>
+  </footer>
+</div>
+
+<script>
+/* ---------------- sample states (from the brief's data contract) ---------------- */
+const HEALTH_LABEL = {green:'Healthy', yellow:'Strained', red:'Critical'};
+
+const BASE_PROCS = [
+  ['opencode',788.4,12.3,'sandbox-blue'],
+  ['dockerd',612.0,2.1,'host'],
+  ['bun',431.2,1.8,'apps-blue'],
+  ['node',388.7,0.9,'host'],
+  ['containerd',214.5,0.7,'host'],
+  ['nginx',96.3,0.6,'apps-blue'],
+  ['caddy',88.1,0.4,'host'],
+  ['tailscaled',42.7,0.2,'host'],
+  ['systemd-journal',38.9,0.3,'host'],
+  ['s6-svscan',12.4,0.1,'host'],
+  ['sshd',9.8,0.0,'host'],
+  ['cron',6.2,0.0,'host'],
+];
+
+const STATES = {
+  nominal: {
+    caption:'<b>Nominal</b> — green, 4.2 GB free, PSI present, no swap on host, OOM at 0.',
+    health:{status:'green', reasons:[]},
+    mem:{total:7862, avail:4210, cached:1830, buffers:120},
+    swap:{total:0, free:0},
+    psi:{
+      cpu:{some:{avg10:3.2,avg60:1.1,avg300:0.4}},
+      memory:{some:{avg10:0.8,avg60:0.3,avg300:0.1}, full:{avg10:0,avg60:0,avg300:0}},
+      io:{some:{avg10:1.4,avg60:0.2,avg300:0.1}, full:{avg10:0,avg60:0,avg300:0}}},
+    oom:0, bump:false,
+    procs:BASE_PROCS,
+  },
+  red: {
+    caption:'<b>Red storm</b> — 9% available, swap 1536/2048 MB, PSI memory+IO stalling, OOM count just incremented 12 → 13.',
+    health:{status:'red', reasons:['MemAvailable 9% of total','swap in use 1.5 GB','OOM kill detected']},
+    mem:{total:7862, avail:712, cached:1830, buffers:120},
+    swap:{total:2048, free:512},
+    psi:{
+      cpu:{some:{avg10:22.6,avg60:9.8,avg300:3.4}},
+      memory:{some:{avg10:8.4,avg60:5.2,avg300:2.1}, full:{avg10:2.3,avg60:0.9,avg300:0.2}},
+      io:{some:{avg10:12.6,avg60:6.1,avg300:2.4}, full:{avg10:1.8,avg60:0.7,avg300:0.2}}},
+    oom:13, bump:true,
+    procs:[
+      ['rustc',1421.6,214.8,'sandbox-green'],
+      ['opencode',788.4,18.9,'sandbox-blue'],
+      ['dockerd',612.0,4.2,'host'],
+      ['bun',431.2,2.6,'apps-blue'],
+      ['node',388.7,1.9,'host'],
+      ['containerd',214.5,1.1,'host'],
+      ['nginx',96.3,0.8,'apps-blue'],
+      ['caddy',88.1,0.5,'host'],
+      ['tailscaled',42.7,0.4,'host'],
+      ['systemd-journal',38.9,0.5,'host'],
+      ['s6-svscan',12.4,0.2,'host'],
+      ['kswapd0',3.1,96.4,'host'],
+    ],
+  },
+  psiNull: {
+    caption:'<b>PSI unavailable</b> — old kernel; pressure section renders an explicit placeholder, everything else nominal.',
+    health:{status:'green', reasons:['PSI unavailable']},
+    mem:{total:7862, avail:4210, cached:1830, buffers:120},
+    swap:{total:0, free:0},
+    psi:null,
+    oom:0, bump:false,
+    procs:BASE_PROCS,
+  },
+  first: {
+    caption:'<b>First sample</b> — daemon just started: every cpu_pct reads 0 until the next tick.',
+    health:{status:'green', reasons:[]},
+    mem:{total:7862, avail:4210, cached:1830, buffers:120},
+    swap:{total:0, free:0},
+    psi:STATES_PLACEHOLDER(),
+    oom:0, bump:false,
+    procs:BASE_PROCS.map(r=>[r[0],r[1],0,r[3]]),
+  },
+};
+function STATES_PLACEHOLDER(){
+  return {
+    cpu:{some:{avg10:3.2,avg60:1.1,avg300:0.4}},
+    memory:{some:{avg10:0.8,avg60:0.3,avg300:0.1}, full:{avg10:0,avg60:0,avg300:0}},
+    io:{some:{avg10:1.4,avg60:0.2,avg300:0.1}, full:{avg10:0,avg60:0,avg300:0}}};
+}
+
+const fmt = n => n.toLocaleString('en-US');
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+const memTone = availPct => availPct<10?'membar--danger':availPct<20?'membar--warn':'';
+const psiTone = v => v>=10?'psi--danger':v>=2?'psi--warn':'psi--calm';
+
+/* ---------------- shared partials ---------------- */
+function pillHTML(s, p){
+  const h=s.health;
+  return `<span class="pill pill--${h.status}" data-od-id="${p}host-health-pill"
+    title="${esc(h.reasons.join(' · '))||'No active triggers'}"><i class="pill-dot"></i>${HEALTH_LABEL[h.status]}</span>`;
+}
+function reasonsHTML(s, p){
+  if(!s.health.reasons.length) return '';
+  return `<ul class="pill-reasons" data-od-id="${p}host-health-reasons">
+    ${s.health.reasons.map(r=>`<li>${r}</li>`).join('')}</ul>`;
+}
+function oomHTML(s, p){
+  return `<div class="oom ${s.oom>0?'oom--hot':''}" data-od-id="${p}host-oom-badge">
+    <i class="oom-dot"></i><span class="mono" style="font-weight:600">${s.oom}</span>
+    <span>OOM kills since boot</span>
+    ${s.bump?`<span class="oom-bump" data-od-id="${p}host-oom-bump">+1</span>`:''}</div>`;
+}
+function membarHTML(s, p, thin){
+  const m=s.mem, used=m.total-m.avail, usedPct=used/m.total*100,
+        cachePct=(m.cached+m.buffers)/m.total*100;
+  return `<div class="membar ${thin?'membar--thin':''} ${memTone(m.avail/m.total*100)}"
+      data-od-id="${p}host-memory-bar" role="img" aria-label="${fmt(used)} MB used of ${fmt(m.total)} MB">
+    <div class="membar-used" style="width:${usedPct.toFixed(1)}%">
+      <div class="membar-cached" title="cached + buffers" style="width:${(cachePct/usedPct*100).toFixed(1)}%"></div>
+    </div></div>`;
+}
+function memNumsHTML(s, p){
+  const m=s.mem;
+  return `<div class="mem-nums" data-od-id="${p}host-memory-nums">
+      <span class="mono big">${fmt(m.avail)} MB</span> <span class="mut">free</span>
+      <span class="mut">· ${fmt(m.total)} MB total</span></div>
+    <div class="mem-note mut">cache + buffers ${fmt(m.cached+m.buffers)} MB reclaimable (hatched)</div>`;
+}
+function swapHTML(s, p){
+  if(!s.swap.total)
+    return `<div class="swap" data-od-id="${p}host-swap"><span class="tag tag--warn">NO SWAP</span>
+      <span class="mut">swap disabled on this host</span></div>`;
+  const used=s.swap.total-s.swap.free, pct=used/s.swap.total*100,
+        tone=pct>60?'danger':pct>25?'warn':'ok';
+  return `<div class="swap" data-od-id="${p}host-swap">
+    <div class="swapbar swapbar--${tone}"><i style="width:${pct.toFixed(1)}%"></i></div>
+    <span class="mono">${fmt(used)}</span><span class="mut">/ ${fmt(s.swap.total)} MB swap</span></div>`;
+}
+function psiRowHTML(name, d, p, id){
+  const a=d.some;
+  return `<div class="psi-row ${psiTone(a.avg10)}" data-od-id="${p}host-psi-${id}"
+      title="avg60 ${a.avg60}% · avg300 ${a.avg300}% (5-min)">
+    <span class="psi-name">${name}</span>
+    <span class="psi-bar"><i class="psi-fill" style="width:${Math.min(100,a.avg10).toFixed(1)}%"></i>
+      <i class="psi-tick" style="left:${Math.min(100,a.avg60).toFixed(1)}%"></i></span>
+    <span class="psi-val mono">${a.avg10.toFixed(1)}</span></div>`;
+}
+function psiSectionHTML(s, p){
+  if(!s.psi)
+    return `<div class="hh-empty" data-od-id="${p}host-psi-placeholder"><b>PSI unavailable</b>
+      <span>kernel doesn't expose pressure stall reports — CPU / memory / IO stall can't be shown</span></div>`;
+  return `${psiRowHTML('CPU',s.psi.cpu,p,'cpu')}
+    ${psiRowHTML('Memory',s.psi.memory,p,'memory')}
+    ${psiRowHTML('IO',s.psi.io,p,'io')}`;
+}
+function tableHTML(s, p, mode){
+  const max=Math.max(...s.procs.map(r=>r[1]));
+  const rows=s.procs.map((r,i)=>{
+    const tiny=r[1]<max*0.05, hide=(mode==='phone'&&i>3)?' trow--hide':'';
+    return `<div class="trow${tiny?' trow--tiny':''}${hide}">
+      <span class="tname"><span class="pname">${r[0]}</span>
+        <span class="pbadge pbadge--${r[3]==='host'?'host':'ctr'}">${r[3]}</span></span>
+      <span class="tbar"><i style="width:${(r[1]/max*100).toFixed(1)}%"></i></span>
+      <span class="trss mono">${r[1].toFixed(0)}</span>
+      <span class="tcpu mono">${r[2].toFixed(1)}</span></div>`;
+  }).join('');
+  const toggle = mode==='phone'
+    ? `<button class="tmore" data-toggle-rows>Show all ${s.procs.length}</button>` : '';
+  return `<div class="thead"><span>process</span><span></span><span>rss</span><span>cpu%</span></div>
+    <div class="twrap" data-tablewrap>${rows}</div>${toggle}`;
+}
+function secLabel(txt, legend){
+  return `<div class="hh-label">${txt}${legend?`<span class="hh-legend">${legend}</span>`:''}</div>`;
+}
+
+/* ---------------- Option A — instrument strip ---------------- */
+function railA(s, mode){
+  const p='';
+  return `
+    <section class="hh-section">
+      ${secLabel('Status')}
+      ${pillHTML(s,p)}${reasonsHTML(s,p)}${oomHTML(s,p)}
+    </section>
+    <section class="hh-section">
+      ${secLabel('Memory')}
+      ${membarHTML(s,p)}${memNumsHTML(s,p)}${swapHTML(s,p)}
+    </section>
+    <section class="hh-section">
+      ${secLabel('Pressure · PSI','fill avg10 · tick avg60 · hover 5-min')}
+      ${psiSectionHTML(s,p)}
+    </section>
+    <section class="hh-section">
+      ${secLabel('Offenders','top '+s.procs.length+' by RSS')}
+      ${tableHTML(s,p,mode)}
+    </section>`;
+}
+
+/* ---------------- Option B — glance + drawer ---------------- */
+function glanceHTML(s, p){
+  const m=s.mem, usedPct=(m.total-m.avail)/m.total*100;
+  return `<div class="glance">
+    ${secLabel('Host')}
+    ${pillHTML(s,p)}${reasonsHTML(s,p)}
+    <div class="glance-mem" data-od-id="${p}host-memory-readout">
+      <span class="mono gbig">${Math.round(usedPct)}<small>% used</small></span>
+      <span class="mut gfree mono">${fmt(m.avail)} MB free</span></div>
+    ${membarHTML(s,p,true)}
+    <div class="glance-row">${swapHTML(s,p)}<span class="gsep"></span></div>
+    ${oomHTML(s,p)}
+  </div>`;
+}
+function railB(s){
+  const p='optb-';
+  return `${glanceHTML(s,p)}
+    <div class="btabs" role="tablist">
+      <button class="btab" data-btab="psi" aria-pressed="true">Pressure</button>
+      <button class="btab" data-btab="proc" aria-pressed="false">Processes · ${s.procs.length}</button>
+    </div>
+    <div class="bpanel" data-bpanel="psi">
+      ${secLabel('PSI','fill avg10 · tick avg60')}
+      ${psiSectionHTML(s,p)}
+    </div>
+    <div class="bpanel" data-bpanel="proc" hidden>
+      ${secLabel('Offenders','top '+s.procs.length+' by RSS')}
+      ${tableHTML(s,p,'dk')}
+    </div>`;
+}
+
+/* ---------------- Option C — ledger ---------------- */
+const psiColorFor = v => v>=10?'var(--danger)':v>=2?'var(--warn)':'color-mix(in srgb, var(--fg) 52%, transparent)';
+function ledgerPsiHTML(s, p){
+  if(!s.psi){
+    return `<div class="hh-empty" data-od-id="${p}host-psi-placeholder"><b>PSI unavailable</b>
+      <span>kernel doesn't expose pressure reports</span></div>`;
+  }
+  const row=(name,d,id)=>{
+    const a=d.some;
+    return `<div class="lg" data-od-id="${p}host-psi-${id}" title="avg60 ${a.avg60}% · avg300 ${a.avg300}% (5-min)">
+      <span class="lg-k">${name}</span>
+      <span class="lg-meter" style="flex:1;align-self:center;margin:0 10px">
+        <i class="psi-fill" style="width:${Math.min(100,a.avg10).toFixed(1)}%;background:${psiColorFor(a.avg10)}"></i>
+        <i class="psi-tick" style="left:${Math.min(100,a.avg60).toFixed(1)}%"></i></span>
+      <span class="lg-v">${a.avg10.toFixed(1)}</span></div>`;
+  };
+  return row('cpu',s.psi.cpu,'cpu')+row('mem',s.psi.memory,'memory')+row('io',s.psi.io,'io');
+}
+function railC(s, mode){
+  const p='optc-';
+  const m=s.mem, used=m.total-m.avail, usedPct=used/m.total*100;
+  const availPct=m.avail/m.total*100;
+  const memColor = availPct<10?'var(--danger)':availPct<20?'var(--warn)':'var(--accent)';
+  return `
+    <section class="hh-section">
+      ${secLabel('Status')}
+      <div class="lg"><span class="lg-k">health</span>${pillHTML(s,p)}</div>
+      ${s.health.reasons.map(r=>`<div class="lg-r">${r}</div>`).join('')}
+      <div class="lg ${s.oom>0?'oom--hot':''}" data-od-id="${p}host-oom-badge">
+        <span class="lg-k">oom kills</span>
+        <span class="lg-v">${s.oom} since boot${s.bump?' <span class="oom-bump">+1</span>':''}</span></div>
+    </section>
+    <section class="hh-section">
+      ${secLabel('Memory')}
+      <div data-od-id="${p}host-memory-bar">
+        <div class="lg"><span class="lg-k">free</span><span class="lg-v">${fmt(m.avail)} MB</span></div>
+        <div class="lg"><span class="lg-k">total</span><span class="lg-v">${fmt(m.total)} MB</span></div>
+        <div class="lg"><span class="lg-k">reclaimable</span><span class="lg-v">${fmt(m.cached+m.buffers)} MB</span></div>
+      </div>
+      <div class="lg-meter" aria-hidden="true">
+        <i class="psi-fill" style="width:${usedPct.toFixed(1)}%;background:${memColor}"></i></div>
+      ${swapHTML(s,p)}
+    </section>
+    <section class="hh-section">
+      ${secLabel('Pressure · PSI','avg10 · tick avg60')}
+      ${ledgerPsiHTML(s,p)}
+    </section>
+    <section class="hh-section">
+      ${secLabel('Offenders','top '+s.procs.length+' by RSS')}
+      ${tableHTML(s,p,mode)}
+    </section>`;
+}
+
+/* ---------------- console skeleton ---------------- */
+function skeleton(){
+  return `<div class="sk">
+    <div class="sk-head"><span class="sk-title">Codery Deploy Console</span>
+      <span class="sk-live"><i></i>Live</span></div>
+    <div class="sk-sum">2 running · 1 exited</div>
+    <div class="sk-label">Sandbox</div>
+    <div class="sk-card">
+      <div class="sk-line"><i class="dot dot--ok"></i><b>codery-sandbox-green</b><em>running · serving</em></div>
+      <div class="sk-meta">up 5 hours · ghcr.io/…:sandbox-openwiki-81f8f99</div>
+      <div class="sk-actions"><span>Stop</span><span>Restart</span><span>Kill</span><span>Rollback</span></div>
+    </div>
+    <div class="sk-card">
+      <div class="sk-line"><i class="dot dot--off"></i><b>codery-sandbox-blue</b><em>exited</em></div>
+      <div class="sk-meta">exited (0) · about an hour ago</div>
+    </div>
+    <div class="sk-label">Apps</div>
+    <div class="sk-card">
+      <div class="sk-line"><i class="dot dot--ok"></i><b>codery-apps-blue</b><em>running · serving</em></div>
+      <div class="sk-meta">up 9 days · ghcr.io/coderyoss/codery:apps-locale-fix</div>
+    </div>
+  </div>`;
+}
+
+/* ---------------- render targets ---------------- */
+const RENDER = {
+  'a-desktop': s => skeleton() + `<aside class="rail rail--a" data-od-id="host-health-rail">${railA(s,'dk')}</aside>`,
+  'a-tablet' : s => `<div class="band">
+      <div class="hh-section">${secLabel('Status')}${pillHTML(s,'')}${reasonsHTML(s,'')}${oomHTML(s,'')}</div>
+      <div class="hh-section">${secLabel('Memory')}${membarHTML(s,'')}${memNumsHTML(s,'')}${swapHTML(s,'')}</div>
+      <div class="hh-section hh-section--wide">${secLabel('Pressure · PSI','fill avg10 · tick avg60 · hover 5-min')}${psiSectionHTML(s,'')}</div>
+      <div class="hh-section hh-section--wide">${secLabel('Offenders','top '+s.procs.length+' by RSS')}${tableHTML(s,'','dk')}</div>
+    </div>` + skeleton(),
+  'a-phone'  : s => `<div class="stack">${railA(s,'phone')}</div>` + skeleton(),
+  'b-desktop': s => skeleton() + `<aside class="rail rail--b" data-od-id="optb-host-health-rail">${railB(s)}</aside>`,
+  'b-tablet' : s => skeleton() + `<div class="drawer-backdrop"></div>
+      <aside class="drawer">${railB(s)}</aside><div class="drawer-cap">slides over the console; closed by default</div>`,
+  'b-phone'  : s => {
+      const m=s.mem, usedPct=Math.round((m.total-m.avail)/m.total*100);
+      return skeleton() + `<div class="sheet"><div class="sheet-handle"></div>
+        <div class="sheet-peek">${pillHTML(s,'optb-')}
+          <span class="mono" data-od-id="optb-host-memory-readout"><b>${usedPct}%</b> used</span>
+          <span class="mut mono">${s.oom>0?s.oom+' OOM':'0 OOM'}</span></div>
+        <div class="sheet-note">tap to open the full Host Health panel</div></div>`;
+  },
+  'c-desktop': s => skeleton() + `<aside class="rail rail--c" data-od-id="optc-host-health-rail">${railC(s,'dk')}</aside>`,
+  'c-tablet' : s => {
+      const m=s.mem, used=m.total-m.avail, usedPct=used/m.total*100;
+      const availPct=m.avail/m.total*100;
+      const memColor = availPct<10?'var(--danger)':availPct<20?'var(--warn)':'var(--accent)';
+      return `<div class="band">
+        <div class="hh-section">${secLabel('Status')}
+          <div class="lg"><span class="lg-k">health</span>${pillHTML(s,'optc-')}</div>
+          ${s.health.reasons.map(r=>`<div class="lg-r">${r}</div>`).join('')}
+          <div class="lg ${s.oom>0?'oom--hot':''}" data-od-id="optc-host-oom-badge">
+            <span class="lg-k">oom kills</span>
+            <span class="lg-v">${s.oom} since boot${s.bump?' <span class="oom-bump">+1</span>':''}</span></div></div>
+        <div class="hh-section">${secLabel('Memory')}
+          <div class="lg"><span class="lg-k">free</span><span class="lg-v mono">${fmt(m.avail)} MB</span></div>
+          <div class="lg"><span class="lg-k">total</span><span class="lg-v mono">${fmt(m.total)} MB</span></div>
+          <div class="lg"><span class="lg-k">reclaimable</span><span class="lg-v mono">${fmt(m.cached+m.buffers)} MB</span></div>
+          <div class="lg-meter" aria-hidden="true">
+            <i class="psi-fill" style="width:${usedPct.toFixed(1)}%;background:${memColor}"></i></div>
+          ${swapHTML(s,'optc-')}</div>
+        <div class="hh-section hh-section--wide">${secLabel('Pressure · PSI','avg10 · tick avg60')}${ledgerPsiHTML(s,'optc-')}</div>
+        <div class="hh-section hh-section--wide">${secLabel('Offenders','top '+s.procs.length+' by RSS')}${tableHTML(s,'optc-','dk')}</div>
+      </div>` + skeleton();
+  },
+  'c-phone'  : s => `<div class="stack">${railC(s,'phone')}</div>` + skeleton(),
+};
+
+/* ---------------- state machine + delegation ---------------- */
+let CURRENT='nominal';
+function setState(key){
+  CURRENT=key;
+  document.querySelectorAll('.seg-btn').forEach(b=>
+    b.setAttribute('aria-pressed', b.dataset.state===key?'true':'false'));
+  document.getElementById('stateCaption').innerHTML=STATES[key].caption;
+  document.querySelectorAll('[data-render]').forEach(el=>{
+    el.innerHTML=RENDER[el.dataset.render](STATES[key]);
+  });
+}
+document.addEventListener('click', e=>{
+  const st=e.target.closest('[data-state]');
+  if(st){ setState(st.dataset.state); return; }
+  const tb=e.target.closest('[data-btab]');
+  if(tb){
+    const root=tb.closest('[data-od-id="optb-host-health-rail"]');
+    root.querySelectorAll('[data-btab]').forEach(b=>
+      b.setAttribute('aria-pressed', b===tb?'true':'false'));
+    root.querySelectorAll('[data-bpanel]').forEach(p=>
+      p.hidden = p.dataset.bpanel!==tb.dataset.btab);
+    return;
+  }
+  const tg=e.target.closest('[data-toggle-rows]');
+  if(tg){
+    const wrap=tg.parentElement.querySelector('.twrap');
+    const open=wrap.classList.toggle('open');
+    tg.textContent = open ? 'Show top 4' : 'Show all '+wrap.querySelectorAll('.trow').length;
+  }
+});
+setState('nominal');
+</script>
+</body>
+</html>

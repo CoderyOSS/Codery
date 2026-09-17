@@ -1,7 +1,7 @@
 # Host Metrics Dashboard (Memory Pressure Metering) — Design
 
 Date: 2026-09-16
-Status: Approved approach A; **visual design delegated to OpenDesign (§7)** — appearance TBD pending OpenDesign mock approval.
+Status: Approved approach A (backend). **Visual design approved: OpenDesign Option A "Instrument strip"** — 322 px sidebar rail beside the console (band above services ≤1020 px, single stack ≤640 px). Mock: `docs/design/host-health-option-a.html` (deliverable A of `host-health-sidebar-options.html`). §7.5 deliverables 1–4 satisfied by that mock's four state views (nominal, red storm, PSI unavailable, first sample).
 
 ## 1. Goal
 
