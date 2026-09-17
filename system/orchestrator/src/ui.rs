@@ -66,6 +66,8 @@ fn short_id(id: Option<&str>) -> String {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+// Kept: stable entry point used by tests and external callers; delegates to make_router_with_metrics.
+#[allow(dead_code)]
 pub fn make_router(events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Router {
     let (metrics_tx, _) = broadcast::channel::<String>(32);
     let metrics: MetricsStateShared =
