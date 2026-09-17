@@ -326,13 +326,14 @@ body {
 .mono { font-family: var(--mono); }
 .mut { color: var(--muted); }
 
-.page-flex { max-width: 1240px; margin: 0 auto; padding: 24px; display: grid;
-  grid-template-columns: minmax(0, 1fr) 322px; gap: 20px; align-items: start; }
-.page-main { min-width: 0; }
+.page-flex { display: grid;
+  grid-template-columns: minmax(0, 1fr) 322px; align-items: start; }
+.page-main { min-width: 0; padding: 24px; }
 .page-main .page { padding: 0; max-width: none; }
-body { padding: 0; } /* .page-flex now owns the outer padding (neutralizes double 24px) */
+body { padding: 0; } /* .page-main owns the outer padding (neutralizes double 24px) */
 
-.rail { background: var(--surface); border-left: 1px solid var(--border); overflow-y: auto; }
+.rail { background: var(--surface); border-left: 1px solid var(--border); overflow-y: auto;
+  position: sticky; top: 0; height: 100vh; }
 .hh-section { padding: 13px 15px; border-bottom: 1px solid var(--border); }
 .hh-section:last-child { border-bottom: 0; }
 .hh-label { font-size: 10.5px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
@@ -427,8 +428,10 @@ body { padding: 0; } /* .page-flex now owns the outer padding (neutralizes doubl
 
 /* Tablet: rail becomes a band above the console (mock `a-tablet`) */
 @media (max-width: 1020px) {
-  .page-flex { grid-template-columns: 1fr; }
-  .rail { order: -1; border-left: 0; border: 1px solid var(--border); border-radius: 10px;
+  .page-flex { grid-template-columns: 1fr; padding: 16px; }
+  .page-main { padding: 0; }
+  .rail { order: -1; position: static; height: auto; border-left: 0;
+    border: 1px solid var(--border); border-radius: 10px;
     display: grid; grid-template-columns: 1fr 1fr; gap: 0 22px; }
   .hh-section { border-bottom: 1px solid var(--border); }
   .rail .hh-section:nth-last-child(-n+2) { border-bottom: 0; }
