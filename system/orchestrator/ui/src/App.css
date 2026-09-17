@@ -428,7 +428,7 @@ body { padding: 0; } /* .page-main owns the outer padding (neutralizes double 24
 
 /* Tablet: rail becomes a band above the console (mock `a-tablet`) */
 @media (max-width: 1020px) {
-  .page-flex { grid-template-columns: 1fr; padding: 16px; }
+  .page-flex { grid-template-columns: 1fr; gap: 16px; padding: 16px; }
   .page-main { padding: 0; }
   .rail { order: -1; position: static; height: auto; border-left: 0;
     border: 1px solid var(--border); border-radius: 10px;
