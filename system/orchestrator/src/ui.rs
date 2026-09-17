@@ -31,6 +31,7 @@ fn ts() -> String {
 
 pub type RollbackLock = Arc<Mutex<HashSet<String>>>;
 pub type Ops = Arc<Mutex<HashMap<String, &'static str>>>;
+pub type MetricsStateShared = std::sync::Arc<std::sync::Mutex<crate::host_metrics::MetricsState>>;
 
 #[derive(Clone)]
 pub struct AppState {

@@ -337,6 +337,112 @@ pub fn top_processes(
     rows
 }
 
+// ── Assembly ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HostMetrics {
+    pub ts: u64,
+    pub health: Health,
+    pub memory: MemoryInfo,
+    pub psi: Option<Psi>,
+    pub oom_kills: u64,
+    pub top_processes: Vec<TopProcess>,
+}
+
+/// Window state shared between the timer task and HTTP handlers so every
+/// consumer sees the same CPU deltas and oom baseline.
+#[derive(Debug, Default)]
+pub struct MetricsState {
+    pub prev: Option<ProcSnapshot>,
+    pub prev_oom: Option<u64>,
+}
+
+/// Read all three PSI files; None unless all three parse (spec: null-or-complete).
+pub fn read_psi() -> Option<Psi> {
+    let cpu = std::fs::read_to_string("/proc/pressure/cpu").ok()?;
+    let memory = std::fs::read_to_string("/proc/pressure/memory").ok()?;
+    let io = std::fs::read_to_string("/proc/pressure/io").ok()?;
+    Some(Psi {
+        cpu: parse_pressure(&cpu)?,
+        memory: parse_pressure(&memory)?,
+        io: parse_pressure(&io)?,
+    })
+}
+
+/// Docker container id → name map for process attribution. Empty on error.
+pub async fn container_map(docker: &bollard::Docker) -> HashMap<String, String> {
+    let list = docker.list_containers(Some(bollard::container::ListContainersOptions::<String> {
+        all: true,
+        ..Default::default()
+    })).await.unwrap_or_default();
+    let mut map = HashMap::new();
+    for c in list {
+        let Some(id) = c.id.as_deref().map(str::to_string) else { continue };
+        let name = c.names.unwrap_or_default().into_iter().next()
+            .map(|n| n.trim_start_matches('/').to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        map.insert(id, name);
+    }
+    map
+}
+
+/// Build one snapshot. Mutates `state` (prev sample, oom baseline).
+pub fn collect(state: &mut MetricsState, containers: &HashMap<String, String>) -> HostMetrics {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let memory = parse_meminfo(&meminfo);
+    let psi = read_psi();
+    let oom_kills = std::fs::read_to_string("/sys/fs/cgroup/memory.events")
+        .map(|t| parse_memory_events(&t))
+        .unwrap_or(0);
+
+    let snapshot = scan_processes().ok();
+    let top = match (&snapshot, &state.prev) {
+        (Some(cur), prev) => top_processes(cur, prev.as_ref(), containers, 12),
+        (None, _) => Vec::new(),
+    };
+
+    let health = derive_health(&memory, psi.as_ref(), state.prev_oom, oom_kills);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    state.prev = snapshot;
+    state.prev_oom = Some(oom_kills);
+
+    HostMetrics { ts, health, memory, psi, oom_kills, top_processes: top }
+}
+
+/// Forever-loop: every `interval`, broadcast a fresh snapshot as JSON.
+pub async fn metrics_task(
+    tx: tokio::sync::broadcast::Sender<String>,
+    state: std::sync::Arc<std::sync::Mutex<MetricsState>>,
+    interval: std::time::Duration,
+) {
+    loop {
+        tokio::time::sleep(interval).await;
+        let docker = match bollard::Docker::connect_with_socket_defaults() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[metrics] docker connect failed: {e}");
+                continue;
+            }
+        };
+        let containers = container_map(&docker).await;
+        let json = {
+            let mut st = state.lock().unwrap();
+            let m = collect(&mut st, &containers);
+            serde_json::to_string(&m)
+        };
+        match json {
+            Ok(json) => {
+                let _ = tx.send(json); // no subscribers = fine
+            }
+            Err(e) => eprintln!("[metrics] serialize failed: {e}"),
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -640,5 +746,33 @@ SwapFree:              0 kB
         assert!(!snap.procs.is_empty(), "a running machine has processes");
         let init = snap.procs.iter().find(|p| p.pid == 1).expect("pid 1 exists");
         assert!(!init.comm.is_empty());
+    }
+
+    #[test]
+    fn collect_assembles_full_snapshot() {
+        let mut state = MetricsState { prev: None, prev_oom: None };
+        let containers: HashMap<String, String> = HashMap::new();
+        let m = collect(&mut state, &containers);
+        assert!(m.ts > 0);
+        assert!(m.memory.total_mb > 0.0, "a real machine has memory");
+        assert!(matches!(m.health.status.as_str(), "green" | "yellow" | "red"));
+        assert!(!m.top_processes.is_empty());
+        // Second collect has a prev sample → cpu deltas active, no panic.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let m2 = collect(&mut state, &containers);
+        assert!(m2.ts >= m.ts);
+        // oom baseline captured on first collect
+        assert!(state.prev_oom.is_some());
+        assert!(state.prev.is_some());
+    }
+
+    #[test]
+    fn host_metrics_serializes_snake_case() {
+        let mut state = MetricsState { prev: None, prev_oom: None };
+        let m = collect(&mut state, &HashMap::new());
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"top_processes\""));
+        assert!(json.contains("\"oom_kills\""));
+        assert!(json.contains("\"health\""));
     }
 }
