@@ -3,6 +3,7 @@
 // /proc and /sys/fs/cgroup directly — no subprocesses.
 
 use serde::Serialize;
+use std::collections::HashMap;
 
 // ── Health thresholds (single tuning point) ──────────────────────────────────
 const RED_AVAIL_PCT: f64 = 10.0;
@@ -161,6 +162,179 @@ pub fn derive_health(mem: &MemoryInfo, psi: Option<&Psi>, prev_oom: Option<u64>,
     } else {
         Health { status: "green".into(), reasons: notes }
     }
+}
+
+// ── Process scanning ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ProcSample {
+    pub pid: i32,
+    pub ppid: i32,
+    pub state: String,
+    pub comm: String,
+    pub utime: u64,
+    pub stime: u64,
+    pub rss_bytes: u64,
+    pub container_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcSnapshot {
+    pub wall_secs: f64,
+    pub procs: Vec<ProcSample>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TopProcess {
+    pub pid: i32,
+    pub comm: String,
+    pub rss_mb: f64,
+    pub cpu_pct: f64,
+    pub container: String,
+    pub state: String,
+}
+
+fn page_size() -> f64 {
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as f64 }
+}
+
+fn clock_ticks() -> f64 {
+    unsafe { libc::sysconf(libc::_SC_CLK_TCK) as f64 }
+}
+
+/// Parse /proc/[pid]/stat. Returns (pid, ppid, state, utime, stime).
+/// comm (field 2) may contain spaces and parens — parse after the LAST ')'.
+pub fn parse_stat(content: &str) -> Option<(i32, i32, String, u64, u64)> {
+    let open = content.find('(')?;
+    let close = content.rfind(')')?;
+    let pid: i32 = content[..open].trim().parse().ok()?;
+    let comm = content[open + 1..close].to_string();
+    // After ')' the fields resume at field 3 (state): idx0=state, 1=ppid,
+    // 11=utime, 12=stime.
+    let rest: Vec<&str> = content[close + 1..].split_whitespace().collect();
+    if rest.len() < 13 {
+        return None;
+    }
+    let state = rest[0].to_string();
+    let ppid: i32 = rest[1].parse().ok()?;
+    let utime: u64 = rest[11].parse().ok()?;
+    let stime: u64 = rest[12].parse().ok()?;
+    let _ = comm; // comm kept for debugging; TopProcess uses /proc/pid/comm
+    Some((pid, ppid, state, utime, stime))
+}
+
+/// /proc/[pid]/statm field 2 (resident) × page size = RSS bytes.
+pub fn parse_statm_rss_bytes(content: &str, page_size: f64) -> u64 {
+    content
+        .split_whitespace()
+        .nth(1)
+        .and_then(|r| r.parse::<u64>().ok())
+        .map(|pages| (pages as f64 * page_size) as u64)
+        .unwrap_or(0)
+}
+
+/// Extract the 64-hex container id from a cgroup v2 path like
+/// `0::/system.slice/docker-<64hex>.scope`. None for host processes.
+pub fn parse_cgroup_container(content: &str) -> Option<String> {
+    for line in content.lines() {
+        if let Some(idx) = line.find("docker-") {
+            let rest = &line[idx + "docker-".len()..];
+            let id: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+            if id.len() == 64 {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+fn read_file(path: &std::path::Path) -> std::io::Result<String> {
+    std::fs::read_to_string(path)
+}
+
+/// Snapshot every userspace process (kernel threads, ppid==2, excluded).
+pub fn scan_processes() -> std::io::Result<ProcSnapshot> {
+    let page = page_size();
+    let mut procs = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Ok(_pid) = name.parse::<i32>() else { continue };
+
+        let stat = read_file(&entry.path().join("stat")).ok();
+        let Some(stat) = stat else { continue };
+        let Some((pid, ppid, state, utime, stime)) = parse_stat(&stat) else { continue };
+        if ppid == 2 {
+            continue; // kernel thread (child of kthreadd)
+        }
+        let comm = read_file(&entry.path().join("comm"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let rss_bytes = read_file(&entry.path().join("statm"))
+            .map(|s| parse_statm_rss_bytes(&s, page))
+            .unwrap_or(0);
+        let container_id = read_file(&entry.path().join("cgroup"))
+            .ok()
+            .and_then(|c| parse_cgroup_container(&c));
+
+        procs.push(ProcSample { pid, ppid, state, comm, utime, stime, rss_bytes, container_id });
+    }
+    let wall_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    Ok(ProcSnapshot { wall_secs, procs })
+}
+
+/// Rank processes by RSS, compute window CPU%, attribute to containers.
+pub fn top_processes(
+    cur: &ProcSnapshot,
+    prev: Option<&ProcSnapshot>,
+    containers: &HashMap<String, String>,
+    n: usize,
+) -> Vec<TopProcess> {
+    let ticks = clock_ticks();
+    let dt = (cur.wall_secs - prev.map(|p| p.wall_secs).unwrap_or(cur.wall_secs)).max(0.001);
+    let mut rows: Vec<TopProcess> = cur
+        .procs
+        .iter()
+        .map(|p| {
+            let cpu_pct = match prev {
+                Some(prev) => {
+                    let prev_cpu = prev
+                        .procs
+                        .iter()
+                        .find(|q| q.pid == p.pid)
+                        .map(|q| q.utime + q.stime)
+                        .unwrap_or(p.utime + p.stime); // unseen pid → zero delta
+                    let delta = (p.utime + p.stime).saturating_sub(prev_cpu);
+                    delta as f64 / ticks * 100.0 / dt
+                }
+                None => 0.0,
+            };
+            let container = match &p.container_id {
+                Some(id) => containers
+                    .iter()
+                    .find(|(cid, _)| id.starts_with(cid.as_str()) || cid.starts_with(id.as_str()))
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                None => "host".to_string(),
+            };
+            TopProcess {
+                pid: p.pid,
+                comm: p.comm.clone(),
+                rss_mb: p.rss_bytes as f64 / 1024.0 / 1024.0,
+                cpu_pct,
+                container,
+                state: p.state.clone(),
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.rss_mb.partial_cmp(&a.rss_mb).unwrap_or(std::cmp::Ordering::Equal));
+    rows.truncate(n);
+    rows
 }
 
 
@@ -347,5 +521,124 @@ SwapFree:              0 kB
         let h = derive_health(&m, Some(&psi_mem(0.0, 0.0)), Some(13), 13);
         assert_eq!(h.status, "green");
         assert!(!h.reasons.iter().any(|r| r.contains("swap")));
+    }
+
+    // ── Process scanner fixtures ─────────────────────────────────────────
+
+    const STAT: &str = "1234 (opencode serve) S 1 0 0 0 -1 4194560 0 0 0 0 100 50 0 0 20 0 1 0 12345 1 1 18446744073709551615 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1\n";
+    const STATM: &str = "100000 197100 50000 1000 0 60000 0\n";
+    const CGROUP_IN_CONTAINER: &str = "0::/system.slice/docker-abc123def456abc123def456abc123def456abc123def456abc123def456abc1.scope\n";
+    const CGROUP_HOST: &str = "0::/init.scope\n";
+
+    fn proc_sample(pid: i32, utime: u64, stime: u64, container_id: &str) -> ProcSample {
+        ProcSample {
+            pid,
+            ppid: 1,
+            state: "S".into(),
+            comm: format!("p{pid}"),
+            utime,
+            stime,
+            rss_bytes: 1_000_000,
+            container_id: if container_id == "host" { None } else { Some(container_id.to_string()) },
+        }
+    }
+
+    #[test]
+    fn stat_parses_with_spaces_in_comm() {
+        let (pid, ppid, state, utime, stime) = parse_stat(STAT).expect("parse");
+        assert_eq!(pid, 1234);
+        assert_eq!(ppid, 1);
+        assert_eq!(state, "S");
+        assert_eq!(utime, 100);
+        assert_eq!(stime, 50);
+    }
+
+    #[test]
+    fn stat_garbage_is_none() {
+        assert!(parse_stat("").is_none());
+        assert!(parse_stat("justoneword\n").is_none());
+    }
+
+    #[test]
+    fn statm_rss_multiplies_page_size() {
+        // resident = 2nd field = 197100 pages × 4096
+        assert_eq!(parse_statm_rss_bytes(STATM, 4096.0), 197100u64 * 4096);
+        assert_eq!(parse_statm_rss_bytes("", 4096.0), 0);
+    }
+
+    #[test]
+    fn cgroup_container_id_extraction() {
+        assert_eq!(
+            parse_cgroup_container(CGROUP_IN_CONTAINER).as_deref(),
+            Some("abc123def456abc123def456abc123def456abc123def456abc123def456abc1")
+        );
+        assert_eq!(parse_cgroup_container(CGROUP_HOST), None);
+    }
+
+    #[test]
+    fn cpu_pct_uses_window_delta() {
+        // 1 wall second apart; process did (200-100)+(80-50)=130 ticks at CLK_TCK=100
+        // → 130/100 ticks/s ÷ 1s × 100 = 130%
+        let prev = ProcSnapshot {
+            wall_secs: 1000.0,
+            procs: vec![proc_sample(7, 100, 50, "0".repeat(64).as_str())],
+        };
+        let cur = ProcSnapshot {
+            wall_secs: 1001.0,
+            procs: vec![proc_sample(7, 200, 80, "0".repeat(64).as_str())],
+        };
+        let containers: std::collections::HashMap<String, String> = HashMap::new();
+        let top = top_processes(&cur, Some(&prev), &containers, 12);
+        assert_eq!(top.len(), 1);
+        assert!((top[0].cpu_pct - 130.0).abs() < 0.5, "got {}", top[0].cpu_pct);
+    }
+
+    #[test]
+    fn first_sample_reports_zero_cpu() {
+        let cur = ProcSnapshot { wall_secs: 1.0, procs: vec![proc_sample(7, 100, 50, "host") ] };
+        let containers: std::collections::HashMap<String, String> = HashMap::new();
+        let top = top_processes(&cur, None, &containers, 12);
+        assert_eq!(top[0].cpu_pct, 0.0);
+    }
+
+    #[test]
+    fn container_attribution_by_prefix() {
+        let id64 = "abc123def456abc123def456abc123def456abc123def456abc123def456abc1";
+        let cur = ProcSnapshot { wall_secs: 1.0, procs: vec![
+            proc_sample(1, 10, 0, id64),
+            proc_sample(2, 20, 0, "host"),
+        ]};
+        let mut containers = HashMap::new();
+        containers.insert(id64.to_string(), "codery-sandbox-blue".to_string());
+        let top = top_processes(&cur, None, &containers, 12);
+        assert_eq!(top[0].container, "codery-sandbox-blue");
+        assert_eq!(top[1].container, "host");
+    }
+
+    #[test]
+    fn top_is_sorted_by_rss_and_truncated() {
+        let mut procs = Vec::new();
+        for i in 0..20 {
+            procs.push(ProcSample {
+                pid: i, ppid: 1, state: "S".into(), comm: format!("p{i}"),
+                utime: 0, stime: 0,
+                rss_bytes: (i as u64) * 1_000_000,
+                container_id: None,
+            });
+        }
+        let cur = ProcSnapshot { wall_secs: 1.0, procs };
+        let containers: std::collections::HashMap<String, String> = HashMap::new();
+        let top = top_processes(&cur, None, &containers, 12);
+        assert_eq!(top.len(), 12);
+        assert_eq!(top[0].comm, "p19");
+        assert!(top.windows(2).all(|w| w[0].rss_mb >= w[1].rss_mb));
+    }
+
+    #[test]
+    fn scan_processes_reads_real_proc() {
+        let snap = scan_processes().expect("scan");
+        assert!(!snap.procs.is_empty(), "a running machine has processes");
+        let init = snap.procs.iter().find(|p| p.pid == 1).expect("pid 1 exists");
+        assert!(!init.comm.is_empty());
     }
 }
