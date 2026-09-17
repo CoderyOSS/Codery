@@ -323,6 +323,9 @@ body {
 
 /* ── Host Health rail (OpenDesign Option A) ─────────────────────────────────── */
 
+.mono { font-family: var(--mono); }
+.mut { color: var(--muted); }
+
 .page-flex { max-width: 1240px; margin: 0 auto; padding: 24px; display: grid;
   grid-template-columns: minmax(0, 1fr) 322px; gap: 20px; align-items: start; }
 .page-main { min-width: 0; }
