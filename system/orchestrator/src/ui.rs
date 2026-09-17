@@ -38,6 +38,8 @@ pub struct AppState {
     pub rollback_lock: RollbackLock,
     pub events_tx:    Arc<broadcast::Sender<String>>,
     pub ops:          Ops,
+    pub metrics_tx:   Arc<broadcast::Sender<String>>,
+    pub metrics:      MetricsStateShared,
 }
 
 #[derive(Serialize)]
@@ -65,15 +67,31 @@ fn short_id(id: Option<&str>) -> String {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn make_router(events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Router {
+    let (metrics_tx, _) = broadcast::channel::<String>(32);
+    let metrics: MetricsStateShared =
+        Arc::new(std::sync::Mutex::new(crate::host_metrics::MetricsState::default()));
+    make_router_with_metrics(events_tx, ops, Arc::new(metrics_tx), metrics)
+}
+
+pub fn make_router_with_metrics(
+    events_tx: Arc<broadcast::Sender<String>>,
+    ops: Ops,
+    metrics_tx: Arc<broadcast::Sender<String>>,
+    metrics: MetricsStateShared,
+) -> Router {
     let state = AppState {
         rollback_lock: Arc::new(Mutex::new(HashSet::new())),
         events_tx,
         ops,
+        metrics_tx,
+        metrics,
     };
     Router::new()
         .route("/", get(serve_index))
         .route("/api/status", get(get_status))
         .route("/api/events", get(get_events))
+        .route("/api/metrics", get(get_metrics))
+        .route("/api/metrics/stream", get(get_metrics_stream))
         .route("/api/stop/{container}",    post(post_stop))
         .route("/api/start/{container}",  post(post_start))
         .route("/api/kill/{container}",   post(post_kill))
@@ -83,10 +101,18 @@ pub fn make_router(events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Route
 }
 
 pub async fn serve(port: u16, events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Result<()> {
+    let (metrics_tx, _) = broadcast::channel::<String>(32);
+    let metrics_tx = Arc::new(metrics_tx);
+    let metrics: MetricsStateShared =
+        Arc::new(std::sync::Mutex::new(crate::host_metrics::MetricsState::default()));
+    tokio::spawn(crate::host_metrics::metrics_task(
+        (*metrics_tx).clone(), Arc::clone(&metrics),
+        std::time::Duration::from_secs(3),
+    ));
     let addr = format!("127.0.0.1:{}", port);
-    println!("[ui {}] Listening on http://{}", ts(), addr);
+    println!("[ui {}] Listening on http://{} (metrics every 3s)", ts(), addr);
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, make_router(events_tx, ops)).await?;
+    axum::serve(listener, make_router_with_metrics(events_tx, ops, metrics_tx, metrics)).await?;
     Ok(())
 }
 
@@ -121,6 +147,54 @@ async fn get_events(
                     Ok(json) => {
                         return Some((Ok(Event::default().data(json)), (rx, None)));
                     }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ── Metrics ──────────────────────────────────────────────────────────────────
+
+async fn metrics_snapshot(state: &AppState) -> String {
+    let containers = {
+        match Docker::connect_with_socket_defaults() {
+            Ok(d) => crate::host_metrics::container_map(&d).await,
+            Err(_) => HashMap::new(),
+        }
+    };
+    let mut m = state.metrics.lock().unwrap();
+    let snap = crate::host_metrics::collect(&mut m, &containers);
+    serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string())
+}
+
+async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let json = metrics_snapshot(&state).await;
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        json,
+    ).into_response()
+}
+
+async fn get_metrics_stream(
+    State(state): State<AppState>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.metrics_tx.subscribe();
+    let initial = metrics_snapshot(&state).await;
+
+    let stream = futures_util::stream::unfold(
+        (rx, Some(initial)),
+        |(mut rx, initial)| async move {
+            if let Some(json) = initial {
+                return Some((Ok(Event::default().data(json)), (rx, None)));
+            }
+            loop {
+                match rx.recv().await {
+                    Ok(json) => return Some((Ok(Event::default().data(json)), (rx, None))),
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
@@ -578,5 +652,53 @@ mod tests {
         let _ = docker.remove_container(cname, None).await;
 
         assert!(found, "container '{}' not in /api/status\ngot: {}", cname, body);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoints_serve_and_stream() {
+        let (tx, _) = tokio::sync::broadcast::channel::<String>(16);
+        let tx = Arc::new(tx);
+        let metrics: crate::ui::MetricsStateShared =
+            Arc::new(std::sync::Mutex::new(crate::host_metrics::MetricsState::default()));
+        let ops: Ops = Arc::new(Mutex::new(HashMap::new()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, make_router_with_metrics(
+                Arc::new(tokio::sync::broadcast::channel::<String>(16).0),
+                ops, tx.clone(), metrics,
+            )).await.unwrap()
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Snapshot endpoint: 200 + required snake_case fields.
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/api/metrics"))
+            .await.expect("GET /api/metrics");
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.expect("json");
+        assert!(body["health"]["status"].as_str().is_some(), "got {body}");
+        assert!(body["memory"]["total_mb"].as_f64().is_some());
+        assert!(body["top_processes"].as_array().is_some());
+        assert!(body["oom_kills"].as_u64().is_some());
+        // psi may be null (kernel-dependent) — that is valid.
+
+        // SSE endpoint: first delivered event is a metrics snapshot.
+        use futures_util::StreamExt;
+        let mut es = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/api/metrics/stream"))
+            .send().await.expect("SSE connect")
+            .bytes_stream();
+        let mut first = Vec::new();
+        while first.len() < 3 {
+            let Some(chunk) = es.next().await else { break };
+            first.extend_from_slice(&chunk.unwrap());
+            if first.windows(2).any(|w| w == b"\n\n") { break; }
+        }
+        let text = String::from_utf8_lossy(&first);
+        assert!(text.contains("data:"), "no SSE data frame in: {text}");
+        let payload = text.split("data: ").nth(1).unwrap_or("");
+        let v: serde_json::Value = serde_json::from_str(payload.trim_end())
+            .expect("initial SSE frame is a metrics JSON");
+        assert!(v["health"]["status"].as_str().is_some());
     }
 }
