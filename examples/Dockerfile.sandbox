@@ -60,7 +60,7 @@ RUN ssh-keyscan github.com >> /export/rootfs/etc/ssh/ssh_known_hosts
 # libc detection sees the musl nixos/nix builder and picks the wrong variant,
 # while nixpkgs node (and the final image) are glibc.
 RUN npm install -g --prefix /export/rootfs/home/gem/.npm-global \
-      opencode-linux-x64@1.18.5 @anthropic-ai/claude-code openspec-extensions opencode-with-claude \
+      opencode-linux-x64@1.18.31 @anthropic-ai/claude-code openspec-extensions opencode-with-claude \
       typescript typescript-language-server prettier openwiki \
     && ln -sf ../lib/node_modules/opencode-linux-x64/bin/opencode \
       /export/rootfs/home/gem/.npm-global/bin/opencode \
