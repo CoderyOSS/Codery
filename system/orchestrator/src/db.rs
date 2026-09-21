@@ -270,6 +270,9 @@ pub struct UnifiedRoute {
     pub target: String,
     pub internal_port: Option<u16>,
     pub no_cache: bool,
+    /// If set, Caddy renders a `basic_auth` block for this route whose user
+    /// and bcrypt hash come from this env var (see NamedPort::auth).
+    pub auth_env: Option<String>,
 }
 
 pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
@@ -285,6 +288,7 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
                     target: def.service.clone(),
                     internal_port: None,
                     no_cache: false,
+                    auth_env: port.auth.as_ref().map(|a| a.env.clone()),
                 });
             }
         }
@@ -298,6 +302,7 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
             target: route.target.clone(),
             internal_port: None,
             no_cache: false,
+            auth_env: None,
         });
     }
 
@@ -309,6 +314,7 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
             target: "apps".to_string(),
             internal_port: Some(app.internal_port),
             no_cache: app.no_cache,
+            auth_env: None,
         });
     }
 
@@ -320,6 +326,7 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
             target: "host".to_string(),
             internal_port: None,
             no_cache: true,
+            auth_env: None,
         });
     }
 

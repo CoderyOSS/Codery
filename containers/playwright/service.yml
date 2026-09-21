@@ -24,6 +24,9 @@ ports:
     container_port: 3000
     # No subdomain — internal browser server, reached from the sandbox via
     # ws://playwright:3000/ over codery-net. Not exposed publicly.
+    # Loopback so the docker publish isn't reachable from host interfaces;
+    # the only real consumer is the codery-net alias path.
+    bind: loopback
 
 command:
   - npx

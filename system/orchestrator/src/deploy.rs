@@ -483,9 +483,11 @@ pub(crate) async fn start_container(docker: &Docker, def: &ServiceDef, sha: &str
         })
         .collect();
 
-    let mappings = def.port_mappings(color);
-    let port_bindings = build_port_bindings(&mappings);
-    let exposed_ports = build_exposed_ports(&mappings);
+    let specs = def.port_binding_specs(color);
+    let port_bindings = build_port_bindings(&specs)?;
+    let exposed_ports = build_exposed_ports(
+        &specs.iter().map(|s| (s.host, s.container)).collect::<Vec<_>>(),
+    );
     let binds = def.resolved_binds(&env_map)?;
 
     let networking_config: Option<NetworkingConfig<String>> = if def.network_aliases.is_empty() {
@@ -784,18 +786,21 @@ async fn wait_for_docker_healthy(docker: &Docker, name: &str, timeout_secs: u64)
 
 // ── Port binding helpers ──────────────────────────────────────────────────────
 
-fn build_port_bindings(ports: &[(u16, u16)]) -> HashMap<String, Option<Vec<PortBinding>>> {
+fn build_port_bindings(specs: &[crate::service_def::PortBindingSpec]) -> Result<HashMap<String, Option<Vec<PortBinding>>>> {
     let mut map = HashMap::new();
-    for (host, container) in ports {
+    for spec in specs {
+        let host_ip = spec.bind.resolve().with_context(|| {
+            format!("resolving bind address for published port {} (container {})", spec.host, spec.container)
+        })?;
         map.insert(
-            format!("{}/tcp", container),
+            format!("{}/tcp", spec.container),
             Some(vec![PortBinding {
-                host_ip: Some("0.0.0.0".to_string()),
-                host_port: Some(host.to_string()),
+                host_ip: Some(host_ip),
+                host_port: Some(spec.host.to_string()),
             }]),
         );
     }
-    map
+    Ok(map)
 }
 
 fn build_exposed_ports(ports: &[(u16, u16)]) -> HashMap<String, HashMap<(), ()>> {

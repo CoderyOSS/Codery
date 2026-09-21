@@ -131,6 +131,7 @@ mod tests {
             target: "apps".to_string(),
             internal_port,
             no_cache: false,
+            auth_env: None,
         }
     }
 
@@ -141,6 +142,7 @@ mod tests {
             target: "host".to_string(),
             internal_port: None,
             no_cache: false,
+            auth_env: None,
         }
     }
 
@@ -193,6 +195,7 @@ mod tests {
             target: "apps".to_string(),
             internal_port: Some(3001),
             no_cache: true,
+            auth_env: None,
         }];
         let cfg = generate_config(&routes, "example.com");
         assert!(cfg.contains("Cache-Control"));

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::service_def::{PortScheme, ServiceDef};
+use crate::service_def::{PortBind, PortScheme, ServiceDef};
 use crate::state;
 
 /// One proxy target extracted from a service definition.
@@ -11,6 +11,8 @@ pub struct ProxyTarget {
     pub fixed_port: u16,
     pub container_port: u16,
     pub scheme: PortScheme,
+    /// Which interface the listener binds to and the color port is reached on.
+    pub bind: PortBind,
 }
 
 /// Extract all proxy targets from a slice of service definitions.
@@ -25,6 +27,7 @@ pub fn collect_proxy_targets(defs: &[ServiceDef]) -> Vec<ProxyTarget> {
                     fixed_port,
                     container_port: port.container_port,
                     scheme: def.port_scheme.clone(),
+                    bind: port.bind,
                 });
             }
         }
@@ -57,22 +60,32 @@ pub async fn serve() -> Result<()> {
 
 async fn run_listener(target: ProxyTarget) -> Result<()> {
     if target.fixed_port == 0 {
-        anyhow::bail!("tcp-proxy: fixed_port 0 is invalid for service '{}'", target.service);
+        anyhow::bail!(
+            "tcp-proxy: fixed_port 0 is invalid for service '{}'",
+            target.service
+        );
     }
-    let listener = TcpListener::bind(("0.0.0.0", target.fixed_port))
+    let bind_ip = target
+        .bind
+        .resolve()
+        .with_context(|| format!("tcp-proxy: resolving bind for service '{}'", target.service))?;
+    let listener = TcpListener::bind((bind_ip.as_str(), target.fixed_port))
         .await
-        .with_context(|| format!("tcp-proxy: failed to bind :{}", target.fixed_port))?;
+        .with_context(|| format!("tcp-proxy: failed to bind {bind_ip}:{}", target.fixed_port))?;
     println!(
-        "[tcp-proxy] {} :{} → container port {} (active color port)",
-        target.service, target.fixed_port, target.container_port
+        "[tcp-proxy] {} {bind_ip}:{} → container port {} (active color port)",
+        target.service, bind_ip, target.fixed_port
     );
     loop {
         let (inbound, peer) = listener.accept().await?;
         let service = target.service.clone();
+        let bind_ip = bind_ip.clone();
         let scheme = target.scheme.clone();
         let container_port = target.container_port;
         tokio::spawn(async move {
-            if let Err(e) = proxy_connection(inbound, &service, container_port, &scheme).await {
+            if let Err(e) =
+                proxy_connection(inbound, &service, container_port, &scheme, &bind_ip).await
+            {
                 eprintln!("[tcp-proxy] {peer}: {e}");
             }
         });
@@ -84,12 +97,13 @@ async fn proxy_connection(
     service: &str,
     container_port: u16,
     scheme: &PortScheme,
+    bind_ip: &str,
 ) -> Result<()> {
     let color = state::read_active(service)?;
     let target_port = scheme.host_port(&color, container_port);
-    let mut outbound = TcpStream::connect(("127.0.0.1", target_port))
+    let mut outbound = TcpStream::connect((bind_ip, target_port))
         .await
-        .with_context(|| format!("tcp-proxy: failed to connect to 127.0.0.1:{target_port}"))?;
+        .with_context(|| format!("tcp-proxy: failed to connect to {bind_ip}:{target_port}"))?;
     // EOF and connection-reset are normal at session end; suppress those errors.
     let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
     Ok(())

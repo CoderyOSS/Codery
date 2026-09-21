@@ -81,6 +81,50 @@ impl PortScheme {
     }
 }
 
+/// Which host interface a published port listens on.
+///
+/// Default is `any` (historical behaviour: `0.0.0.0`). New/revived services
+/// should prefer `loopback` (only host-local processes — e.g. Caddy — can
+/// connect) or `tailnet` (only the Tailscale interface).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PortBind {
+    /// `0.0.0.0` — reachable on every host interface (legacy default).
+    #[default]
+    Any,
+    /// `127.0.0.1` — host-local processes only; the port is not exposed on
+    /// any external interface. Correct for ports that sit behind Caddy.
+    Loopback,
+    /// The host's Tailscale IP (from /run/tailscale.ip) — reachable only over
+    /// the tailnet. Correct for raw TCP services (SSH) that bypass Caddy.
+    Tailnet,
+}
+
+impl PortBind {
+    /// The IP string passed to Docker's HostIp / used as a listen address.
+    /// Fails closed for [`PortBind::Tailnet`] when the Tailscale IP is
+    /// unavailable, rather than silently falling back to `0.0.0.0`.
+    pub fn resolve(&self) -> Result<String> {
+        match self {
+            PortBind::Any => Ok("0.0.0.0".to_string()),
+            PortBind::Loopback => Ok("127.0.0.1".to_string()),
+            PortBind::Tailnet => {
+                let ip = std::fs::read_to_string(crate::config::TAILSCALE_IP_FILE)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                match ip {
+                    Some(ip) => Ok(ip),
+                    None => anyhow::bail!(
+                        "bind: tailnet requires the host Tailscale IP in {} — file missing or empty",
+                        crate::config::TAILSCALE_IP_FILE
+                    ),
+                }
+            }
+        }
+    }
+}
+
 /// A named container port with optional public subdomain.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct NamedPort {
@@ -92,6 +136,24 @@ pub struct NamedPort {
     /// and forward connections to the color-specific host port for this entry.
     /// Use for raw TCP services (e.g. SSH) that Caddy cannot proxy.
     pub fixed_port: Option<u16>,
+    /// Which interface the published host port (and any fixed-port proxy
+    /// listener) binds to. Defaults to `any` when omitted.
+    #[serde(default)]
+    pub bind: PortBind,
+    /// If present, Caddy renders a `basic_auth` block for this port's
+    /// subdomain route. The env var must contain "<user> <bcrypt-hash>"
+    /// (see `caddy hash-password`). Routes render WITHOUT auth (with a loud
+    /// warning) when the env var is absent.
+    #[serde(default)]
+    pub auth: Option<BasicAuth>,
+}
+
+/// Requests HTTP basic auth on the subdomain route, sourced from an env var.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct BasicAuth {
+    /// Name of the env var (loaded from /opt/codery/.env) holding
+    /// "<user> <hashed-password>".
+    pub env: String,
 }
 
 /// Describes a range of container ports that Docker binds in bulk.
@@ -101,6 +163,18 @@ pub struct PortRange {
     pub container_start: u16,
     /// Inclusive upper bound.
     pub container_end: u16,
+    /// Which interface the whole range binds to. Defaults to `any`.
+    #[serde(default)]
+    pub bind: PortBind,
+}
+
+/// One concrete published-port instruction: the color-resolved host port,
+/// its container port, and the interface it must bind to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortBindingSpec {
+    pub host: u16,
+    pub container: u16,
+    pub bind: PortBind,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -182,23 +256,32 @@ impl ServiceDef {
     /// - For named-port services (sandbox): one pair per `ports[]` entry.
     /// - For range services (apps): one pair per port in `container_start..=container_end`.
     pub fn port_mappings(&self, color: &str) -> Vec<(u16, u16)> {
-        let mut mappings = Vec::new();
+        self.port_binding_specs(color)
+            .into_iter()
+            .map(|s| (s.host, s.container))
+            .collect()
+    }
+
+    /// Like [`Self::port_mappings`], but carries the bind interface so the
+    /// deployer can restrict which host address each published port listens on.
+    pub fn port_binding_specs(&self, color: &str) -> Vec<PortBindingSpec> {
+        let mut specs = Vec::new();
 
         // Named ports
         for p in &self.ports {
             let host = self.port_scheme.host_port(color, p.container_port);
-            mappings.push((host, p.container_port));
+            specs.push(PortBindingSpec { host, container: p.container_port, bind: p.bind });
         }
 
         // Bulk range
         if let Some(ref r) = self.port_range {
             for c in r.container_start..=r.container_end {
                 let host = self.port_scheme.host_port(color, c);
-                mappings.push((host, c));
+                specs.push(PortBindingSpec { host, container: c, bind: r.bind });
             }
         }
 
-        mappings
+        specs
     }
 
     /// Resolve the health-check host port for a given color.
@@ -380,6 +463,68 @@ network: codery-net
         assert_eq!(def.port_scheme.host_port("blue", 3000), 13000);
         assert_eq!(def.port_scheme.host_port("blue", 7000), 17000);
         assert_eq!(def.port_scheme.host_port("blue", 7681), 17681);
+    }
+
+    #[test]
+    fn port_bind_defaults_to_any_and_parses() {
+        let def: ServiceDef = serde_yaml::from_str(
+            r#"
+service: t
+image: ghcr.io/test/t:{sha}
+port_scheme:
+  blue_offset: 0
+  green_offset: 100
+ports:
+  - name: a
+    container_port: 3000
+    subdomain: a
+    bind: loopback
+  - name: b
+    container_port: 4000
+port_range:
+  container_start: 8000
+  container_end: 8001
+  bind: tailnet
+"#,
+        )
+        .unwrap();
+        assert_eq!(def.ports[0].bind, PortBind::Loopback);
+        assert_eq!(def.ports[1].bind, PortBind::Any); // serde default
+        assert_eq!(def.port_range.as_ref().unwrap().bind, PortBind::Tailnet);
+
+        let specs = def.port_binding_specs("blue");
+        assert_eq!(specs.len(), 4);
+        assert_eq!(specs[0], PortBindingSpec { host: 3000, container: 3000, bind: PortBind::Loopback });
+        assert_eq!(specs[1], PortBindingSpec { host: 4000, container: 4000, bind: PortBind::Any });
+        assert_eq!(specs[2], PortBindingSpec { host: 8000, container: 8000, bind: PortBind::Tailnet });
+        assert_eq!(specs[3], PortBindingSpec { host: 8001, container: 8001, bind: PortBind::Tailnet });
+    }
+
+    #[test]
+    fn port_bind_resolve_loopback_and_any() {
+        assert_eq!(PortBind::Loopback.resolve().unwrap(), "127.0.0.1");
+        assert_eq!(PortBind::Any.resolve().unwrap(), "0.0.0.0");
+    }
+
+    #[test]
+    fn basic_auth_field_parses() {
+        let def: ServiceDef = serde_yaml::from_str(
+            r#"
+service: t
+image: ghcr.io/test/t:{sha}
+port_scheme:
+  blue_offset: 0
+  green_offset: 0
+ports:
+  - name: a
+    container_port: 3000
+    subdomain: a
+    auth:
+      env: OPENCODE_BASIC_AUTH
+"#,
+        )
+        .unwrap();
+        assert_eq!(def.ports[0].auth.as_ref().unwrap().env, "OPENCODE_BASIC_AUTH");
     }
 
     #[test]

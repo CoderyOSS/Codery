@@ -9,10 +9,16 @@ ports:
   - name: ssh
     container_port: 2022
     fixed_port: 3333
+    # Tailnet-only: published port and the fixed-port proxy listener bind the
+    # host Tailscale IP.
+    bind: tailnet
 
 port_range:
   container_start: 8000
   container_end: 9000
+  # Loopback: every app is reached through Caddy (subdomain → localhost:18xxx);
+  # the raw published ports stay host-local.
+  bind: loopback
 
 routes_file: /opt/codery/proxy/apps-routes.json
 

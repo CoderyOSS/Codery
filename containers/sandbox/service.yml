@@ -12,12 +12,24 @@ ports:
   - name: opencode
     container_port: 3000
     subdomain: opencode
+    # Loopback: only host-local processes (Caddy on the host) can reach this
+    # publish — the port is no longer reachable directly, only via the
+    # Tailscale-bound subdomain. basic_auth adds a second gate on that path.
+    bind: loopback
+    auth:
+      env: OPENCODE_BASIC_AUTH
   - name: opendesign
     container_port: 7456
     subdomain: opendesign
+    bind: loopback
+    auth:
+      env: OPENDESIGN_BASIC_AUTH
   - name: ssh
     container_port: 22
     fixed_port: 2222
+    # Tailnet-only: published port and the fixed-port proxy listener bind the
+    # host Tailscale IP, so SSH is unreachable from any other interface.
+    bind: tailnet
     # No subdomain — raw TCP, not HTTP. Caddy does not proxy this.
     # blue: host 10022  green: host 20022  (port_scheme offsets apply)
     # fixed_port: stable proxy port — orchestrator serve-tcp-proxy forwards

@@ -67,7 +67,12 @@ pub fn generate_from_routes(
                 }
             }
         };
-        caddy.push_str(&caddy_block(&fqdn, host_port, route.no_cache));
+        caddy.push_str(&caddy_block(
+            &fqdn,
+            host_port,
+            route.no_cache,
+            route.auth_env.as_deref(),
+        ));
     }
 
     Ok(caddy)
@@ -78,7 +83,7 @@ fn sandbox_host_port(color: &str, container_port: u16) -> u16 {
     container_port + offset
 }
 
-fn caddy_block(host: &str, port: u16, no_cache: bool) -> String {
+fn caddy_block(host: &str, port: u16, no_cache: bool, auth_env: Option<&str>) -> String {
     let cache_headers = if no_cache {
         r#"
     header {
@@ -89,14 +94,36 @@ fn caddy_block(host: &str, port: u16, no_cache: bool) -> String {
     } else {
         ""
     };
+
+    // Auth is opt-in per route via NamedPort::auth. The env var must contain
+    // "<user> <bcrypt-hash>" (see `caddy hash-password`). If the env var is
+    // missing from /opt/codery/.env we render the route WITHOUT auth and warn
+    // loudly — failing closed here would silently drop the route entirely.
+    let auth_directive = match auth_env {
+        Some(env) => {
+            let present = load_env_pairs().iter().any(|(k, _)| k == env);
+            if present {
+                format!("    basic_auth {{{{{env}}}}}\n")
+            } else {
+                println!(
+                    "[caddy] WARNING: {host} requests basic_auth via {env}, but {env} is not set in {} — rendering route WITHOUT auth",
+                    config::ENV_FILE
+                );
+                String::new()
+            }
+        }
+        None => String::new(),
+    };
+
     format!(
         r#"
 {host} {{
     bind {{$TAILSCALE_IP}}
-    reverse_proxy localhost:{port}{cache_headers}
+{auth_directive}    reverse_proxy localhost:{port}{cache_headers}
 }}
 "#,
         host = host,
+        auth_directive = auth_directive,
         port = port,
         cache_headers = cache_headers
     )
@@ -157,6 +184,7 @@ mod tests {
             target: "sandbox".to_string(),
             internal_port: None,
             no_cache: false,
+            auth_env: None,
         }
     }
 
@@ -167,6 +195,7 @@ mod tests {
             target: "apps".to_string(),
             internal_port: Some(internal_port),
             no_cache: false,
+            auth_env: None,
         }
     }
 
@@ -177,6 +206,7 @@ mod tests {
             target: "host".to_string(),
             internal_port: None,
             no_cache: false,
+            auth_env: None,
         }
     }
 
@@ -235,6 +265,15 @@ mod tests {
     }
 
     #[test]
+    fn auth_route_renders_basic_auth_block() {
+        let mut r = sandbox_route("opencode", 3000);
+        r.auth_env = Some("OPENCODE_BASIC_AUTH".to_string());
+        let routes = vec![r];
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        assert!(caddy.contains("basic_auth {$OPENCODE_BASIC_AUTH}"));
+    }
+
+    #[test]
     fn fqdn_subdomain_used_as_is() {
         let routes = vec![
             UnifiedRoute {
@@ -243,6 +282,7 @@ mod tests {
                 target: "apps".to_string(),
                 internal_port: Some(3001),
                 no_cache: false,
+                auth_env: None,
             },
         ];
         let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
@@ -259,6 +299,7 @@ mod tests {
                 target: "apps".to_string(),
                 internal_port: Some(3001),
                 no_cache: true,
+                auth_env: None,
             },
         ];
         let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
@@ -277,6 +318,7 @@ mod tests {
                 target: "apps".to_string(),
                 internal_port: Some(3001),
                 no_cache: false,
+                auth_env: None,
             },
         ];
         let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
