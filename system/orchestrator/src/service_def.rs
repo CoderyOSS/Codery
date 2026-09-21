@@ -485,6 +485,11 @@ port_range:
   container_start: 8000
   container_end: 8001
   bind: tailnet
+volumes: []
+health_check:
+  type: docker
+  timeout_secs: 30
+network: codery-net
 "#,
         )
         .unwrap();
@@ -521,6 +526,11 @@ ports:
     subdomain: a
     auth:
       env: OPENCODE_BASIC_AUTH
+volumes: []
+health_check:
+  type: docker
+  timeout_secs: 30
+network: codery-net
 "#,
         )
         .unwrap();

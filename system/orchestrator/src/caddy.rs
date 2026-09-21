@@ -39,6 +39,7 @@ pub fn generate_from_routes(
         "{\n    acme_dns cloudflare {$CLOUDFLARE_API_TOKEN}\n}\n",
     );
 
+    let env_pairs = load_env_pairs();
     for route in routes {
         let fqdn = if route.subdomain.contains('.') {
             route.subdomain.clone()
@@ -72,6 +73,10 @@ pub fn generate_from_routes(
             host_port,
             route.no_cache,
             route.auth_env.as_deref(),
+            route
+                .auth_env
+                .as_deref()
+                .map(|e| env_pairs.iter().any(|(k, _)| k == e)),
         ));
     }
 
@@ -83,7 +88,13 @@ fn sandbox_host_port(color: &str, container_port: u16) -> u16 {
     container_port + offset
 }
 
-fn caddy_block(host: &str, port: u16, no_cache: bool, auth_env: Option<&str>) -> String {
+fn caddy_block(
+    host: &str,
+    port: u16,
+    no_cache: bool,
+    auth_env: Option<&str>,
+    env_present: Option<bool>,
+) -> String {
     let cache_headers = if no_cache {
         r#"
     header {
@@ -99,20 +110,16 @@ fn caddy_block(host: &str, port: u16, no_cache: bool, auth_env: Option<&str>) ->
     // "<user> <bcrypt-hash>" (see `caddy hash-password`). If the env var is
     // missing from /opt/codery/.env we render the route WITHOUT auth and warn
     // loudly — failing closed here would silently drop the route entirely.
-    let auth_directive = match auth_env {
-        Some(env) => {
-            let present = load_env_pairs().iter().any(|(k, _)| k == env);
-            if present {
-                format!("    basic_auth {{{{{env}}}}}\n")
-            } else {
-                println!(
-                    "[caddy] WARNING: {host} requests basic_auth via {env}, but {env} is not set in {} — rendering route WITHOUT auth",
-                    config::ENV_FILE
-                );
-                String::new()
-            }
+    let auth_directive = match (auth_env, env_present) {
+        (Some(env), Some(true)) => format!("    basic_auth {{{{{env}}}}}\n"),
+        (Some(env), _) => {
+            println!(
+                "[caddy] WARNING: {host} requests basic_auth via {env}, but {env} is not set in {} — rendering route WITHOUT auth",
+                config::ENV_FILE
+            );
+            String::new()
         }
-        None => String::new(),
+        (None, _) => String::new(),
     };
 
     format!(
@@ -266,11 +273,29 @@ mod tests {
 
     #[test]
     fn auth_route_renders_basic_auth_block() {
-        let mut r = sandbox_route("opencode", 3000);
-        r.auth_env = Some("OPENCODE_BASIC_AUTH".to_string());
-        let routes = vec![r];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
-        assert!(caddy.contains("basic_auth {$OPENCODE_BASIC_AUTH}"));
+        let block = caddy_block(
+            "opencode.example.com",
+            13000,
+            false,
+            Some("OPENCODE_BASIC_AUTH"),
+            Some(true),
+        );
+        assert!(block.contains("basic_auth {$OPENCODE_BASIC_AUTH}"));
+    }
+
+    #[test]
+    fn auth_route_without_env_renders_no_auth() {
+        let missing = caddy_block(
+            "opencode.example.com",
+            13000,
+            false,
+            Some("OPENCODE_BASIC_AUTH"),
+            Some(false),
+        );
+        assert!(!missing.contains("basic_auth"));
+
+        let no_auth_requested = caddy_block("opencode.example.com", 13000, false, None, None);
+        assert!(!no_auth_requested.contains("basic_auth"));
     }
 
     #[test]
