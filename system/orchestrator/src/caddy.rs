@@ -111,7 +111,9 @@ fn caddy_block(
     // missing from /opt/codery/.env we render the route WITHOUT auth and warn
     // loudly — failing closed here would silently drop the route entirely.
     let auth_directive = match (auth_env, env_present) {
-        (Some(env), Some(true)) => format!("    basic_auth {{${env}}}\n"),
+        (Some(env), Some(true)) => {
+            format!("    basic_auth {{\n        {{${env}}}\n    }}\n")
+        }
         (Some(env), _) => {
             println!(
                 "[caddy] WARNING: {host} requests basic_auth via {env}, but {env} is not set in {} — rendering route WITHOUT auth",
@@ -280,7 +282,9 @@ mod tests {
             Some("OPENCODE_BASIC_AUTH"),
             Some(true),
         );
-        assert!(block.contains("basic_auth {$OPENCODE_BASIC_AUTH}"));
+        // Caddy v2.11 requires the block form; inline args are parsed as a
+        // hash-algorithm name and fail the config load.
+        assert!(block.contains("basic_auth {\n        {$OPENCODE_BASIC_AUTH}\n    }"));
     }
 
     #[test]
