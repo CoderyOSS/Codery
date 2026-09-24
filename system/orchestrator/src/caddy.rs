@@ -166,7 +166,20 @@ fn load_env_pairs() -> Vec<(String, String)> {
         .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
         .filter_map(|l| {
             let pos = l.find('=')?;
-            Some((l[..pos].to_string(), l[pos + 1..].to_string()))
+            // Strip one pair of matching surrounding quotes. Values reach
+            // Caddy as process env ({$VAR} expansion); quoted values would
+            // otherwise make Caddy tokenize the quotes into the first token
+            // (e.g. basic_auth user+hash collapses into a single username).
+            let raw = l[pos + 1..].trim();
+            let value = if raw.len() >= 2
+                && ((raw.starts_with('"') && raw.ends_with('"'))
+                    || (raw.starts_with('\'') && raw.ends_with('\'')))
+            {
+                &raw[1..raw.len() - 1]
+            } else {
+                raw
+            };
+            Some((l[..pos].to_string(), value.to_string()))
         })
         .collect();
 
