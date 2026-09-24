@@ -111,7 +111,7 @@ fn caddy_block(
     // missing from /opt/codery/.env we render the route WITHOUT auth and warn
     // loudly — failing closed here would silently drop the route entirely.
     let auth_directive = match (auth_env, env_present) {
-        (Some(env), Some(true)) => format!("    basic_auth {{{env}}}\n"),
+        (Some(env), Some(true)) => format!("    basic_auth {{${env}}}\n"),
         (Some(env), _) => {
             println!(
                 "[caddy] WARNING: {host} requests basic_auth via {env}, but {env} is not set in {} — rendering route WITHOUT auth",
