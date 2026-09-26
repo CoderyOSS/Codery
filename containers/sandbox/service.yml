@@ -74,11 +74,13 @@ env_overrides:
   # traffic (the patch inspects URL + body shape before mutating).
   NODE_OPTIONS: --require /home/gem/bin/zai-patch.js
   # opencode-serve-guard leak backstop: SIGTERM opencode when RSS crosses
-  # this (s6 respawns in seconds; history survives). Lowered from the 1.5 GiB
-  # script default so the guard fires BEFORE host memory pressure builds —
-  # the host has no swap and docker builds + opencode peaks were colliding
-  # into global OOM kills (Sep 16: 13 kills in one evening).
-  OPENCORE_SERVE_KILL_KB: "1200000"
+  # this (s6 respawns in seconds; history survives). The host has no swap, so
+  # this must fire before opencode alone can starve the box — but it must also
+  # sit well above normal long-session RSS (~1.2-1.4 GiB) or it kills sessions
+  # mid-work (Sep 26: repeated kills at the old 1171 MiB line during ordinary
+  # development). 2500 MiB is ~2x observed peak; if global OOM kills reappear
+  # (see Sep 16: docker builds + opencode colliding), lower this first.
+  OPENCORE_SERVE_KILL_KB: "2560000"
 
 required_env:
   - GHCR_USERNAME
