@@ -34,12 +34,14 @@ runcmd:
   # Install Docker Compose plugin (v2)
   - apt-get install -y docker-compose-plugin
 
-  # Configure firewall: allow SSH, HTTP, HTTPS; deny everything else inbound
+  # Configure firewall: allow SSH, HTTP, HTTPS (+ QUIC/UDP for Caddy HTTP/3);
+  # deny everything else inbound
   - ufw default deny incoming
   - ufw default allow outgoing
   - ufw allow ssh
   - ufw allow 80/tcp
   - ufw allow 443/tcp
+  - ufw allow 443/udp
   - ufw allow 2222/tcp
   - ufw --force enable
 

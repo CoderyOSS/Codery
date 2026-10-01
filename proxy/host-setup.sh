@@ -53,6 +53,12 @@ mkdir -p /var/lib/tailscale
 echo "[host-setup] Opening Mosh UDP ports (60000-61000)..."
 ufw allow 60000:61000/udp
 
+# HTTP/3: Caddy serves QUIC on UDP 443 and advertises it via alt-svc. Without
+# this rule browsers try QUIC first, packets are dropped, and page loads stall
+# ~15-30s until the TCP fallback kicks in.
+echo "[host-setup] Opening UDP 443 (HTTP/3 / QUIC)..."
+ufw allow 443/udp
+
 echo "[host-setup] Enabling Tailscale SSH (keyless SSH via Tailscale identity)..."
 tailscale up --ssh 2>/dev/null || echo "[host-setup] NOTE: tailscale up --ssh failed (may not be authenticated yet — tailscale-up.sh will enable it on next supervisord start)"
 
