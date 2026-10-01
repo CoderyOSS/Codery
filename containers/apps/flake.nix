@@ -71,9 +71,11 @@
         openssh
         git
         jq
-        # python3 with pyjwt so github-app-token.sh's `import jwt` works.
+        # python3 with pyjwt so github-app-token.sh's `import jwt` works,
+        # plus pip on PATH. PEP 668 (EXTERNALLY-MANAGED) stays enforced —
+        # installs outside a venv refuse, like modern Debian/Ubuntu/Fedora.
         # `python3.withPackages` wraps the interpreter to see the listed pkgs.
-        (python3.withPackages (p: [ p.pyjwt ]))
+        (python3.withPackages (p: [ p.pyjwt p.pip ]))
         curl
         gnupg
         unzip
