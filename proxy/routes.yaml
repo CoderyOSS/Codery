@@ -18,3 +18,8 @@ routes:
   - subdomain: opendesign
     port: 7456
     target: sandbox
+
+  # remi_answer_engine — host docker-compose stack, API published on loopback 9100
+  - subdomain: answerengine
+    port: 9100
+    target: host
