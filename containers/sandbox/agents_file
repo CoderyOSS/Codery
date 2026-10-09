@@ -61,6 +61,24 @@ Rules:
 - If dart TLS ever fails again: check `ls -la /etc/ssl/certs/` for the
   `ca-certificates.crt` link first — that is the known failure mode, not network.
 
+## Bun bcrypt pitfall: `Bun.password.verify` silently fails on `$2a$`/`$2y$` hashes
+
+`Bun.password.verify()` (confirmed on Bun 1.2.13, linux/x64) returns `false` — it does
+not throw — for every bcrypt hash prefixed `$2a$` or `$2y$`, at any cost factor. Only
+`$2b$` hashes verify. Since `Bun.password.hash()` itself emits `$2b$`, Bun-internal
+hash→verify roundtrips work and mask the bug; but hashes from Go
+(`golang.org/x/crypto/bcrypt`, `caddy hash-password`), PHP `password_hash()`,
+`htpasswd -B`, OpenBSD, passlib, etc. are usually `$2a$`/`$2y$` and will ALWAYS fail
+verification under Bun — indistinguishably from a wrong password.
+
+Workaround — normalize the prefix before verifying (2a/2b/2y are algorithmically
+identical for normal-length passwords):
+
+    const ok = await Bun.password.verify(pw, hash.replace(/^\$2[ay]\$/, "$2b$"));
+
+Never assume "verify returned false ⇒ password wrong" under Bun; check the hash prefix
+first, and never write bcrypt test fixtures using only `Bun.password.hash()` output.
+
 ## Claude Code
 
 `claude` CLI installed globally. `ANTHROPIC_API_KEY` set in environment.
