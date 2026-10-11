@@ -73,6 +73,9 @@ COPY containers/apps/flake.nix containers/apps/home.nix ./
 RUN nix --extra-experimental-features "nix-command flakes" flake lock
 RUN nix --extra-experimental-features "nix-command flakes" profile install --priority 4 .#apps-profile
 
+# git-lfs system-wide filter config (what `git lfs install --system` writes)
+RUN git lfs install --system
+
 # --- sudo setuid: nix store binaries lack setuid bit ---
 # home-manager-only container (no NixOS modules) means security.wrappers
 # never runs. The nix profile bin is first in PATH and has a non-setuid

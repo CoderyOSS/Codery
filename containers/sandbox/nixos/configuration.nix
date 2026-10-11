@@ -44,6 +44,8 @@ let
       unzip
       openssh # ssh client + sshd + ssh-keygen
       gh
+      git-lfs
+      glow
       ripgrep
       fd
       poppler_utils # Open Design PDF export
@@ -146,6 +148,16 @@ let
     for f in su sudo other; do
       printf '%s' '${pamPermit}' > $out/etc/pam.d/$f
     done
+
+    # git-lfs filter config system-wide (what `git lfs install --system`
+    # writes) so clones of LFS repos smudge/clean out of the box.
+    cat > $out/etc/gitconfig <<'EOF'
+    [filter "lfs"]
+      process = git-lfs filter-process
+      required = true
+      clean = git-lfs clean -- %f
+      smudge = git-lfs smudge -- %f
+    EOF
 
     # TLS certs (OpenSSL/GnuTLS lookups) + locale archive, stable paths.
     # Real dir, NOT a symlink to the read-only store: dart's BoringSSL
