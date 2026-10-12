@@ -71,6 +71,7 @@
         openssh
         git
         git-lfs
+        glow
         jq
         # python3 with pyjwt so github-app-token.sh's `import jwt` works,
         # plus pip on PATH. PEP 668 (EXTERNALLY-MANAGED) stays enforced —
