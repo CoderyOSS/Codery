@@ -38,6 +38,7 @@ let
       gnupg
       jq
       nano
+      sqlite
       vim
       neovim
       tmux

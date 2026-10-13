@@ -89,6 +89,7 @@
         less
         which
         file
+        sqlite
         # --- Text processing ---
         gawk
         gnused
