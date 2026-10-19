@@ -19,7 +19,7 @@ ports:
   - name: daemon
     container_port: 6767
     subdomain: code
-    # Caddy vhost code.code.rancidgrandmas.online (tailnet bind, wildcard TLS) -> loopback
+    # Caddy vhost code.rancidgrandmas.online (tailnet bind, wildcard TLS) -> loopback
     # publish. WebSocket upgrades pass through Caddy natively. Auth layers:
     # loopback publish + TLS + Host-header allowlist (PASEO_HOSTNAMES below)
     # + daemon password (PASEO_PASSWORD from .env). /api/health is the only
@@ -62,7 +62,7 @@ volumes:
 
 env_overrides:
   # Daemon must accept the Caddy vhost's Host header (it 403s unknown Hosts).
-  PASEO_HOSTNAMES: "code.code.rancidgrandmas.online"
+  PASEO_HOSTNAMES: "code.rancidgrandmas.online,paseo-preview.code.rancidgrandmas.online"
   # Direct-vhost mode: no public relay (the image enables relay by default).
   PASEO_RELAY_ENABLED: "false"
   # The React web UI is a public-on-origin browser client we never use
