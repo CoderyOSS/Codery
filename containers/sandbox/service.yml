@@ -34,6 +34,27 @@ ports:
     # blue: host 10022  green: host 20022  (port_scheme offsets apply)
     # fixed_port: stable proxy port — orchestrator serve-tcp-proxy forwards
     # connections here to the active color's SSH port automatically.
+  - name: paseo
+    container_port: 6767
+    subdomain: paseo
+    # Paseo (paseo.sh) daemon — control plane that spawns `opencode` (and other
+    # agent CLIs) as subprocesses for the iPad Paseo app. NOT the opencode HTTP
+    # API; see the opencode entry above for that.
+    #
+    # Loopback publish + Caddy vhost (paseo.{DOMAIN} → tailnet IP, TLS via the
+    # existing wildcard cert): the iPad app needs wss:// (its direct ws:// mode
+    # exists but the web client refuses mixed content, and TLS gives the vhost
+    # a real hostname instead of a color-dependent port). Caddy rewrites the
+    # offset port on color flips automatically, so no fixed_port here — one
+    # would collide with the green publish anyway (26767).
+    # blue: host 17676  green: host 26767
+    #
+    # Auth layers: TLS + daemon password (bcrypt in ~/.paseo/config.json).
+    # The daemon enforces a Host-header allowlist (PASEO_HOSTNAMES below) and
+    # only /api/health is unauthenticated. Basic auth is deliberately NOT
+    # layered on: the native app speaks its own WS protocol and Caddy basic
+    # auth would break the WebSocket handshake.
+    bind: loopback
 
 health_check:
   type: tcp
@@ -54,6 +75,9 @@ volumes:
   - type: bind
     host: /opt/codery/data/opendesign
     container: /home/gem/open-design/.od
+  - type: bind
+    host: /opt/codery/data/paseo
+    container: /home/gem/.paseo
   - type: bind
     host: /opt/codery/github-app.pem
     container: /run/secrets/github-app.pem
@@ -81,6 +105,15 @@ env_overrides:
   # development). 2500 MiB is ~2x observed peak; if global OOM kills reappear
   # (see Sep 16: docker builds + opencode colliding), lower this first.
   OPENCORE_SERVE_KILL_KB: "2560000"
+  # Paseo daemon (paseo port above). Password is NOT here — it lives as a
+  # bcrypt hash in the mounted ~/.paseo/config.json. These three only set
+  # transport posture: bind all interfaces inside the container (the loopback
+  # Docker publish cannot reach a 127.0.0.1-bound daemon), accept the Caddy
+  # vhost's Host header, and keep the daemon off the public paseo.sh relay
+  # (0.11.4 enables relay by default; direct-vhost mode does not want it).
+  PASEO_LISTEN: "0.0.0.0:6767"
+  PASEO_HOSTNAMES: "paseo.rancidgrandmas.online"
+  PASEO_RELAY_ENABLED: "false"
 
 required_env:
   - GHCR_USERNAME
