@@ -48,12 +48,14 @@ volumes:
   - type: bind
     host: /opt/codery/data/opencode
     container: /home/paseo/.local/share/opencode
-  # OpenCode global config (MCP servers, permissions) — one-time copy from
-  # the sandbox image (/opt/codery/data/opencode-config); re-copy after
-  # notable sandbox config changes. Per-project opencode.json in projects/
-  # always wins for project work.
+  # OpenCode global config (MCP servers, permissions, AGENTS.md, skills) —
+  # git-managed in the repo, so it survives recreates and updates via normal
+  # commits instead of docker cp dances. Per-project opencode.json in
+  # projects/ still wins for project work; the image's /home/gem ->
+  # /home/paseo symlink keeps the shared canonical project config valid here.
+  # Previous copy retained at /opt/codery/data/opencode-config for rollback.
   - type: bind
-    host: /opt/codery/data/opencode-config
+    host: /opt/codery/projects/Codery/containers/paseo/opencode-config
     container: /home/paseo/.config/opencode
   - type: bind
     host: /opt/codery/github-app.pem
@@ -62,7 +64,7 @@ volumes:
 
 env_overrides:
   # Daemon must accept the Caddy vhost's Host header (it 403s unknown Hosts).
-  PASEO_HOSTNAMES: "code.rancidgrandmas.online,paseo-preview.code.rancidgrandmas.online"
+  PASEO_HOSTNAMES: "code.rancidgrandmas.online,paseo-preview.rancidgrandmas.online"
   # Direct-vhost mode: no public relay (the image enables relay by default).
   PASEO_RELAY_ENABLED: "false"
   # The React web UI is a public-on-origin browser client we never use

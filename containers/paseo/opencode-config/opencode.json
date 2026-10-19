@@ -1,0 +1,71 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "/home/paseo/.config/opencode/AGENTS.md"
+  ],
+  "plugin": [
+    "superpowers@git+https://github.com/obra/superpowers.git"
+  ],
+  "mcp": {
+    "codery": {
+      "type": "remote",
+      "url": "http://host.docker.internal:4040/sse"
+    },
+    "github-app": {
+      "type": "local",
+      "command": ["bun", "/usr/local/bin/github-app-permissions-mcp.ts"]
+    },
+    "playwright": {
+      "type": "local",
+      "command": [
+        "npm", "exec", "-y",
+        "--package=@playwright/mcp@0.0.30",
+        "--package=zod@3.24.1",
+        "--package=zod-to-json-schema@3.24.4",
+        "--", "mcp-server-playwright",
+        "--config",
+        "/home/paseo/.config/opencode/playwright-mcp-config.json"
+      ]
+    }
+  },
+  "permission": {
+    "read": {
+      "*": "allow",
+      ".env": "deny",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow",
+      "/run/secrets/*": "deny",
+      "~/.ssh/*": "deny",
+      "~/.local/share/opencode/auth.json": "deny",
+      ".claude/*": "deny"
+    },
+    "bash": {
+      "*": "allow",
+      "cat /run/secrets/*": "deny",
+      "cat ~/.ssh/*": "deny",
+      "cat .env": "deny",
+      "cat *.env": "deny",
+      "cat *.env.*": "deny",
+      "less /run/secrets/*": "deny",
+      "less ~/.ssh/*": "deny",
+      "head /run/secrets/*": "deny",
+      "head ~/.ssh/*": "deny",
+      "tail /run/secrets/*": "deny",
+      "tail ~/.ssh/*": "deny"
+    }
+  },
+  "compaction": {
+    "auto": true
+  },
+  "watcher": {
+    "ignore": [
+      "/run/secrets/**",
+      "~/.ssh/**",
+      ".env",
+      "*.env.*",
+      ".claude/**",
+      "debug/**"
+    ]
+  }
+}
