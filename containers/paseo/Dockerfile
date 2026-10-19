@@ -12,7 +12,7 @@ USER root
 RUN npm install -g opencode-ai@1.18.31 \
  && npm cache clean --force \
  && apt-get update && apt-get install -y --no-install-recommends \
-      git curl jq openssl \
+      git curl jq openssl python3 python3-pip python3-venv \
  && rm -rf /var/lib/apt/lists/*
 
 # GitHub App credential machinery — same scripts the sandbox uses: fresh
