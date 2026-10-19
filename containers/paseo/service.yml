@@ -1,0 +1,87 @@
+service: paseo
+image: ghcr.io/coderyoss/codery:paseo-{sha}
+
+# Standalone Paseo control plane (paseo.sh): the iPad Paseo app connects to
+# this daemon (WebSocket + password), which spawns opencode agents on the
+# shared projects tree. Deliberately SEPARATE from the sandbox service: the
+# daemon must own the agent processes it spawns, and this way sandbox
+# rebuilds never touch Paseo. If this service proves out, it replaces the
+# sandbox entirely (user directive, 2026-10-19).
+
+# Port formula: host_port = container_port + offset
+# blue:  6767+10000=16767
+# green: 6767+20000=26767
+port_scheme:
+  blue_offset: 10000
+  green_offset: 20000
+
+ports:
+  - name: daemon
+    container_port: 6767
+    subdomain: code
+    # Caddy vhost code.code.rancidgrandmas.online (tailnet bind, wildcard TLS) -> loopback
+    # publish. WebSocket upgrades pass through Caddy natively. Auth layers:
+    # loopback publish + TLS + Host-header allowlist (PASEO_HOSTNAMES below)
+    # + daemon password (PASEO_PASSWORD from .env). /api/health is the only
+    # unauthenticated endpoint.
+    bind: loopback
+
+health_check:
+  type: tcp
+  port: daemon
+  timeout_secs: 60
+  interval_secs: 2
+
+volumes:
+  # Daemon state + agent credentials + .gitconfig (seeded from the image on
+  # first boot; persists across recreates).
+  - type: named
+    name: codery-paseo-home
+    container: /home/paseo
+  # Projects the agents work on — same tree the sandbox serves (uid 1000
+  # owner matches the image's paseo user).
+  - type: bind
+    host: /opt/codery/projects
+    container: /workspace
+  # OpenCode provider auth (auth.json) — shared with the sandbox's opencode
+  # (same uid, same trust domain; both write atomically).
+  - type: bind
+    host: /opt/codery/data/opencode
+    container: /home/paseo/.local/share/opencode
+  # OpenCode global config (MCP servers, permissions) — one-time copy from
+  # the sandbox image (/opt/codery/data/opencode-config); re-copy after
+  # notable sandbox config changes. Per-project opencode.json in projects/
+  # always wins for project work.
+  - type: bind
+    host: /opt/codery/data/opencode-config
+    container: /home/paseo/.config/opencode
+  - type: bind
+    host: /opt/codery/github-app.pem
+    container: /run/secrets/github-app.pem
+    readonly: true
+
+env_overrides:
+  # Daemon must accept the Caddy vhost's Host header (it 403s unknown Hosts).
+  PASEO_HOSTNAMES: "code.code.rancidgrandmas.online"
+  # Direct-vhost mode: no public relay (the image enables relay by default).
+  PASEO_RELAY_ENABLED: "false"
+  # The React web UI is a public-on-origin browser client we never use
+  # (iPad app speaks the WebSocket API).
+  PASEO_WEB_UI_ENABLED: "false"
+  # GitHub App credential machinery (containers/paseo/Dockerfile).
+  GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+  # Playwright browser runtime, reachable over codery-net.
+  PLAYWRIGHT_WS_ENDPOINT: ws://playwright:3000/
+
+required_env:
+  - PASEO_PASSWORD
+  - GITHUB_APP_ID
+  - GITHUB_APP_SLUG
+  - ANTHROPIC_API_KEY
+  - ZAI_API_KEY
+
+network: codery-net
+
+# Reach the host for MCP endpoints if agents need them.
+extra_hosts:
+  - host.docker.internal:host-gateway

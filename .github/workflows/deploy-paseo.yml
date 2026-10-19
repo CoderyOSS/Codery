@@ -1,0 +1,80 @@
+name: Build Paseo
+
+# Manual-only. Relevant source paths (for operator reference):
+#   containers/paseo/{Dockerfile,service.yml}, containers/sandbox/scripts/…
+#   (github-app-token.sh, git-credential-codery.sh are COPY'd into the image)
+on:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    name: Build paseo image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Lowercase owner
+        id: owner
+        run: echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Build and push paseo image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: containers/paseo/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/codery:paseo-latest
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/codery:paseo-${{ github.sha }}
+          provenance: false
+          sbom: false
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/codery:paseo-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/codery:paseo-buildcache,mode=max
+
+  deploy:
+    name: Deploy paseo to VPS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy paseo via codery-ci
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          trap 'rm -f /tmp/deploy_key' EXIT
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH="ssh -i /tmp/deploy_key -o StrictHostKeyChecking=accept-new deploy@${DEPLOY_HOST}"
+
+          # Ordering invariant: sync service.yml BEFORE codery-ci deploy —
+          # CoderyCI reads the YAML at deploy time.
+          $SSH "sudo mkdir -p /opt/codery/services"
+          cat containers/paseo/service.yml | $SSH "sudo tee /opt/codery/services/paseo.yml"
+
+          # Bind-mount sources must exist before deploy validation runs.
+          $SSH "sudo mkdir -p /opt/codery/data/opencode-config && \
+                sudo chown 1000:1000 /opt/codery/data/opencode-config"
+
+          $SSH "sudo /opt/codery/codery-ci deploy paseo ${{ github.sha }} 2>&1"
