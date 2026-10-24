@@ -18,3 +18,14 @@ routes:
   - subdomain: opendesign
     port: 7456
     target: sandbox
+
+  # REMI knowledge graph — Memgraph Lab UI (compose publishes 127.0.0.1:9600)
+  - subdomain: graph
+    port: 9600
+    target: host
+
+  # REMI knowledge graph — Bolt over wss for Lab's browser connection
+  # (Lab served at https://graph.<domain> connects wss://bolt.<domain>:443)
+  - subdomain: bolt
+    port: 7687
+    target: host
