@@ -299,10 +299,7 @@ fn read_tail(path: &Path, max_bytes: usize) -> String {
     };
     let size = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
     if size > max_bytes {
-        if file
-            .seek(SeekFrom::End(-(max_bytes as i64)))
-            .is_err()
-        {
+        if file.seek(SeekFrom::End(-(max_bytes as i64))).is_err() {
             return String::new();
         }
     }
@@ -490,7 +487,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        let final_status = status(&resp.job_id, 4096).await.expect("status should resolve");
+        let final_status = status(&resp.job_id, 4096)
+            .await
+            .expect("status should resolve");
         assert_eq!(final_status.status, JobStatus::Done);
 
         let _ = std::fs::remove_dir_all(&dir);

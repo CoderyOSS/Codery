@@ -59,6 +59,9 @@ pub fn check_caddy() -> Result<()> {
         config::CADDY_ADMIN_PORT
     ))?;
 
-    println!("[preflight] caddy: OK (port {} reachable)", config::CADDY_ADMIN_PORT);
+    println!(
+        "[preflight] caddy: OK (port {} reachable)",
+        config::CADDY_ADMIN_PORT
+    );
     Ok(())
 }

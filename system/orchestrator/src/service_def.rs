@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use schemars::JsonSchema;
+use serde::Deserialize;
 
 use crate::config;
 
@@ -76,7 +76,11 @@ pub struct PortScheme {
 
 impl PortScheme {
     pub fn host_port(&self, color: &str, container_port: u16) -> u16 {
-        let offset = if color == "blue" { self.blue_offset } else { self.green_offset };
+        let offset = if color == "blue" {
+            self.blue_offset
+        } else {
+            self.green_offset
+        };
         container_port + offset
     }
 }
@@ -214,8 +218,7 @@ impl ServiceDef {
         let path = format!("{}/{}.yml", config::SERVICES_DIR, service);
         let data = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read service definition at {path}"))?;
-        serde_yaml::from_str(&data)
-            .with_context(|| format!("failed to parse {path}"))
+        serde_yaml::from_str(&data).with_context(|| format!("failed to parse {path}"))
     }
 
     /// Load all service definitions from /opt/codery/services/*.yml.
@@ -226,9 +229,7 @@ impl ServiceDef {
             return Ok(vec![]);
         }
         let mut defs = Vec::new();
-        for entry in std::fs::read_dir(dir)
-            .with_context(|| format!("failed to read {dir}"))?
-        {
+        for entry in std::fs::read_dir(dir).with_context(|| format!("failed to read {dir}"))? {
             let entry = entry.context("failed to read directory entry")?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("yml") {
@@ -270,14 +271,22 @@ impl ServiceDef {
         // Named ports
         for p in &self.ports {
             let host = self.port_scheme.host_port(color, p.container_port);
-            specs.push(PortBindingSpec { host, container: p.container_port, bind: p.bind });
+            specs.push(PortBindingSpec {
+                host,
+                container: p.container_port,
+                bind: p.bind,
+            });
         }
 
         // Bulk range
         if let Some(ref r) = self.port_range {
             for c in r.container_start..=r.container_end {
                 let host = self.port_scheme.host_port(color, c);
-                specs.push(PortBindingSpec { host, container: c, bind: r.bind });
+                specs.push(PortBindingSpec {
+                    host,
+                    container: c,
+                    bind: r.bind,
+                });
             }
         }
 
@@ -342,7 +351,11 @@ impl ServiceDef {
                 VolumeMount::Named { name, container } => {
                     binds.push(format!("{name}:{container}"));
                 }
-                VolumeMount::Bind { host, container, readonly } => {
+                VolumeMount::Bind {
+                    host,
+                    container,
+                    readonly,
+                } => {
                     let resolved = substitute_env(host, env)?;
                     let ro_suffix = if *readonly { ":ro" } else { "" };
                     binds.push(format!("{resolved}:{container}{ro_suffix}"));
@@ -499,10 +512,38 @@ network: codery-net
 
         let specs = def.port_binding_specs("blue");
         assert_eq!(specs.len(), 4);
-        assert_eq!(specs[0], PortBindingSpec { host: 3000, container: 3000, bind: PortBind::Loopback });
-        assert_eq!(specs[1], PortBindingSpec { host: 4000, container: 4000, bind: PortBind::Any });
-        assert_eq!(specs[2], PortBindingSpec { host: 8000, container: 8000, bind: PortBind::Tailnet });
-        assert_eq!(specs[3], PortBindingSpec { host: 8001, container: 8001, bind: PortBind::Tailnet });
+        assert_eq!(
+            specs[0],
+            PortBindingSpec {
+                host: 3000,
+                container: 3000,
+                bind: PortBind::Loopback
+            }
+        );
+        assert_eq!(
+            specs[1],
+            PortBindingSpec {
+                host: 4000,
+                container: 4000,
+                bind: PortBind::Any
+            }
+        );
+        assert_eq!(
+            specs[2],
+            PortBindingSpec {
+                host: 8000,
+                container: 8000,
+                bind: PortBind::Tailnet
+            }
+        );
+        assert_eq!(
+            specs[3],
+            PortBindingSpec {
+                host: 8001,
+                container: 8001,
+                bind: PortBind::Tailnet
+            }
+        );
     }
 
     #[test]
@@ -534,7 +575,10 @@ network: codery-net
 "#,
         )
         .unwrap();
-        assert_eq!(def.ports[0].auth.as_ref().unwrap().env, "OPENCODE_BASIC_AUTH");
+        assert_eq!(
+            def.ports[0].auth.as_ref().unwrap().env,
+            "OPENCODE_BASIC_AUTH"
+        );
     }
 
     #[test]
@@ -615,7 +659,8 @@ network: codery-net
 
     #[test]
     fn resolved_binds_with_env_var() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
+        let def: ServiceDef = serde_yaml::from_str(
+            r#"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
@@ -634,7 +679,9 @@ volumes:
     readonly: true
 required_env: []
 network: codery-net
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let mut env = HashMap::new();
         env.insert("SSH_DIR".to_string(), "/home/deploy/.ssh".to_string());
         let binds = def.resolved_binds(&env).unwrap();
@@ -643,7 +690,8 @@ network: codery-net
 
     #[test]
     fn resolved_env_applies_overrides() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
+        let def: ServiceDef = serde_yaml::from_str(
+            r#"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
@@ -660,14 +708,17 @@ required_env: []
 env_overrides:
   GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
 network: codery-net
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let raw = vec![
             "GITHUB_APP_PRIVATE_KEY_PATH=/old/path".to_string(),
             "OTHER=value".to_string(),
         ];
         let resolved = def.resolved_env(&raw);
         assert!(!resolved.contains(&"GITHUB_APP_PRIVATE_KEY_PATH=/old/path".to_string()));
-        assert!(resolved.contains(&"GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem".to_string()));
+        assert!(resolved
+            .contains(&"GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem".to_string()));
         assert!(resolved.contains(&"OTHER=value".to_string()));
     }
 
@@ -726,7 +777,8 @@ network: codery-net
 
     #[test]
     fn named_port_fixed_port_deserializes() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
+        let def: ServiceDef = serde_yaml::from_str(
+            r#"
 service: sandbox
 image: ghcr.io/test/x:sandbox-{sha}
 port_scheme:
@@ -744,7 +796,9 @@ health_check:
 volumes: []
 required_env: []
 network: test-net
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let ssh = def.ports.iter().find(|p| p.name == "ssh").unwrap();
         assert_eq!(ssh.fixed_port, Some(2222));
         let web = def.ports.iter().find(|p| p.name == "web").unwrap();
@@ -753,7 +807,8 @@ network: test-net
 
     #[test]
     fn generic_process_fields_deserialize() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
+        let def: ServiceDef = serde_yaml::from_str(
+            r#"
 service: playwright
 image: mcr.microsoft.com/playwright:v1.54.1-noble
 port_scheme:
@@ -784,7 +839,9 @@ user: pwuser
 workdir: /home/pwuser
 init: true
 ipc: host
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert_eq!(def.image, "mcr.microsoft.com/playwright:v1.54.1-noble");
         assert_eq!(
             def.image_ref("v1.54.1"),

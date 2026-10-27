@@ -200,7 +200,13 @@ network: test-net
         let targets = collect_proxy_targets(&defs);
         let target = &targets[0];
         // Verify the scheme computes correct target ports for both colors
-        assert_eq!(target.scheme.host_port("blue", target.container_port), 10022);
-        assert_eq!(target.scheme.host_port("green", target.container_port), 20022);
+        assert_eq!(
+            target.scheme.host_port("blue", target.container_port),
+            10022
+        );
+        assert_eq!(
+            target.scheme.host_port("green", target.container_port),
+            20022
+        );
     }
 }

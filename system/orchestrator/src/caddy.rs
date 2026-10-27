@@ -35,9 +35,7 @@ pub fn generate_from_routes(
     colors: &HashMap<String, String>,
     domain: &str,
 ) -> Result<String> {
-    let mut caddy = String::from(
-        "{\n    acme_dns cloudflare {$CLOUDFLARE_API_TOKEN}\n}\n",
-    );
+    let mut caddy = String::from("{\n    acme_dns cloudflare {$CLOUDFLARE_API_TOKEN}\n}\n");
 
     let env_pairs = load_env_pairs();
     for route in routes {
@@ -142,7 +140,13 @@ fn reload_caddy() -> Result<()> {
     let env_pairs = load_env_pairs();
 
     let out = Command::new("caddy")
-        .args(["reload", "--config", config::CADDY_CONFIG, "--adapter", "caddyfile"])
+        .args([
+            "reload",
+            "--config",
+            config::CADDY_CONFIG,
+            "--adapter",
+            "caddyfile",
+        ])
         .envs(env_pairs)
         .output()
         .context("failed to run caddy reload")?;
@@ -241,10 +245,7 @@ mod tests {
 
     #[test]
     fn sandbox_blue_uses_10k_offset() {
-        let routes = vec![
-            sandbox_route("opencode", 3000),
-            sandbox_route("cli", 7681),
-        ];
+        let routes = vec![sandbox_route("opencode", 3000), sandbox_route("cli", 7681)];
         let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
         assert!(caddy.contains("reverse_proxy localhost:13000"));
         assert!(caddy.contains("reverse_proxy localhost:17681"));
@@ -252,36 +253,28 @@ mod tests {
 
     #[test]
     fn sandbox_green_uses_20k_offset() {
-        let routes = vec![
-            sandbox_route("opencode", 3000),
-        ];
+        let routes = vec![sandbox_route("opencode", 3000)];
         let caddy = generate_from_routes(&routes, &colors("green", "blue"), "example.com").unwrap();
         assert!(caddy.contains("reverse_proxy localhost:23000"));
     }
 
     #[test]
     fn apps_green_uses_10k_offset() {
-        let routes = vec![
-            apps_route("myapp", 3001),
-        ];
+        let routes = vec![apps_route("myapp", 3001)];
         let caddy = generate_from_routes(&routes, &colors("blue", "green"), "example.com").unwrap();
         assert!(caddy.contains("reverse_proxy localhost:18080"));
     }
 
     #[test]
     fn apps_blue_no_offset() {
-        let routes = vec![
-            apps_route("myapp", 3001),
-        ];
+        let routes = vec![apps_route("myapp", 3001)];
         let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
         assert!(caddy.contains("reverse_proxy localhost:8080"));
     }
 
     #[test]
     fn host_routes_no_offset() {
-        let routes = vec![
-            host_route("mcp", 4040),
-        ];
+        let routes = vec![host_route("mcp", 4040)];
         let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
         assert!(caddy.contains("reverse_proxy localhost:4040"));
     }
@@ -317,16 +310,14 @@ mod tests {
 
     #[test]
     fn fqdn_subdomain_used_as_is() {
-        let routes = vec![
-            UnifiedRoute {
-                subdomain: "myapp.custom.com".to_string(),
-                port: 8080,
-                target: "apps".to_string(),
-                internal_port: Some(3001),
-                no_cache: false,
-                auth_env: None,
-            },
-        ];
+        let routes = vec![UnifiedRoute {
+            subdomain: "myapp.custom.com".to_string(),
+            port: 8080,
+            target: "apps".to_string(),
+            internal_port: Some(3001),
+            no_cache: false,
+            auth_env: None,
+        }];
         let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
         assert!(caddy.contains("myapp.custom.com"));
         assert!(!caddy.contains("myapp.custom.com.example.com"));
@@ -334,16 +325,14 @@ mod tests {
 
     #[test]
     fn no_cache_route_adds_cache_headers() {
-        let routes = vec![
-            UnifiedRoute {
-                subdomain: "myapp".to_string(),
-                port: 8080,
-                target: "apps".to_string(),
-                internal_port: Some(3001),
-                no_cache: true,
-                auth_env: None,
-            },
-        ];
+        let routes = vec![UnifiedRoute {
+            subdomain: "myapp".to_string(),
+            port: 8080,
+            target: "apps".to_string(),
+            internal_port: Some(3001),
+            no_cache: true,
+            auth_env: None,
+        }];
         let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
         assert!(caddy.contains("Cache-Control"));
         assert!(caddy.contains("no-store"));
@@ -353,16 +342,14 @@ mod tests {
 
     #[test]
     fn cache_route_has_no_cache_headers() {
-        let routes = vec![
-            UnifiedRoute {
-                subdomain: "myapp".to_string(),
-                port: 8080,
-                target: "apps".to_string(),
-                internal_port: Some(3001),
-                no_cache: false,
-                auth_env: None,
-            },
-        ];
+        let routes = vec![UnifiedRoute {
+            subdomain: "myapp".to_string(),
+            port: 8080,
+            target: "apps".to_string(),
+            internal_port: Some(3001),
+            no_cache: false,
+            auth_env: None,
+        }];
         let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
         assert!(!caddy.contains("Cache-Control"));
         assert!(!caddy.contains("Pragma"));

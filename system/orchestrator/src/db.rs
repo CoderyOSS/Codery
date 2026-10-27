@@ -28,8 +28,7 @@ pub fn open() -> Result<Connection> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent dir for {}", path))?;
     }
-    let conn = Connection::open(path)
-        .with_context(|| format!("failed to open {}", path))?;
+    let conn = Connection::open(path).with_context(|| format!("failed to open {}", path))?;
     Ok(conn)
 }
 
@@ -46,16 +45,14 @@ pub fn init(conn: &Connection) -> Result<()> {
             user          TEXT NOT NULL DEFAULT 'gem',
             restart       TEXT NOT NULL DEFAULT 'always',
             created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-        );"
-    ).context("failed to create apps table")?;
+        );",
+    )
+    .context("failed to create apps table")?;
 
-    let _ = conn.execute_batch(
-        "ALTER TABLE apps ADD COLUMN no_cache INTEGER NOT NULL DEFAULT 0;"
-    );
+    let _ = conn.execute_batch("ALTER TABLE apps ADD COLUMN no_cache INTEGER NOT NULL DEFAULT 0;");
 
-    let _ = conn.execute_batch(
-        "ALTER TABLE apps ADD COLUMN source TEXT NOT NULL DEFAULT 'runtime';"
-    );
+    let _ =
+        conn.execute_batch("ALTER TABLE apps ADD COLUMN source TEXT NOT NULL DEFAULT 'runtime';");
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS previews (
@@ -65,8 +62,9 @@ pub fn init(conn: &Connection) -> Result<()> {
             sha         TEXT NOT NULL,
             color       TEXT NOT NULL,
             created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-        );"
-    ).context("failed to create previews table")?;
+        );",
+    )
+    .context("failed to create previews table")?;
 
     Ok(())
 }
@@ -93,14 +91,18 @@ pub fn insert_app(conn: &Connection, app: &AppRecord) -> Result<()> {
 }
 
 pub fn delete_app(conn: &Connection, name: &str) -> Result<bool> {
-    let rows = conn.execute("DELETE FROM apps WHERE name = ?1", [name])
+    let rows = conn
+        .execute("DELETE FROM apps WHERE name = ?1", [name])
         .with_context(|| format!("failed to delete app '{}'", name))?;
     Ok(rows > 0)
 }
 
 pub fn set_app_source(conn: &Connection, name: &str, source: &str) -> Result<bool> {
     let rows = conn
-        .execute("UPDATE apps SET source = ?1 WHERE name = ?2", (source, name))
+        .execute(
+            "UPDATE apps SET source = ?1 WHERE name = ?2",
+            (source, name),
+        )
         .with_context(|| format!("failed to set source for app '{}'", name))?;
     Ok(rows > 0)
 }
@@ -110,22 +112,24 @@ pub fn list_apps(conn: &Connection) -> Result<Vec<AppRecord>> {
         "SELECT name, subdomain, internal_port, command, directory, env, priority, user, restart, no_cache, source, created_at
          FROM apps ORDER BY name"
     ).context("failed to prepare apps query")?;
-    let rows = stmt.query_map([], |row| {
-        Ok(AppRecord {
-            name: row.get(0)?,
-            subdomain: row.get(1)?,
-            internal_port: row.get::<_, i64>(2)? as u16,
-            command: row.get(3)?,
-            directory: row.get(4)?,
-            env: row.get(5)?,
-            priority: row.get(6)?,
-            user: row.get(7)?,
-            restart: row.get(8)?,
-            no_cache: row.get::<_, i64>(9)? != 0,
-            source: row.get(10)?,
-            created_at: row.get(11)?,
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(AppRecord {
+                name: row.get(0)?,
+                subdomain: row.get(1)?,
+                internal_port: row.get::<_, i64>(2)? as u16,
+                command: row.get(3)?,
+                directory: row.get(4)?,
+                env: row.get(5)?,
+                priority: row.get(6)?,
+                user: row.get(7)?,
+                restart: row.get(8)?,
+                no_cache: row.get::<_, i64>(9)? != 0,
+                source: row.get(10)?,
+                created_at: row.get(11)?,
+            })
         })
-    }).context("failed to query apps")?;
+        .context("failed to query apps")?;
     let mut apps = Vec::new();
     for app in rows {
         apps.push(app.context("failed to read app row")?);
@@ -139,11 +143,13 @@ pub fn find_app_by_name(conn: &Connection, name: &str) -> Result<Option<AppRecor
 }
 
 pub fn port_claimed(conn: &Connection, port: u16) -> Result<bool> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM apps WHERE internal_port = ?1",
-        [port as i64],
-        |row| row.get(0),
-    ).context("failed to check port")?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM apps WHERE internal_port = ?1",
+            [port as i64],
+            |row| row.get(0),
+        )
+        .context("failed to check port")?;
     Ok(count > 0)
 }
 
@@ -183,26 +189,31 @@ pub fn upsert_preview(conn: &Connection, preview: &PreviewRecord) -> Result<()> 
 }
 
 pub fn delete_preview(conn: &Connection, service: &str) -> Result<bool> {
-    let rows = conn.execute("DELETE FROM previews WHERE service = ?1", [service])
+    let rows = conn
+        .execute("DELETE FROM previews WHERE service = ?1", [service])
         .with_context(|| format!("failed to delete preview for '{}'", service))?;
     Ok(rows > 0)
 }
 
 pub fn list_previews(conn: &Connection) -> Result<Vec<PreviewRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT service, subdomain, host_port, sha, color, created_at
-         FROM previews ORDER BY service"
-    ).context("failed to prepare previews query")?;
-    let rows = stmt.query_map([], |row| {
-        Ok(PreviewRecord {
-            service:   row.get(0)?,
-            subdomain: row.get(1)?,
-            host_port: row.get::<_, i64>(2)? as u16,
-            sha:       row.get(3)?,
-            color:     row.get(4)?,
-            created_at:row.get(5)?,
+    let mut stmt = conn
+        .prepare(
+            "SELECT service, subdomain, host_port, sha, color, created_at
+         FROM previews ORDER BY service",
+        )
+        .context("failed to prepare previews query")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(PreviewRecord {
+                service: row.get(0)?,
+                subdomain: row.get(1)?,
+                host_port: row.get::<_, i64>(2)? as u16,
+                sha: row.get(3)?,
+                color: row.get(4)?,
+                created_at: row.get(5)?,
+            })
         })
-    }).context("failed to query previews")?;
+        .context("failed to query previews")?;
     let mut previews = Vec::new();
     for p in rows {
         previews.push(p.context("failed to read preview row")?);
@@ -239,10 +250,9 @@ pub fn load_static_routes() -> Result<Vec<StaticRoute>> {
     if !std::path::Path::new(path).exists() {
         return Ok(vec![]);
     }
-    let data = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path))?;
-    let file: RoutesFile = serde_yaml::from_str(&data)
-        .with_context(|| format!("failed to parse {}", path))?;
+    let data = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path))?;
+    let file: RoutesFile =
+        serde_yaml::from_str(&data).with_context(|| format!("failed to parse {}", path))?;
     Ok(file.routes)
 }
 
@@ -296,38 +306,47 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
 
     let static_routes = load_static_routes().unwrap_or_else(|_| default_static_routes());
     for route in &static_routes {
-        map.insert(route.subdomain.clone(), UnifiedRoute {
-            subdomain: route.subdomain.clone(),
-            port: route.port,
-            target: route.target.clone(),
-            internal_port: None,
-            no_cache: false,
-            auth_env: None,
-        });
+        map.insert(
+            route.subdomain.clone(),
+            UnifiedRoute {
+                subdomain: route.subdomain.clone(),
+                port: route.port,
+                target: route.target.clone(),
+                internal_port: None,
+                no_cache: false,
+                auth_env: None,
+            },
+        );
     }
 
     let apps = list_apps(conn)?;
     for app in &apps {
-        map.insert(app.subdomain.clone(), UnifiedRoute {
-            subdomain: app.subdomain.clone(),
-            port: 8080,
-            target: "apps".to_string(),
-            internal_port: Some(app.internal_port),
-            no_cache: app.no_cache,
-            auth_env: None,
-        });
+        map.insert(
+            app.subdomain.clone(),
+            UnifiedRoute {
+                subdomain: app.subdomain.clone(),
+                port: 8080,
+                target: "apps".to_string(),
+                internal_port: Some(app.internal_port),
+                no_cache: app.no_cache,
+                auth_env: None,
+            },
+        );
     }
 
     let previews = list_previews(conn)?;
     for p in &previews {
-        map.insert(p.subdomain.clone(), UnifiedRoute {
-            subdomain: p.subdomain.clone(),
-            port: p.host_port,
-            target: "host".to_string(),
-            internal_port: None,
-            no_cache: true,
-            auth_env: None,
-        });
+        map.insert(
+            p.subdomain.clone(),
+            UnifiedRoute {
+                subdomain: p.subdomain.clone(),
+                port: p.host_port,
+                target: "host".to_string(),
+                internal_port: None,
+                no_cache: true,
+                auth_env: None,
+            },
+        );
     }
 
     let mut routes: Vec<UnifiedRoute> = map.into_values().collect();
@@ -343,8 +362,7 @@ pub fn sync_s6(conn: &Connection) -> Result<()> {
 /// bundles whose app was deleted or is no longer runtime-managed.
 pub fn sync_s6_to_dir(conn: &Connection, dir: &std::path::Path) -> Result<()> {
     let apps = list_apps(conn)?;
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
 
     // Prune: any subdir that doesn't belong to a runtime app is stale.
     for entry in std::fs::read_dir(dir)? {
@@ -425,7 +443,10 @@ fn render_run(app: &AppRecord) -> String {
 fn render_finish(policy: &str) -> String {
     match policy {
         // Respawn only on non-zero exit (or signal): down the service on clean exit.
-        "on_failure" => "#!/bin/bash\nif [ \"$1\" = \"0\" ]; then exec /command/s6-svc -d .; fi\nexit 0\n".to_string(),
+        "on_failure" => {
+            "#!/bin/bash\nif [ \"$1\" = \"0\" ]; then exec /command/s6-svc -d .; fi\nexit 0\n"
+                .to_string()
+        }
         // Never respawn: always down the service after the first exit.
         _ => "#!/bin/bash\nexec /command/s6-svc -d .\n".to_string(),
     }
@@ -556,7 +577,10 @@ mod tests {
         let conn = test_conn();
         insert_app(&conn, &sample_app("myapp")).unwrap();
         assert!(set_app_source(&conn, "myapp", "build").unwrap());
-        assert_eq!(find_app_by_name(&conn, "myapp").unwrap().unwrap().source, "build");
+        assert_eq!(
+            find_app_by_name(&conn, "myapp").unwrap().unwrap().source,
+            "build"
+        );
         assert!(!set_app_source(&conn, "ghost", "build").unwrap());
     }
 
@@ -568,10 +592,19 @@ mod tests {
         sync_s6_to_dir(&conn, &dir).unwrap();
 
         let b = dir.join("myapp");
-        assert_eq!(std::fs::read_to_string(b.join("type")).unwrap(), "longrun\n");
+        assert_eq!(
+            std::fs::read_to_string(b.join("type")).unwrap(),
+            "longrun\n"
+        );
         assert!(b.join("dependencies.d/base").exists());
-        assert_eq!(std::fs::read_to_string(b.join("timeout-kill")).unwrap(), "10000\n");
-        assert!(!b.join("finish").exists(), "restart=always needs no finish script");
+        assert_eq!(
+            std::fs::read_to_string(b.join("timeout-kill")).unwrap(),
+            "10000\n"
+        );
+        assert!(
+            !b.join("finish").exists(),
+            "restart=always needs no finish script"
+        );
 
         let run = std::fs::read_to_string(b.join("run")).unwrap();
         assert!(run.starts_with("#!/bin/bash\n"));
@@ -582,7 +615,10 @@ mod tests {
         assert!(run.contains("exec /command/s6-setuidgid 'gem' bash -c 'bun run start'\n"));
 
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(b.join("run")).unwrap().permissions().mode();
+        let mode = std::fs::metadata(b.join("run"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_ne!(mode & 0o111, 0, "run must be executable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -598,9 +634,17 @@ mod tests {
         sync_s6_to_dir(&conn, &dir).unwrap();
 
         let run = std::fs::read_to_string(dir.join("quotey").join("run")).unwrap();
-        assert!(run.contains("export GREETING='va'\\''l ue'\n"), "run was:\n{}", run);
+        assert!(
+            run.contains("export GREETING='va'\\''l ue'\n"),
+            "run was:\n{}",
+            run
+        );
         assert!(run.contains("export PLAIN='simple'\n"), "run was:\n{}", run);
-        assert!(run.contains("bash -c 'echo it'\\''s done'\n"), "run was:\n{}", run);
+        assert!(
+            run.contains("bash -c 'echo it'\\''s done'\n"),
+            "run was:\n{}",
+            run
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -636,14 +680,26 @@ mod tests {
         sync_s6_to_dir(&conn, &dir).unwrap();
 
         let f1 = std::fs::read_to_string(dir.join("onfail").join("finish")).unwrap();
-        assert!(f1.contains("[ \"$1\" = \"0\" ]"), "on_failure finish was:\n{}", f1);
+        assert!(
+            f1.contains("[ \"$1\" = \"0\" ]"),
+            "on_failure finish was:\n{}",
+            f1
+        );
         assert!(f1.contains("s6-svc -d ."), "on_failure finish was:\n{}", f1);
 
         let f2 = std::fs::read_to_string(dir.join("never").join("finish")).unwrap();
-        assert!(f2.contains("exec /command/s6-svc -d ."), "never finish was:\n{}", f2);
+        assert!(
+            f2.contains("exec /command/s6-svc -d ."),
+            "never finish was:\n{}",
+            f2
+        );
 
         // Flip back to always: finish must be removed on re-render.
-        conn.execute("UPDATE apps SET restart = 'always' WHERE name = 'onfail'", []).unwrap();
+        conn.execute(
+            "UPDATE apps SET restart = 'always' WHERE name = 'onfail'",
+            [],
+        )
+        .unwrap();
         sync_s6_to_dir(&conn, &dir).unwrap();
         assert!(!dir.join("onfail").join("finish").exists());
         std::fs::remove_dir_all(&dir).unwrap();

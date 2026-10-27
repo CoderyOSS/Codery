@@ -11,7 +11,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{caddy, config, db, deploy, images, mcp_exec, nginx, preflight, service_def::ServiceDef, state};
+use crate::{
+    caddy, config, db, deploy, images, mcp_exec, nginx, preflight, service_def::ServiceDef, state,
+};
 
 // ── Data shapes returned by tools ────────────────────────────────────────────
 
@@ -125,7 +127,9 @@ struct AddAppParams {
     directory: String,
     #[schemars(description = "Optional environment variables for the process")]
     env: Option<HashMap<String, String>>,
-    #[schemars(description = "If true, Caddy and Nginx will send Cache-Control: no-store and related headers to prevent client caching")]
+    #[schemars(
+        description = "If true, Caddy and Nginx will send Cache-Control: no-store and related headers to prevent client caching"
+    )]
     no_cache: Option<bool>,
     /// 'runtime' (default): orchestrator-managed process via s6 bundle.
     /// 'build': image-baked app — registers routing only, no process management.
@@ -315,40 +319,43 @@ impl OrchestratorMcp {
             .map(|s| crate::diagnose::parse_listening_ports(&s))
             .unwrap_or_default();
 
-        let route_entries: Vec<RouteEntry> = unified.iter().map(|r| {
-            let fqdn = if r.subdomain.contains('.') {
-                r.subdomain.clone()
-            } else {
-                format!("{}.{}", r.subdomain, domain)
-            };
-            let color = services_map.get(&r.target).map(|s| s.as_str());
-            let host_port = match r.target.as_str() {
-                "host" => r.port,
-                "sandbox" => {
-                    let c = color.unwrap_or("blue");
-                    r.port + if c == "blue" { 10000 } else { 20000 }
-                }
-                _ => {
-                    let c = color.unwrap_or("blue");
-                    let def = ServiceDef::load(&r.target).ok();
-                    if let Some(def) = def {
-                        def.port_scheme.host_port(c, r.port)
-                    } else {
-                        r.port
+        let route_entries: Vec<RouteEntry> = unified
+            .iter()
+            .map(|r| {
+                let fqdn = if r.subdomain.contains('.') {
+                    r.subdomain.clone()
+                } else {
+                    format!("{}.{}", r.subdomain, domain)
+                };
+                let color = services_map.get(&r.target).map(|s| s.as_str());
+                let host_port = match r.target.as_str() {
+                    "host" => r.port,
+                    "sandbox" => {
+                        let c = color.unwrap_or("blue");
+                        r.port + if c == "blue" { 10000 } else { 20000 }
                     }
+                    _ => {
+                        let c = color.unwrap_or("blue");
+                        let def = ServiceDef::load(&r.target).ok();
+                        if let Some(def) = def {
+                            def.port_scheme.host_port(c, r.port)
+                        } else {
+                            r.port
+                        }
+                    }
+                };
+                RouteEntry {
+                    subdomain: fqdn,
+                    host_port,
+                    container_port: Some(r.port),
+                    internal_port: r.internal_port,
+                    service: r.target.clone(),
+                    color: color.map(|s| s.to_string()),
+                    note: None,
+                    healthy: listening_ports.contains(&host_port),
                 }
-            };
-            RouteEntry {
-                subdomain: fqdn,
-                host_port,
-                container_port: Some(r.port),
-                internal_port: r.internal_port,
-                service: r.target.clone(),
-                color: color.map(|s| s.to_string()),
-                note: None,
-                healthy: listening_ports.contains(&host_port),
-            }
-        }).collect();
+            })
+            .collect();
 
         let unhealthy_count = route_entries.iter().filter(|r| !r.healthy).count();
         let table = RoutingTable {
@@ -612,7 +619,11 @@ impl OrchestratorMcp {
             .await
             .map_err(|e| tool_err(e.to_string()))?;
         let after = std::fs::read_to_string(config::CADDY_CONFIG).unwrap_or_default();
-        let status = if before == after { "unchanged" } else { "changed" };
+        let status = if before == after {
+            "unchanged"
+        } else {
+            "changed"
+        };
         let response = json!({
             "status": status,
             "guidance": {
@@ -1079,15 +1090,19 @@ impl OrchestratorMcp {
             )));
         }
 
-        if db::find_app_by_name(&conn, &p.name).map_err(|e| tool_err(e.to_string()))?.is_some() {
-            return Err(tool_err(format!(
-                "app '{}' already exists",
-                p.name
-            )));
+        if db::find_app_by_name(&conn, &p.name)
+            .map_err(|e| tool_err(e.to_string()))?
+            .is_some()
+        {
+            return Err(tool_err(format!("app '{}' already exists", p.name)));
         }
 
         let env_json = p.env.as_ref().and_then(|e| {
-            if e.is_empty() { None } else { Some(serde_json::to_string(e).unwrap()) }
+            if e.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(e).unwrap())
+            }
         });
 
         let record = db::AppRecord {
@@ -1150,10 +1165,16 @@ impl OrchestratorMcp {
 
         // Register routes (Caddy + Nginx) — unchanged from before.
         if let Err(e) = caddy::apply_all() {
-            return Err(tool_err(format!("app added but Caddy reload failed: {}", e)));
+            return Err(tool_err(format!(
+                "app added but Caddy reload failed: {}",
+                e
+            )));
         }
         if let Err(e) = nginx::generate_and_reload().await {
-            return Err(tool_err(format!("app added but Nginx reload failed: {}", e)));
+            return Err(tool_err(format!(
+                "app added but Nginx reload failed: {}",
+                e
+            )));
         }
 
         let response = json!({
@@ -1210,7 +1231,9 @@ impl OrchestratorMcp {
         // Unlink first while the bundle still exists. s6-svunlink downs the
         // service and waits for the supervisor to exit; warn-and-continue so
         // removal is idempotent even if the service was never linked.
-        if let Err(e) = container_exec("apps", &["/command/s6-svunlink", "/run/service", &p.name]).await {
+        if let Err(e) =
+            container_exec("apps", &["/command/s6-svunlink", "/run/service", &p.name]).await
+        {
             eprintln!("[remove_app] s6-svunlink warning (continuing): {}", e);
         }
 
@@ -1219,10 +1242,16 @@ impl OrchestratorMcp {
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         if let Err(e) = caddy::apply_all() {
-            return Err(tool_err(format!("app removed but Caddy reload failed: {}", e)));
+            return Err(tool_err(format!(
+                "app removed but Caddy reload failed: {}",
+                e
+            )));
         }
         if let Err(e) = nginx::generate_and_reload().await {
-            return Err(tool_err(format!("app removed but Nginx reload failed: {}", e)));
+            return Err(tool_err(format!(
+                "app removed but Nginx reload failed: {}",
+                e
+            )));
         }
 
         let response = json!({
@@ -1371,11 +1400,9 @@ impl OrchestratorMcp {
 
     /// Report whether the codery_exec MCP tool is currently enabled.
     /// Safe to call regardless of toggle state — pure read-only check.
-    #[tool(
-        description = "Check whether codery_exec is enabled. \
+    #[tool(description = "Check whether codery_exec is enabled. \
                           Returns {enabled: bool, allowed_subcommands: [...]}. \
-                          Toggle by running `codery-ci mcp-exec enable|disable` on the host."
-    )]
+                          Toggle by running `codery-ci mcp-exec enable|disable` on the host.")]
     async fn mcp_exec_enabled(&self) -> Result<CallToolResult, McpError> {
         let enabled = mcp_exec::toggle_enabled();
         let response = json!({
@@ -1403,15 +1430,10 @@ impl OrchestratorMcp {
     )]
     async fn codery_exec(
         &self,
-        Parameters(CoderyExecParams {
-            args,
-            timeout_secs,
-        }): Parameters<CoderyExecParams>,
+        Parameters(CoderyExecParams { args, timeout_secs }): Parameters<CoderyExecParams>,
     ) -> Result<CallToolResult, McpError> {
         let timeout = timeout_secs.unwrap_or(1800);
-        let resp = mcp_exec::spawn(args, timeout)
-            .await
-            .map_err(tool_err)?;
+        let resp = mcp_exec::spawn(args, timeout).await.map_err(tool_err)?;
         let json = serde_json::to_string_pretty(&resp).map_err(|e| tool_err(e.to_string()))?;
         tool_ok(json)
     }
@@ -1425,12 +1447,12 @@ impl OrchestratorMcp {
     )]
     async fn codery_exec_status(
         &self,
-        Parameters(CoderyExecStatusParams { job_id, tail_bytes }): Parameters<CoderyExecStatusParams>,
+        Parameters(CoderyExecStatusParams { job_id, tail_bytes }): Parameters<
+            CoderyExecStatusParams,
+        >,
     ) -> Result<CallToolResult, McpError> {
         let tail = tail_bytes.unwrap_or(65536);
-        let resp = mcp_exec::status(&job_id, tail)
-            .await
-            .map_err(tool_err)?;
+        let resp = mcp_exec::status(&job_id, tail).await.map_err(tool_err)?;
         let json = serde_json::to_string_pretty(&resp).map_err(|e| tool_err(e.to_string()))?;
         tool_ok(json)
     }

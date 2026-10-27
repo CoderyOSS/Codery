@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use bollard::Docker;
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use bollard::Docker;
 use futures_util::StreamExt;
 use std::fs;
 
@@ -14,7 +14,8 @@ pub async fn generate_and_reload() -> Result<()> {
     let content = generate_config(&routes, &domain);
 
     let to_write = if content.is_empty() {
-        "server {\n    listen 8080 default_server;\n    return 503 \"No apps configured\";\n}\n".to_string()
+        "server {\n    listen 8080 default_server;\n    return 503 \"No apps configured\";\n}\n"
+            .to_string()
     } else {
         content
     };
@@ -77,35 +78,43 @@ async fn reload_in_active_container() -> Result<()> {
     };
     let container = config::container_name("apps", &color);
 
-    let docker = Docker::connect_with_socket_defaults()
-        .context("failed to connect to Docker")?;
+    let docker = Docker::connect_with_socket_defaults().context("failed to connect to Docker")?;
 
-    let running = docker.inspect_container(&container, None).await
+    let running = docker
+        .inspect_container(&container, None)
+        .await
         .ok()
         .and_then(|i| i.state)
         .and_then(|s| s.running)
         .unwrap_or(false);
 
     if !running {
-        println!("[nginx] Container {} not running — skipping reload", container);
+        println!(
+            "[nginx] Container {} not running — skipping reload",
+            container
+        );
         return Ok(());
     }
 
-    let exec = docker.create_exec(
-        &container,
-        CreateExecOptions {
-            // -c is load-bearing: without it nginx parses its compiled-default
-            // (nix store) config, whose `nogroup` default group doesn't exist
-            // in the container — `getgrnam("nogroup") failed` kills the reload
-            // before the master is ever signaled.
-            cmd: Some(vec!["nginx", "-c", "/etc/nginx/nginx.conf", "-s", "reload"]),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        },
-    ).await.with_context(|| format!("failed to create exec in {}", container))?;
+    let exec = docker
+        .create_exec(
+            &container,
+            CreateExecOptions {
+                // -c is load-bearing: without it nginx parses its compiled-default
+                // (nix store) config, whose `nogroup` default group doesn't exist
+                // in the container — `getgrnam("nogroup") failed` kills the reload
+                // before the master is ever signaled.
+                cmd: Some(vec!["nginx", "-c", "/etc/nginx/nginx.conf", "-s", "reload"]),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .with_context(|| format!("failed to create exec in {}", container))?;
 
-    if let StartExecResults::Attached { mut output, .. } = docker.start_exec(&exec.id, None).await? {
+    if let StartExecResults::Attached { mut output, .. } = docker.start_exec(&exec.id, None).await?
+    {
         while let Some(msg) = output.next().await {
             if let bollard::container::LogOutput::StdErr { message } = msg? {
                 let text = String::from_utf8_lossy(&message);

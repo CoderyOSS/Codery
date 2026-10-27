@@ -87,7 +87,11 @@ pub fn image_ref(service: &str, sha: &str) -> String {
 
 /// Returns the opposite color.
 pub fn flip(color: &str) -> &'static str {
-    if color == "blue" { "green" } else { "blue" }
+    if color == "blue" {
+        "green"
+    } else {
+        "blue"
+    }
 }
 
 /// Returns the deploy lock file path for a service.
@@ -125,10 +129,7 @@ mod tests {
             deploy_lock_path("sandbox"),
             "/run/codery-ci-deploy-sandbox.lock"
         );
-        assert_eq!(
-            deploy_lock_path("apps"),
-            "/run/codery-ci-deploy-apps.lock"
-        );
+        assert_eq!(deploy_lock_path("apps"), "/run/codery-ci-deploy-apps.lock");
     }
 
     #[test]

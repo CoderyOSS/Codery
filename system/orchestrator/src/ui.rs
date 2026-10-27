@@ -1,12 +1,12 @@
 use anyhow::{bail, Result};
-use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::IntoResponse;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use bollard::Docker;
+use axum::Router;
 use bollard::system::EventsOptions;
+use bollard::Docker;
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -15,16 +15,21 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-use bollard::container::ListContainersOptions;
 use crate::service_def::ServiceDef;
 use crate::{caddy, config, deploy, state};
+use bollard::container::ListContainersOptions;
 
 fn ts() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    format!("{:02}:{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60)
+    format!(
+        "{:02}:{:02}:{:02}",
+        (secs / 3600) % 24,
+        (secs / 60) % 60,
+        secs % 60
+    )
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -36,25 +41,25 @@ pub type MetricsStateShared = std::sync::Arc<std::sync::Mutex<crate::host_metric
 #[derive(Clone)]
 pub struct AppState {
     pub rollback_lock: RollbackLock,
-    pub events_tx:    Arc<broadcast::Sender<String>>,
-    pub ops:          Ops,
-    pub metrics_tx:   Arc<broadcast::Sender<String>>,
-    pub metrics:      MetricsStateShared,
+    pub events_tx: Arc<broadcast::Sender<String>>,
+    pub ops: Ops,
+    pub metrics_tx: Arc<broadcast::Sender<String>>,
+    pub metrics: MetricsStateShared,
 }
 
 #[derive(Serialize)]
 pub struct ServiceStatus {
-    pub name:               String,
-    pub image:              String,
-    pub status:             String,
-    pub state:              String,
-    pub service:            Option<String>,
+    pub name: String,
+    pub image: String,
+    pub status: String,
+    pub state: String,
+    pub service: Option<String>,
     pub rollback_available: bool,
-    pub prev_container:     Option<String>,
-    pub operation:          Option<String>,
-    pub serving:            bool,
-    pub container_id:       String,
-    pub image_id:           String,
+    pub prev_container: Option<String>,
+    pub operation: Option<String>,
+    pub serving: bool,
+    pub container_id: String,
+    pub image_id: String,
 }
 
 /// Shorten a Docker ID for display: strip an optional `sha256:` prefix and
@@ -70,8 +75,9 @@ fn short_id(id: Option<&str>) -> String {
 #[allow(dead_code)]
 pub fn make_router(events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Router {
     let (metrics_tx, _) = broadcast::channel::<String>(32);
-    let metrics: MetricsStateShared =
-        Arc::new(std::sync::Mutex::new(crate::host_metrics::MetricsState::default()));
+    let metrics: MetricsStateShared = Arc::new(std::sync::Mutex::new(
+        crate::host_metrics::MetricsState::default(),
+    ));
     make_router_with_metrics(events_tx, ops, Arc::new(metrics_tx), metrics)
 }
 
@@ -94,9 +100,9 @@ pub fn make_router_with_metrics(
         .route("/api/events", get(get_events))
         .route("/api/metrics", get(get_metrics))
         .route("/api/metrics/stream", get(get_metrics_stream))
-        .route("/api/stop/{container}",    post(post_stop))
-        .route("/api/start/{container}",  post(post_start))
-        .route("/api/kill/{container}",   post(post_kill))
+        .route("/api/stop/{container}", post(post_stop))
+        .route("/api/start/{container}", post(post_start))
+        .route("/api/kill/{container}", post(post_kill))
         .route("/api/restart/{container}", post(post_restart))
         .route("/api/rollback/{service}", post(post_rollback))
         .with_state(state)
@@ -105,16 +111,26 @@ pub fn make_router_with_metrics(
 pub async fn serve(port: u16, events_tx: Arc<broadcast::Sender<String>>, ops: Ops) -> Result<()> {
     let (metrics_tx, _) = broadcast::channel::<String>(32);
     let metrics_tx = Arc::new(metrics_tx);
-    let metrics: MetricsStateShared =
-        Arc::new(std::sync::Mutex::new(crate::host_metrics::MetricsState::default()));
+    let metrics: MetricsStateShared = Arc::new(std::sync::Mutex::new(
+        crate::host_metrics::MetricsState::default(),
+    ));
     tokio::spawn(crate::host_metrics::metrics_task(
-        (*metrics_tx).clone(), Arc::clone(&metrics),
+        (*metrics_tx).clone(),
+        Arc::clone(&metrics),
         std::time::Duration::from_secs(3),
     ));
     let addr = format!("127.0.0.1:{}", port);
-    println!("[ui {}] Listening on http://{} (metrics every 3s)", ts(), addr);
+    println!(
+        "[ui {}] Listening on http://{} (metrics every 3s)",
+        ts(),
+        addr
+    );
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, make_router_with_metrics(events_tx, ops, metrics_tx, metrics)).await?;
+    axum::serve(
+        listener,
+        make_router_with_metrics(events_tx, ops, metrics_tx, metrics),
+    )
+    .await?;
     Ok(())
 }
 
@@ -124,7 +140,10 @@ async fn serve_index() -> impl IntoResponse {
     let html = include_str!("../ui/dist/index.html");
     (
         [
-            (header::CONTENT_TYPE,  HeaderValue::from_static("text/html; charset=utf-8")),
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
             (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
         ],
         html,
@@ -136,11 +155,12 @@ async fn get_events(
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.events_tx.subscribe();
     let ops_snap = state.ops.lock().unwrap().clone();
-    let initial = build_status_json(&ops_snap).await.unwrap_or_else(|_| "[]".to_string());
+    let initial = build_status_json(&ops_snap)
+        .await
+        .unwrap_or_else(|_| "[]".to_string());
 
-    let stream = futures_util::stream::unfold(
-        (rx, Some(initial)),
-        |(mut rx, initial)| async move {
+    let stream =
+        futures_util::stream::unfold((rx, Some(initial)), |(mut rx, initial)| async move {
             if let Some(json) = initial {
                 return Some((Ok(Event::default().data(json)), (rx, None)));
             }
@@ -153,8 +173,7 @@ async fn get_events(
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
             }
-        },
-    );
+        });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
@@ -177,9 +196,13 @@ async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let json = metrics_snapshot(&state).await;
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
         json,
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn get_metrics_stream(
@@ -188,9 +211,8 @@ async fn get_metrics_stream(
     let rx = state.metrics_tx.subscribe();
     let initial = metrics_snapshot(&state).await;
 
-    let stream = futures_util::stream::unfold(
-        (rx, Some(initial)),
-        |(mut rx, initial)| async move {
+    let stream =
+        futures_util::stream::unfold((rx, Some(initial)), |(mut rx, initial)| async move {
             if let Some(json) = initial {
                 return Some((Ok(Event::default().data(json)), (rx, None)));
             }
@@ -201,8 +223,7 @@ async fn get_metrics_stream(
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
             }
-        },
-    );
+        });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
@@ -214,9 +235,13 @@ async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
             let json = serde_json::to_string(&statuses).unwrap_or_else(|_| "[]".to_string());
             (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+                [(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
                 json,
-            ).into_response()
+            )
+                .into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -232,7 +257,8 @@ async fn post_rollback(
             return (
                 StatusCode::CONFLICT,
                 format!("rollback already in progress for {}", service),
-            ).into_response();
+            )
+                .into_response();
         }
         set.insert(service.clone());
     }
@@ -259,14 +285,17 @@ pub async fn build_status_json(ops: &HashMap<String, &'static str>) -> Result<St
 
 async fn build_status(ops: &HashMap<String, &'static str>) -> Result<Vec<ServiceStatus>> {
     let docker = Docker::connect_with_socket_defaults()?;
-    let containers = docker.list_containers(Some(ListContainersOptions::<String> {
-        all: true, // running AND stopped
-        ..Default::default()
-    })).await?;
+    let containers = docker
+        .list_containers(Some(ListContainersOptions::<String> {
+            all: true, // running AND stopped
+            ..Default::default()
+        }))
+        .await?;
 
     let mut out = Vec::new();
     for c in containers {
-        let name = c.names
+        let name = c
+            .names
             .unwrap_or_default()
             .into_iter()
             .next()
@@ -283,23 +312,28 @@ async fn build_status(ops: &HashMap<String, &'static str>) -> Result<Vec<Service
                 let peer_color = config::flip(color);
                 let peer = peer_container_name(&name, &svc, peer_color);
                 let stopped = is_container_stopped(&docker, &peer).await;
-                (Some(svc), stopped, if stopped { Some(peer) } else { None }, is_serving)
+                (
+                    Some(svc),
+                    stopped,
+                    if stopped { Some(peer) } else { None },
+                    is_serving,
+                )
             } else {
                 (None, false, None, false)
             };
 
         out.push(ServiceStatus {
             name,
-            image:              c.image.unwrap_or_default(),
-            status:             c.status.unwrap_or_default(),
-            state:              c.state.unwrap_or_default(),
+            image: c.image.unwrap_or_default(),
+            status: c.status.unwrap_or_default(),
+            state: c.state.unwrap_or_default(),
             service,
             rollback_available,
             prev_container,
             operation,
             serving,
-            container_id:       short_id(c.id.as_deref()),
-            image_id:           short_id(c.image_id.as_deref()),
+            container_id: short_id(c.id.as_deref()),
+            image_id: short_id(c.image_id.as_deref()),
         });
     }
     Ok(out)
@@ -339,7 +373,9 @@ fn sha_from_image_tag(service: &str, image: &str) -> Option<String> {
 
 async fn broadcast_status(tx: &broadcast::Sender<String>, ops: &Ops) {
     let ops_snap = ops.lock().unwrap().clone();
-    let json = build_status_json(&ops_snap).await.unwrap_or_else(|_| "[]".to_string());
+    let json = build_status_json(&ops_snap)
+        .await
+        .unwrap_or_else(|_| "[]".to_string());
     let _ = tx.send(json);
 }
 
@@ -362,10 +398,10 @@ pub async fn event_watcher(tx: Arc<broadcast::Sender<String>>, ops: Ops) {
 async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<()> {
     let docker = Docker::connect_with_socket_defaults()?;
 
-    let filters: HashMap<String, Vec<String>> = [(
-        "type".to_string(),
-        vec!["container".to_string()],
-    )].into_iter().collect();
+    let filters: HashMap<String, Vec<String>> =
+        [("type".to_string(), vec!["container".to_string()])]
+            .into_iter()
+            .collect();
 
     let mut stream = docker.events(Some(EventsOptions::<String> {
         filters,
@@ -376,7 +412,9 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
         let event = event?; // propagate Docker errors → outer loop reconnects
 
         let action = event.action.as_deref().unwrap_or("?");
-        let cname  = event.actor.as_ref()
+        let cname = event
+            .actor
+            .as_ref()
             .and_then(|a| a.attributes.as_ref())
             .and_then(|attrs| attrs.get("name"))
             .map(String::as_str)
@@ -387,11 +425,16 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
             let mut ops = ops.lock().unwrap();
             match action {
                 // Container came up — always clear op.
-                "start" => { ops.remove(cname); }
+                "start" => {
+                    ops.remove(cname);
+                }
                 // Container process exited — if we were stopping it, clear op.
                 // If we sent kill, clear op. If stop is in flight, clear op too.
                 "die" | "stop" => {
-                    if matches!(ops.get(cname).map(|s| *s), Some("stopping") | Some("killing")) {
+                    if matches!(
+                        ops.get(cname).map(|s| *s),
+                        Some("stopping") | Some("killing")
+                    ) {
                         ops.remove(cname);
                     }
                 }
@@ -406,13 +449,28 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
             match tokio::time::timeout(
                 tokio::time::Duration::from_secs(5),
                 build_status_json(&ops_snap),
-            ).await {
+            )
+            .await
+            {
                 Ok(Ok(json)) => {
-                    println!("[ui {}] build_status ok ({:.1}s)", ts(), t0.elapsed().as_secs_f32());
+                    println!(
+                        "[ui {}] build_status ok ({:.1}s)",
+                        ts(),
+                        t0.elapsed().as_secs_f32()
+                    );
                     let _ = tx2.send(json);
                 }
-                Ok(Err(e)) => eprintln!("[ui {}] build_status err ({:.1}s): {}", ts(), t0.elapsed().as_secs_f32(), e),
-                Err(_)     => eprintln!("[ui {}] build_status TIMEOUT ({:.1}s)", ts(), t0.elapsed().as_secs_f32()),
+                Ok(Err(e)) => eprintln!(
+                    "[ui {}] build_status err ({:.1}s): {}",
+                    ts(),
+                    t0.elapsed().as_secs_f32(),
+                    e
+                ),
+                Err(_) => eprintln!(
+                    "[ui {}] build_status TIMEOUT ({:.1}s)",
+                    ts(),
+                    t0.elapsed().as_secs_f32()
+                ),
             }
         });
     }
@@ -464,12 +522,12 @@ async fn dispatch_container_op(
     broadcast_status(&state.events_tx, &state.ops).await;
 
     let ops = Arc::clone(&state.ops);
-    let tx  = Arc::clone(&state.events_tx);
+    let tx = Arc::clone(&state.events_tx);
     tokio::spawn(async move {
         let mut cmd = tokio::process::Command::new("docker");
         cmd.args(docker_args).arg(&container);
         match cmd.spawn() {
-            Ok(_)  => println!("[ui {}] {} dispatched: {}", ts(), op, container),
+            Ok(_) => println!("[ui {}] {} dispatched: {}", ts(), op, container),
             Err(e) => {
                 eprintln!("[ui {}] {} failed to spawn: {}", ts(), op, e);
                 ops.lock().unwrap().remove(&container);
@@ -492,8 +550,8 @@ async fn run_rollback(service: &str, ops: &Ops, tx: &broadcast::Sender<String>) 
     let _lock = crate::deploy_lock::DeployLock::try_acquire(service)
         .map_err(|_| anyhow::anyhow!("deploy already in progress for {}", service))?;
 
-    let def = ServiceDef::load(service)
-        .map_err(|_| anyhow::anyhow!("unknown service: {}", service))?;
+    let def =
+        ServiceDef::load(service).map_err(|_| anyhow::anyhow!("unknown service: {}", service))?;
 
     let docker = Docker::connect_with_socket_defaults()?;
 
@@ -502,10 +560,20 @@ async fn run_rollback(service: &str, ops: &Ops, tx: &broadcast::Sender<String>) 
     let prev_container = config::container_name(service, prev_color);
     let active_container = config::container_name(service, &active_color);
 
-    ops.lock().unwrap().insert(active_container.clone(), "rolling_back");
+    ops.lock()
+        .unwrap()
+        .insert(active_container.clone(), "rolling_back");
     broadcast_status(tx, ops).await;
 
-    let result = do_rollback(&docker, &def, service, prev_color, &prev_container, &active_container).await;
+    let result = do_rollback(
+        &docker,
+        &def,
+        service,
+        prev_color,
+        &prev_container,
+        &active_container,
+    )
+    .await;
 
     ops.lock().unwrap().remove(&active_container);
     broadcast_status(tx, ops).await;
@@ -538,10 +606,15 @@ async fn do_rollback(
         .as_ref()
         .and_then(|c| c.image.as_deref())
         .unwrap_or("");
-    let prev_sha = sha_from_image_tag(service, image)
-        .unwrap_or_else(|| "unknown".to_string());
+    let prev_sha = sha_from_image_tag(service, image).unwrap_or_else(|| "unknown".to_string());
 
-    println!("[ui {}] Rolling back {} to {} (sha={})", ts(), service, prev_color, prev_sha);
+    println!(
+        "[ui {}] Rolling back {} to {} (sha={})",
+        ts(),
+        service,
+        prev_color,
+        prev_sha
+    );
 
     // Start the previous container
     use bollard::container::StartContainerOptions;
@@ -559,7 +632,12 @@ async fn do_rollback(
     // Flip state
     state::write_active(service, prev_color)?;
     state::write_active_sha(service, &prev_sha)?;
-    println!("[ui {}] State updated: {} is now {}", ts(), service, prev_color);
+    println!(
+        "[ui {}] State updated: {} is now {}",
+        ts(),
+        service,
+        prev_color
+    );
 
     // Reload Caddy
     caddy::apply_all()
@@ -568,7 +646,12 @@ async fn do_rollback(
     // Stop the now-old active container (only reached if Caddy reload succeeded)
     deploy::stop_container(docker, active_container).await?;
 
-    println!("[ui {}] Rollback complete: {} is now {}", ts(), service, prev_color);
+    println!(
+        "[ui {}] Rollback complete: {} is now {}",
+        ts(),
+        service,
+        prev_color
+    );
     Ok(())
 }
 
@@ -578,8 +661,8 @@ async fn do_rollback(
 mod tests {
     use super::*;
     use bollard::container::{
-        Config, CreateContainerOptions, RemoveContainerOptions,
-        StartContainerOptions, StopContainerOptions,
+        Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
+        StopContainerOptions,
     };
 
     async fn start_test_server() -> u16 {
@@ -588,7 +671,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            axum::serve(listener, make_router(Arc::new(tx), ops)).await.unwrap()
+            axum::serve(listener, make_router(Arc::new(tx), ops))
+                .await
+                .unwrap()
         });
         port
     }
@@ -608,74 +693,123 @@ mod tests {
         let cname = "codery-test-ui-status";
 
         // Clean up any leftover from a previous run
-        let _ = docker.remove_container(
-            cname,
-            Some(RemoveContainerOptions { force: true, ..Default::default() }),
-        ).await;
+        let _ = docker
+            .remove_container(
+                cname,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
 
-        docker.create_container(
-            Some(CreateContainerOptions { name: cname, platform: None }),
-            Config {
-                image: Some("rust:latest"),
-                cmd: Some(vec!["sleep", "60"]),
-                ..Default::default()
-            },
-        ).await.expect("create test container");
+        docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: cname,
+                    platform: None,
+                }),
+                Config {
+                    image: Some("rust:latest"),
+                    cmd: Some(vec!["sleep", "60"]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create test container");
 
-        docker.start_container(cname, None::<StartContainerOptions<String>>)
-            .await.expect("start test container");
+        docker
+            .start_container(cname, None::<StartContainerOptions<String>>)
+            .await
+            .expect("start test container");
 
         let port = start_test_server().await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let resp = reqwest::get(format!("http://127.0.0.1:{}/api/status", port))
-            .await.expect("GET /api/status");
+            .await
+            .expect("GET /api/status");
 
-        assert!(resp.status().is_success(), "expected 200, got {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "expected 200, got {}",
+            resp.status()
+        );
 
         let body: serde_json::Value = resp.json().await.expect("parse JSON");
         let arr = body.as_array().expect("expected JSON array");
 
         // Every element must carry the four fields the JS renders
         for item in arr {
-            assert!(item["name"].as_str().is_some(),   "missing 'name' in {}", item);
-            assert!(item["image"].as_str().is_some(),  "missing 'image' in {}", item);
-            assert!(item["status"].as_str().is_some(), "missing 'status' in {}", item);
-            assert!(item["state"].as_str().is_some(),  "missing 'state' in {}", item);
+            assert!(
+                item["name"].as_str().is_some(),
+                "missing 'name' in {}",
+                item
+            );
+            assert!(
+                item["image"].as_str().is_some(),
+                "missing 'image' in {}",
+                item
+            );
+            assert!(
+                item["status"].as_str().is_some(),
+                "missing 'status' in {}",
+                item
+            );
+            assert!(
+                item["state"].as_str().is_some(),
+                "missing 'state' in {}",
+                item
+            );
         }
 
         // Our container must appear as running
-        let found = arr.iter().any(|c| {
-            c["name"].as_str() == Some(cname) && c["state"].as_str() == Some("running")
-        });
+        let found = arr
+            .iter()
+            .any(|c| c["name"].as_str() == Some(cname) && c["state"].as_str() == Some("running"));
 
         // Cleanup before asserting so we don't leave orphans on failure
-        let _ = docker.stop_container(cname, Some(StopContainerOptions { t: 0 })).await;
+        let _ = docker
+            .stop_container(cname, Some(StopContainerOptions { t: 0 }))
+            .await;
         let _ = docker.remove_container(cname, None).await;
 
-        assert!(found, "container '{}' not in /api/status\ngot: {}", cname, body);
+        assert!(
+            found,
+            "container '{}' not in /api/status\ngot: {}",
+            cname, body
+        );
     }
 
     #[tokio::test]
     async fn metrics_endpoints_serve_and_stream() {
         let (tx, _) = tokio::sync::broadcast::channel::<String>(16);
         let tx = Arc::new(tx);
-        let metrics: crate::ui::MetricsStateShared =
-            Arc::new(std::sync::Mutex::new(crate::host_metrics::MetricsState::default()));
+        let metrics: crate::ui::MetricsStateShared = Arc::new(std::sync::Mutex::new(
+            crate::host_metrics::MetricsState::default(),
+        ));
         let ops: Ops = Arc::new(Mutex::new(HashMap::new()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            axum::serve(listener, make_router_with_metrics(
-                Arc::new(tokio::sync::broadcast::channel::<String>(16).0),
-                ops, tx.clone(), metrics,
-            )).await.unwrap()
+            axum::serve(
+                listener,
+                make_router_with_metrics(
+                    Arc::new(tokio::sync::broadcast::channel::<String>(16).0),
+                    ops,
+                    tx.clone(),
+                    metrics,
+                ),
+            )
+            .await
+            .unwrap()
         });
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Snapshot endpoint: 200 + required snake_case fields.
         let resp = reqwest::get(format!("http://127.0.0.1:{port}/api/metrics"))
-            .await.expect("GET /api/metrics");
+            .await
+            .expect("GET /api/metrics");
         assert!(resp.status().is_success());
         let body: serde_json::Value = resp.json().await.expect("json");
         assert!(body["health"]["status"].as_str().is_some(), "got {body}");
@@ -688,19 +822,23 @@ mod tests {
         use futures_util::StreamExt;
         let mut es = reqwest::Client::new()
             .get(format!("http://127.0.0.1:{port}/api/metrics/stream"))
-            .send().await.expect("SSE connect")
+            .send()
+            .await
+            .expect("SSE connect")
             .bytes_stream();
         let mut first = Vec::new();
         while first.len() < 3 {
             let Some(chunk) = es.next().await else { break };
             first.extend_from_slice(&chunk.unwrap());
-            if first.windows(2).any(|w| w == b"\n\n") { break; }
+            if first.windows(2).any(|w| w == b"\n\n") {
+                break;
+            }
         }
         let text = String::from_utf8_lossy(&first);
         assert!(text.contains("data:"), "no SSE data frame in: {text}");
         let payload = text.split("data: ").nth(1).unwrap_or("");
-        let v: serde_json::Value = serde_json::from_str(payload.trim_end())
-            .expect("initial SSE frame is a metrics JSON");
+        let v: serde_json::Value =
+            serde_json::from_str(payload.trim_end()).expect("initial SSE frame is a metrics JSON");
         assert!(v["health"]["status"].as_str().is_some());
     }
 }

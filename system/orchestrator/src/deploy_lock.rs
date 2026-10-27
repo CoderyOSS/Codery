@@ -31,12 +31,7 @@ impl DeployLock {
 
         // LOCK_EX | LOCK_NB: exclusive lock, return immediately if unavailable.
         // The OS releases the lock automatically when `file` is dropped (fd closed).
-        let ret = unsafe {
-            libc::flock(
-                file.as_raw_fd(),
-                libc::LOCK_EX | libc::LOCK_NB,
-            )
-        };
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
 
         if ret == 0 {
             Ok(DeployLock { _file: file })

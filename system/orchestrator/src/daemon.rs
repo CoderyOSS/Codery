@@ -1,7 +1,7 @@
+use crate::{config, mcp, tcp_proxy, ui};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use crate::{config, mcp, tcp_proxy, ui};
 
 /// Run MCP, UI, and TCP-proxy servers concurrently in a single process.
 /// Exits if any server errors or if SIGTERM/SIGINT is received.
@@ -35,11 +35,7 @@ pub async fn serve() -> Result<()> {
 async fn shutdown_signal() {
     use tokio::signal;
 
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .unwrap_or(())
-    };
+    let ctrl_c = async { signal::ctrl_c().await.unwrap_or(()) };
 
     #[cfg(unix)]
     let sigterm = async {

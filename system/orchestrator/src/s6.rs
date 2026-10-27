@@ -53,7 +53,15 @@ mod tests {
     fn parses_up_service() {
         let out = "web|true 1234 42\n";
         let stats = parse_svstat_batch(out);
-        assert_eq!(stats, vec![SvcStat { name: "web".into(), up: true, pid: 1234, uptime_secs: 42 }]);
+        assert_eq!(
+            stats,
+            vec![SvcStat {
+                name: "web".into(),
+                up: true,
+                pid: 1234,
+                uptime_secs: 42
+            }]
+        );
     }
 
     #[test]

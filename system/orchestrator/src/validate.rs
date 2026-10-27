@@ -3,8 +3,8 @@ use std::net::TcpListener;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use bollard::Docker;
 use bollard::volume::CreateVolumeOptions;
+use bollard::Docker;
 
 use crate::service_def::{ServiceDef, VolumeMount};
 use crate::{config, images, state};
@@ -162,7 +162,9 @@ fn substitute_env(s: &str, env: &HashMap<String, String>) -> Result<String> {
 async fn ensure_named_volume(docker: &Docker, name: &str) -> Result<()> {
     match docker.inspect_volume(name).await {
         Ok(_) => Ok(()),
-        Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => {
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => {
             println!("[validate] Creating missing named volume: {}", name);
             docker
                 .create_volume(CreateVolumeOptions {

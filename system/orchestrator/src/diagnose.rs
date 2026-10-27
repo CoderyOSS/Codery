@@ -91,9 +91,7 @@ impl DiagnoseReport {
             };
             out.push_str(&format!(
                 "[{}] {:<8} state={}",
-                svc.service,
-                tag,
-                svc.state_color
+                svc.service, tag, svc.state_color
             ));
             if let Some(c) = &svc.running_color {
                 out.push_str(&format!("  running={}", c));
@@ -252,11 +250,7 @@ struct ContainerState {
 /// (or `None` if the container does not exist).
 async fn inspect_container(docker: &Docker, name: &str) -> Option<ContainerState> {
     let info = docker.inspect_container(name, None).await.ok()?;
-    let running = info
-        .state
-        .as_ref()
-        .and_then(|s| s.running)
-        .unwrap_or(false);
+    let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
     let image = info
         .config
         .as_ref()
@@ -269,8 +263,8 @@ async fn inspect_container(docker: &Docker, name: &str) -> Option<ContainerState
 /// queries the previews table, and shells out to `ss -tlnp` once.
 pub async fn run() -> Result<DiagnoseReport> {
     let defs = ServiceDef::load_all().context("failed to load service definitions")?;
-    let docker = Docker::connect_with_socket_defaults()
-        .context("failed to connect to Docker socket")?;
+    let docker =
+        Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
 
     // ── Service checks ───────────────────────────────────────────────────────
     let mut services: Vec<ServiceIssue> = Vec::new();
@@ -336,7 +330,10 @@ pub async fn run() -> Result<DiagnoseReport> {
 
     let mut routes: Vec<RouteIssue> = Vec::new();
     for r in &unified {
-        let color = state_colors.get(&r.target).map(|s| s.as_str()).unwrap_or("blue");
+        let color = state_colors
+            .get(&r.target)
+            .map(|s| s.as_str())
+            .unwrap_or("blue");
         let host_port = route_host_port(&r.target, r.port, color);
         if listening.contains(&host_port) {
             continue;
@@ -370,10 +367,12 @@ pub async fn run() -> Result<DiagnoseReport> {
         .collect();
 
     // ── Aggregate ────────────────────────────────────────────────────────────
-    let svc_unhealthy = services.iter().any(|s| matches!(
-        s.severity,
-        Severity::Mismatch | Severity::Dead | Severity::Stale
-    ));
+    let svc_unhealthy = services.iter().any(|s| {
+        matches!(
+            s.severity,
+            Severity::Mismatch | Severity::Dead | Severity::Stale
+        )
+    });
     let all_healthy = !svc_unhealthy && routes.is_empty() && previews.is_empty();
     let issue_count = services
         .iter()
@@ -434,10 +433,7 @@ mod tests {
 
     #[test]
     fn classify_info_when_both_running() {
-        assert_eq!(
-            classify_service("blue", &["blue", "green"]),
-            Severity::Info
-        );
+        assert_eq!(classify_service("blue", &["blue", "green"]), Severity::Info);
         assert_eq!(
             classify_service("green", &["blue", "green"]),
             Severity::Info

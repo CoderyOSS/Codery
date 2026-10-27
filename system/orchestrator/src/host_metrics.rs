@@ -8,7 +8,7 @@ use std::collections::HashMap;
 // ── Health thresholds (single tuning point) ──────────────────────────────────
 const RED_AVAIL_PCT: f64 = 10.0;
 const YELLOW_AVAIL_PCT: f64 = 20.0;
-const RED_SWAP_USED_MB: f64 = 2048.0;   // >50% of a 4G swap
+const RED_SWAP_USED_MB: f64 = 2048.0; // >50% of a 4G swap
 const YELLOW_SWAP_USED_MB: f64 = 100.0;
 const RED_PSI_MEM_AVG10: f64 = 25.0;
 const YELLOW_PSI_MEM_AVG10: f64 = 10.0;
@@ -27,20 +27,36 @@ pub struct MemoryInfo {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct PsiWindow { pub avg10: f64, pub avg60: f64, pub avg300: f64 }
+pub struct PsiWindow {
+    pub avg10: f64,
+    pub avg60: f64,
+    pub avg300: f64,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct PsiResource { pub some: PsiWindow, pub full: Option<PsiWindow> }
+pub struct PsiResource {
+    pub some: PsiWindow,
+    pub full: Option<PsiWindow>,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct Psi { pub cpu: PsiResource, pub memory: PsiResource, pub io: PsiResource }
+pub struct Psi {
+    pub cpu: PsiResource,
+    pub memory: PsiResource,
+    pub io: PsiResource,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct Health { pub status: String, pub reasons: Vec<String> }
+pub struct Health {
+    pub status: String,
+    pub reasons: Vec<String>,
+}
 
 // ── Parsers ──────────────────────────────────────────────────────────────────
 
-fn kb_to_mb(kb: f64) -> f64 { kb / 1024.0 }
+fn kb_to_mb(kb: f64) -> f64 {
+    kb / 1024.0
+}
 
 /// Parse /proc/meminfo (keyed "Field:  N kB" lines). Missing fields → 0.
 pub fn parse_meminfo(text: &str) -> MemoryInfo {
@@ -59,12 +75,12 @@ pub fn parse_meminfo(text: &str) -> MemoryInfo {
         0.0
     };
     MemoryInfo {
-        total_mb:     get("MemTotal"),
+        total_mb: get("MemTotal"),
         available_mb: get("MemAvailable"),
-        cached_mb:    get("Cached"),
-        buffers_mb:   get("Buffers"),
+        cached_mb: get("Cached"),
+        buffers_mb: get("Buffers"),
         swap_total_mb: get("SwapTotal"),
-        swap_free_mb:  get("SwapFree"),
+        swap_free_mb: get("SwapFree"),
     }
 }
 
@@ -72,19 +88,36 @@ pub fn parse_meminfo(text: &str) -> MemoryInfo {
 /// and optionally a `full …` line. CPU files have no `full` line.
 pub fn parse_pressure(text: &str) -> Option<PsiResource> {
     let parse_line = |line: &str| -> Option<PsiWindow> {
-        let mut w = PsiWindow { avg10: 0.0, avg60: 0.0, avg300: 0.0 };
+        let mut w = PsiWindow {
+            avg10: 0.0,
+            avg60: 0.0,
+            avg300: 0.0,
+        };
         let mut seen = false;
         for part in line.split_whitespace().skip(1) {
             if let Some((k, v)) = part.split_once('=') {
                 match k {
-                    "avg10"  => { w.avg10  = v.parse().ok()?; seen = true; }
-                    "avg60"  => { w.avg60  = v.parse().ok()?; seen = true; }
-                    "avg300" => { w.avg300 = v.parse().ok()?; seen = true; }
+                    "avg10" => {
+                        w.avg10 = v.parse().ok()?;
+                        seen = true;
+                    }
+                    "avg60" => {
+                        w.avg60 = v.parse().ok()?;
+                        seen = true;
+                    }
+                    "avg300" => {
+                        w.avg300 = v.parse().ok()?;
+                        seen = true;
+                    }
                     _ => {}
                 }
             }
         }
-        if seen { Some(w) } else { None }
+        if seen {
+            Some(w)
+        } else {
+            None
+        }
     };
     let mut some: Option<PsiWindow> = None;
     let mut full: Option<PsiWindow> = None;
@@ -112,7 +145,12 @@ pub fn parse_memory_events(text: &str) -> u64 {
 
 /// Memory-derived health. Red outranks yellow. PSI-absent degrades to
 /// memory/swap-only with a "PSI unavailable" reason.
-pub fn derive_health(mem: &MemoryInfo, psi: Option<&Psi>, prev_oom: Option<u64>, cur_oom: u64) -> Health {
+pub fn derive_health(
+    mem: &MemoryInfo,
+    psi: Option<&Psi>,
+    prev_oom: Option<u64>,
+    cur_oom: u64,
+) -> Health {
     let mut red: Vec<String> = Vec::new();
     let mut yellow: Vec<String> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
@@ -141,7 +179,10 @@ pub fn derive_health(mem: &MemoryInfo, psi: Option<&Psi>, prev_oom: Option<u64>,
             if w.avg10 > RED_PSI_MEM_AVG10 {
                 red.push(format!("memory pressure avg10 {:.0}%", w.avg10));
             } else if w.avg10 > YELLOW_PSI_MEM_AVG10 || w.avg60 > YELLOW_PSI_MEM_AVG60 {
-                yellow.push(format!("memory pressure avg10 {:.0}% avg60 {:.0}%", w.avg10, w.avg60));
+                yellow.push(format!(
+                    "memory pressure avg10 {:.0}% avg60 {:.0}%",
+                    w.avg10, w.avg60
+                ));
             }
         }
         None => notes.push("PSI unavailable".to_string()),
@@ -155,12 +196,21 @@ pub fn derive_health(mem: &MemoryInfo, psi: Option<&Psi>, prev_oom: Option<u64>,
 
     if !red.is_empty() {
         red.extend(notes);
-        Health { status: "red".into(), reasons: red }
+        Health {
+            status: "red".into(),
+            reasons: red,
+        }
     } else if !yellow.is_empty() {
         yellow.extend(notes);
-        Health { status: "yellow".into(), reasons: yellow }
+        Health {
+            status: "yellow".into(),
+            reasons: yellow,
+        }
     } else {
-        Health { status: "green".into(), reasons: notes }
+        Health {
+            status: "green".into(),
+            reasons: notes,
+        }
     }
 }
 
@@ -260,11 +310,15 @@ pub fn scan_processes() -> std::io::Result<ProcSnapshot> {
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Ok(_pid) = name.parse::<i32>() else { continue };
+        let Ok(_pid) = name.parse::<i32>() else {
+            continue;
+        };
 
         let stat = read_file(&entry.path().join("stat")).ok();
         let Some(stat) = stat else { continue };
-        let Some((pid, ppid, state, utime, stime)) = parse_stat(&stat) else { continue };
+        let Some((pid, ppid, state, utime, stime)) = parse_stat(&stat) else {
+            continue;
+        };
         if ppid == 2 {
             continue; // kernel thread (child of kthreadd)
         }
@@ -279,7 +333,16 @@ pub fn scan_processes() -> std::io::Result<ProcSnapshot> {
             .ok()
             .and_then(|c| parse_cgroup_container(&c));
 
-        procs.push(ProcSample { pid, ppid, state, comm, utime, stime, rss_bytes, container_id });
+        procs.push(ProcSample {
+            pid,
+            ppid,
+            state,
+            comm,
+            utime,
+            stime,
+            rss_bytes,
+            container_id,
+        });
     }
     let wall_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -332,7 +395,11 @@ pub fn top_processes(
             }
         })
         .collect();
-    rows.sort_by(|a, b| b.rss_mb.partial_cmp(&a.rss_mb).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| {
+        b.rss_mb
+            .partial_cmp(&a.rss_mb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     rows.truncate(n);
     rows
 }
@@ -371,14 +438,23 @@ pub fn read_psi() -> Option<Psi> {
 
 /// Docker container id → name map for process attribution. Empty on error.
 pub async fn container_map(docker: &bollard::Docker) -> HashMap<String, String> {
-    let list = docker.list_containers(Some(bollard::container::ListContainersOptions::<String> {
-        all: true,
-        ..Default::default()
-    })).await.unwrap_or_default();
+    let list = docker
+        .list_containers(Some(bollard::container::ListContainersOptions::<String> {
+            all: true,
+            ..Default::default()
+        }))
+        .await
+        .unwrap_or_default();
     let mut map = HashMap::new();
     for c in list {
-        let Some(id) = c.id.as_deref().map(str::to_string) else { continue };
-        let name = c.names.unwrap_or_default().into_iter().next()
+        let Some(id) = c.id.as_deref().map(str::to_string) else {
+            continue;
+        };
+        let name = c
+            .names
+            .unwrap_or_default()
+            .into_iter()
+            .next()
             .map(|n| n.trim_start_matches('/').to_string())
             .unwrap_or_else(|| "unknown".to_string());
         map.insert(id, name);
@@ -410,7 +486,14 @@ pub fn collect(state: &mut MetricsState, containers: &HashMap<String, String>) -
     state.prev = snapshot;
     state.prev_oom = Some(oom_kills);
 
-    HostMetrics { ts, health, memory, psi, oom_kills, top_processes: top }
+    HostMetrics {
+        ts,
+        health,
+        memory,
+        psi,
+        oom_kills,
+        top_processes: top,
+    }
 }
 
 /// Forever-loop: every `interval`, broadcast a fresh snapshot as JSON.
@@ -442,7 +525,6 @@ pub async fn metrics_task(
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -545,9 +627,30 @@ SwapFree:              0 kB
 
     fn psi_mem(avg10: f64, avg60: f64) -> Psi {
         Psi {
-            cpu: PsiResource { some: PsiWindow { avg10: 0.0, avg60: 0.0, avg300: 0.0 }, full: None },
-            memory: PsiResource { some: PsiWindow { avg10, avg60, avg300: 0.0 }, full: None },
-            io: PsiResource { some: PsiWindow { avg10: 0.0, avg60: 0.0, avg300: 0.0 }, full: None },
+            cpu: PsiResource {
+                some: PsiWindow {
+                    avg10: 0.0,
+                    avg60: 0.0,
+                    avg300: 0.0,
+                },
+                full: None,
+            },
+            memory: PsiResource {
+                some: PsiWindow {
+                    avg10,
+                    avg60,
+                    avg300: 0.0,
+                },
+                full: None,
+            },
+            io: PsiResource {
+                some: PsiWindow {
+                    avg10: 0.0,
+                    avg60: 0.0,
+                    avg300: 0.0,
+                },
+                full: None,
+            },
         }
     }
 
@@ -562,7 +665,11 @@ SwapFree:              0 kB
     fn low_memory_is_red() {
         let h = derive_health(&mem(9.0, 0.0), Some(&psi_mem(0.0, 0.0)), Some(13), 13);
         assert_eq!(h.status, "red");
-        assert!(h.reasons.iter().any(|r| r.contains("MemAvailable")), "reasons: {:?}", h.reasons);
+        assert!(
+            h.reasons.iter().any(|r| r.contains("MemAvailable")),
+            "reasons: {:?}",
+            h.reasons
+        );
     }
 
     #[test]
@@ -581,7 +688,11 @@ SwapFree:              0 kB
     fn oom_increase_is_red() {
         let h = derive_health(&mem(50.0, 0.0), Some(&psi_mem(0.0, 0.0)), Some(13), 14);
         assert_eq!(h.status, "red");
-        assert!(h.reasons.iter().any(|r| r.contains("OOM kill")), "reasons: {:?}", h.reasons);
+        assert!(
+            h.reasons.iter().any(|r| r.contains("OOM kill")),
+            "reasons: {:?}",
+            h.reasons
+        );
     }
 
     #[test]
@@ -645,7 +756,11 @@ SwapFree:              0 kB
             utime,
             stime,
             rss_bytes: 1_000_000,
-            container_id: if container_id == "host" { None } else { Some(container_id.to_string()) },
+            container_id: if container_id == "host" {
+                None
+            } else {
+                Some(container_id.to_string())
+            },
         }
     }
 
@@ -696,12 +811,19 @@ SwapFree:              0 kB
         let containers: std::collections::HashMap<String, String> = HashMap::new();
         let top = top_processes(&cur, Some(&prev), &containers, 12);
         assert_eq!(top.len(), 1);
-        assert!((top[0].cpu_pct - 130.0).abs() < 0.5, "got {}", top[0].cpu_pct);
+        assert!(
+            (top[0].cpu_pct - 130.0).abs() < 0.5,
+            "got {}",
+            top[0].cpu_pct
+        );
     }
 
     #[test]
     fn first_sample_reports_zero_cpu() {
-        let cur = ProcSnapshot { wall_secs: 1.0, procs: vec![proc_sample(7, 100, 50, "host") ] };
+        let cur = ProcSnapshot {
+            wall_secs: 1.0,
+            procs: vec![proc_sample(7, 100, 50, "host")],
+        };
         let containers: std::collections::HashMap<String, String> = HashMap::new();
         let top = top_processes(&cur, None, &containers, 12);
         assert_eq!(top[0].cpu_pct, 0.0);
@@ -710,10 +832,10 @@ SwapFree:              0 kB
     #[test]
     fn container_attribution_by_prefix() {
         let id64 = "abc123def456abc123def456abc123def456abc123def456abc123def456abc1";
-        let cur = ProcSnapshot { wall_secs: 1.0, procs: vec![
-            proc_sample(1, 10, 0, id64),
-            proc_sample(2, 20, 0, "host"),
-        ]};
+        let cur = ProcSnapshot {
+            wall_secs: 1.0,
+            procs: vec![proc_sample(1, 10, 0, id64), proc_sample(2, 20, 0, "host")],
+        };
         let mut containers = HashMap::new();
         containers.insert(id64.to_string(), "codery-sandbox-blue".to_string());
         let top = top_processes(&cur, None, &containers, 12);
@@ -726,13 +848,20 @@ SwapFree:              0 kB
         let mut procs = Vec::new();
         for i in 0..20 {
             procs.push(ProcSample {
-                pid: i, ppid: 1, state: "S".into(), comm: format!("p{i}"),
-                utime: 0, stime: 0,
+                pid: i,
+                ppid: 1,
+                state: "S".into(),
+                comm: format!("p{i}"),
+                utime: 0,
+                stime: 0,
                 rss_bytes: (i as u64) * 1_000_000,
                 container_id: None,
             });
         }
-        let cur = ProcSnapshot { wall_secs: 1.0, procs };
+        let cur = ProcSnapshot {
+            wall_secs: 1.0,
+            procs,
+        };
         let containers: std::collections::HashMap<String, String> = HashMap::new();
         let top = top_processes(&cur, None, &containers, 12);
         assert_eq!(top.len(), 12);
@@ -744,18 +873,28 @@ SwapFree:              0 kB
     fn scan_processes_reads_real_proc() {
         let snap = scan_processes().expect("scan");
         assert!(!snap.procs.is_empty(), "a running machine has processes");
-        let init = snap.procs.iter().find(|p| p.pid == 1).expect("pid 1 exists");
+        let init = snap
+            .procs
+            .iter()
+            .find(|p| p.pid == 1)
+            .expect("pid 1 exists");
         assert!(!init.comm.is_empty());
     }
 
     #[test]
     fn collect_assembles_full_snapshot() {
-        let mut state = MetricsState { prev: None, prev_oom: None };
+        let mut state = MetricsState {
+            prev: None,
+            prev_oom: None,
+        };
         let containers: HashMap<String, String> = HashMap::new();
         let m = collect(&mut state, &containers);
         assert!(m.ts > 0);
         assert!(m.memory.total_mb > 0.0, "a real machine has memory");
-        assert!(matches!(m.health.status.as_str(), "green" | "yellow" | "red"));
+        assert!(matches!(
+            m.health.status.as_str(),
+            "green" | "yellow" | "red"
+        ));
         assert!(!m.top_processes.is_empty());
         // Second collect has a prev sample → cpu deltas active, no panic.
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -768,7 +907,10 @@ SwapFree:              0 kB
 
     #[test]
     fn host_metrics_serializes_snake_case() {
-        let mut state = MetricsState { prev: None, prev_oom: None };
+        let mut state = MetricsState {
+            prev: None,
+            prev_oom: None,
+        };
         let m = collect(&mut state, &HashMap::new());
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"top_processes\""));
