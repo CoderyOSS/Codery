@@ -9,13 +9,18 @@ any changes to this repo.
 
 Codery is the complete infrastructure for a VPS-hosted developer environment. It manages:
 
-- A **sandbox container** — the AI coding workspace (OpenCode)
-- An **apps container** — project web servers (Bun/Node apps)
-- A **host layer** — Caddy (reverse proxy + TLS), Tailscale (VPN), supervisord, and CoderyCI
-- **CoderyCI** — Rust binary that runs on the host, handles blue/green container deployments
+- **Paseo container** — the AI coding environment (paseo.sh daemon + OpenCode CLI)
+- **Apps container** — project web servers (Bun/Node apps)
+- **OpenDesign container** — design workspace (upstream image + pinned wrapper)
+- **Playwright container** — dedicated browser runtime (the only place Chromium runs)
+- **Host layer** — Caddy (reverse proxy + TLS), Tailscale (the perimeter), supervisord
+- **CoderyCI** — Rust binary that runs on the host: blue/green deployments, routing
+  generation, health checks, host metrics, diagnostics, MCP control plane
 
 All external traffic enters through Tailscale, is routed by Caddy, and hits the active color
-of whichever container serves that subdomain.
+of whichever container serves that subdomain. Nothing is publicly exposed.
+
+The authoritative architecture reference is [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -23,723 +28,337 @@ of whichever container serves that subdomain.
 
 | Situation | Command / Tool |
 |-----------|----------------|
-| **Deploy a change (default)** | **Local build** — `codery_exec` MCP: `build` → `deploy-preview` → ask user to `cutover`. See [Deploying Changes](#deploying-changes--local-build-preferred). Avoid the GitHub pipeline unless explicitly asked. |
+| **Deploy a change (default)** | **Local build** — `codery_exec` MCP: `build` → `deploy-preview` → ask user to `cutover`. Avoid the GitHub pipeline unless explicitly asked. |
 | Something broken, unknown cause | `codery-ci diagnose` (or `diagnose` MCP tool) |
 | Routing points to dead container | `codery-ci cutover <service>` |
 | Promote a verified preview | `codery-ci cutover <service>` |
 | Abort a preview deploy | `codery-ci cancel-preview <service>` |
-| Build + try new image locally | `codery-ci build <svc> <tag>` → `deploy-preview` → `cutover` |
-| Upgrade Playwright (pull-only, no build) | `codery-ci deploy playwright vX.Y.Z` — bump MCP pin + image tag together |
+| Build + try a new image locally | `codery-ci build <svc> <tag>` → `deploy-preview` → `cutover` |
+| Upgrade Playwright (pull-only) | `codery-ci deploy playwright <version>` — bump MCP pin + image tag together |
 | Reload routing after YAML edit | `codery-ci reload-routes` (or `reload_routes` MCP) |
-| Restart stuck container | `restart_service` MCP (no blue/green swap) |
-| Roll back to previous image | `rollback` MCP |
-| State vs reality disagree | `codery-ci diagnose` shows mismatch + fix |
+| Restart a stuck container | `restart_service` MCP (no blue/green swap) |
+| Roll back to the previous image | `rollback` MCP |
+| State vs reality disagree | `codery-ci diagnose` shows the mismatch + fix |
 
 Each subcommand has focused help: `codery-ci <command> --help`.
-Detailed docs in the sections below.
 
 ---
 
 ## Container Roles
 
-### Sandbox (`examples/Dockerfile.sandbox` — Nix rootfs, no Dockerfile.base)
+### Paseo (`containers/paseo/`)
 
-**Purpose:** AI-assisted development environment. Not a production server.
-**Package set:** declared once in `containers/sandbox/nixos/configuration.nix`
-(`toolEnv`) — adding a normal CLI tool means adding one Nix package there,
-not apt/curl installers. Browsers deliberately do NOT live here (see
-Playwright below).
+**Purpose:** the AI coding environment. The iPad Paseo app (or any Paseo client) talks
+to this daemon over WebSocket; it spawns OpenCode agents on the shared projects tree.
+Child of the official `ghcr.io/getpaseo/paseo` image (pinned), adding OpenCode, git
+tooling with GitHub App auth, and a hardened sshd.
 
-**Runs:**
-- `opencode serve` on container port **3000** — the AI coding assistant (accessible externally)
-- `sshd` on container port **22** — SSH access from host (stable proxy port 2222 via CoderyCI TCP proxy)
-
-**User:** Starts as root (cont-init hooks run as root — GitHub auth reads the
-root-owned PEM), then s6-overlay runs the services, each dropping to `gem`
-(uid 1000) via `s6-setuidgid`.
+**Runs:** daemon on container port **6767** (subdomain `code.`, loopback publish);
+**sshd on container port 2022**, published as stable host port **2222** — Tailscale-only
+(`bind: tailnet`), key-only auth, no root login, `AllowUsers paseo`.
 
 **Key mounts:**
-- `/opt/codery/projects` → `/home/gem/projects` — shared project files
-- `/opt/codery/data/opencode` → `/home/gem/.local/share/opencode` — OpenCode persistent data (bind mount)
-- `/opt/codery/github-app.pem` → `/run/secrets/github-app.pem:ro` — GitHub App key
+- `/opt/codery/projects` → `/workspace` — shared project files
+- `/opt/codery/data/opencode` → `/home/paseo/.local/share/opencode` — OpenCode state
+- repo `containers/paseo/opencode-config/` → `/home/paseo/.config/opencode` — git-managed
+  global agent config (this container's own instructions live here)
+- `/opt/codery/ssh/authorized_keys` → `/run/secrets/authorized_keys` — host-managed keys
+- `/opt/codery/ssh/agent-to-apps` → `/home/paseo/.ssh/agent-to-apps` — client key for
+  `ssh gem@apps` (nix toolchain inside the apps container)
 
 **What it cannot do:** No Docker socket, no Caddy/Tailscale access, no host supervisor.
-Route and image changes must go through this repo.
-
-**No compiler/linker in the sandbox.** Do not attempt `cargo build`/`cargo check` here —
-there is no `cc`. For Rust verification: the **apps container** can pull a current
-toolchain via nix (`ssh gem@apps`, then
-`sudo nix shell nixpkgs#rustc nixpkgs#cargo -c bash`; user-level rustup-init does
-NOT work there — glibc binaries can't execute on the Alpine/nix base) or the
-**host** (full toolchain). The GitHub release workflow (`cross`, musl) is the
-production build path.
-
----
+Route and infra changes must go through this repo.
 
 ### Apps (`containers/apps/Dockerfile`)
 
-**Purpose:** Runs the actual web applications for hosted projects.
+**Purpose:** runs project web applications.
 
-**Runs:** Any number of Bun/Node/etc. servers, each supervised by an s6-overlay
-(s6-rc) longrun service. Supervision layout is described in
-[Apps container — 3-tier app lifecycle](#apps-container--3-tier-app-lifecycle).
+**Runs:** any number of Bun/Node servers, supervised by s6-overlay. Nginx on port 8080
+routes by Host header; **sshd on container port 2022**, published as stable host
+port **3333** (Tailscale-only) for operators.
 
-**User:** `gem` (uid 1000) — same as sandbox, owns the shared projects volume. s6
-services run as root where needed (nginx, sshd) and drop to `gem` via
-`s6-setuidgid` in each app's `run` script.
+**Port range:** apps listen on **8000-9000** inside the container. This is the only port
+range CoderyCI maps for the bulk range. Do not use ports outside it.
 
-**Also runs:**
-- sshd on port 22 — accepts connections from sandbox only (Docker network boundary)
-- Nginx on port 8080 — internal reverse proxy routing by Host header to per-app processes
+### OpenDesign (`containers/opendesign/`)
 
-**Key mounts:**
-- `/opt/codery/projects` → `/home/gem/projects` — same project files as sandbox
-- `/opt/codery/github-app.pem` → `/run/secrets/github-app.pem:ro`
-- SSH keys from `$SSH_DIR` → `/home/gem/.ssh:ro`
+**Purpose:** design workspace. Upstream image `ghcr.io/nexu-io/od` pinned; the wrapper
+adds the OpenCode CLI so OpenDesign can spawn agents. Data (`.od` project store) is the
+host bind mount `/opt/codery/data/opendesign`.
 
-**Port range:** Apps listen on **8000-9000** inside the container (1001 ports total).
-This is the only port range CoderyCI maps. Do not use ports outside this range.
+**Runs:** web on container port **7456** (subdomain `opendesign.`, loopback publish,
+basic-auth gate from `OPENDESIGN_BASIC_AUTH`).
 
----
+### Playwright (`containers/playwright/service.yml` — pull-only)
 
-### Playwright (`containers/playwright/service.yml` — no Dockerfile, pull-only)
+Microsoft's official browser image, used as-is. Chromium runs **only** here — never
+install browser deps into other containers; that is the anti-pattern this service
+exists to eliminate. Version coupling (`@playwright/mcp` + image tag) is documented in
+[docs/playwright.md](docs/playwright.md).
 
-**Purpose:** Browser runtime for automation (OpenCode playwright MCP tools,
-project E2E tests). Microsoft's official image, used as-is:
-`mcr.microsoft.com/playwright:v1.54.1-noble` — Codery owns only image
-version, argv, networking, security flags.
+### Host layer
 
-**Runs:** `npx playwright run-server --port 3000 --host 0.0.0.0` (headless;
-no desktop/X11). Chromium runs **only** here — never in the sandbox.
-
-**Networking:** `codery-net`, DNS alias **`playwright`**. The sandbox
-connects via `ws://playwright:3000/` (`PLAYWRIGHT_WS_ENDPOINT`). Not exposed
-publicly. Chromium reaches apps via `http://apps:<port>` (alias `apps`).
-
-**Version coupling:** `@playwright/mcp@0.0.30` + `zod@3.24.1` +
-`zod-to-json-schema@3.24.4` (opencode.json, `npm exec --package` pins),
-`playwright@1.54.1` (service command), image `v1.54.1-noble` move together —
-one commit. Client/server mismatch breaks automation. The zod pin is
-required: zod 4 makes `zod-to-json-schema` 3.x emit schema stubs that
-OpenCode rejects (`Failed to get tools`). See `docs/playwright.md`.
-
-**`localhost` is container-local.** Apps intended for browser access bind to
-`0.0.0.0:<port>`; Chromium addresses them as `http://apps:<port>`.
-
-**Deploy/upgrade:** `codery-ci deploy playwright <version>` on the host, or
-the manual `Deploy Playwright` workflow. No build step. Rollback = revert
-pins and redeploy (`codery-ci rollback` is GHCR-only).
-
-**Never** add Chromium shared libraries to the sandbox to fix a browser
-problem — that is the anti-pattern this service exists to eliminate.
+Caddy (TLS + subdomain routing), Tailscale (the only perimeter), supervisord
+(caddy, tailscale, codery-ci daemon + MCP). Host services are configured in this
+repo under `proxy/`.
 
 ---
 
 ## Host Memory & OOM Prevention
 
-The host has 8 GiB RAM and (unless swap was added) **no swap**. On Sep 16 2026
-a docker build colliding with a running apps-preview + a bloated opencode
-produced 13 kernel OOM kills in one evening — every one killed `opencode serve`
-in the sandbox (biggest RSS process) and each kill surfaced as 502 toasts.
+The host has 8 GiB RAM and (unless swap was added) **no swap**. The Sep 16 2026
+incident (docker build + apps preview + a bloated opencode ⇒ 13 kernel OOM kills in
+one evening) produced hard rules; see ARCHITECTURE.md for the measured budget.
 
-### Measured RAM budget
-
-| Component | Steady | Peak |
-|---|---|---|
-| Host stack (dockerd, Caddy, Tailscale) | ~1.5 GiB | ~2 GiB |
-| Sandbox (opencode grows with session state) | ~1.4 GiB | ~2.4 GiB |
-| Apps container | ~1 GiB | ~1.5 GiB |
-| Playwright (chromium) | 0.5–1 GiB | 1.5+ GiB when used |
-| Docker build spike (buildkit) | — | +1.5–2.5 GiB |
-| Worst case (preview + build + full stack) | | **~8.5+ GiB — exceeds the box** |
-
-**Verdict: 16 GB is the comfortable size.** 8 GB stays workable only with the
-mitigations below.
-
-### Protections in place (shipped in the sandbox image)
-
-- `oom_score_adj=-800` (opencode) / `-600` (opendesign) set in their s6 run
-  scripts before `setuidgid` — kernel prefers killing build processes over the
-  live session.
-- `OPENCORE_SERVE_KILL_KB: "1200000"` in `containers/sandbox/service.yml`
-  env_overrides — opencode-serve-guard SIGTERMs opencode at 1.2 GiB RSS
-  (default was 1.5 GiB) so the leak backstop fires *before* host pressure
-  builds. s6 respawns in ~15 s; sessions and history survive.
-
-### Rules
-
-1. **Add swap on the host** (one-time):
-   `sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile && echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab`
-2. **Never run `codery-ci build` while an apps/sandbox preview is up** — a
-   preview is a full second container (~+1 GiB); the build spike + preview +
-   active stack is what caused the Sep 16 OOM storm. Cancel previews promptly
-   (`codery-ci cancel-preview <svc>`).
-3. **Keep playwright stopped when browser tools aren't needed** —
-   `docker start codery-playwright-green` only when required; chromium is the
+1. **Add swap on the host** (one-time) — see SETUP.md.
+2. **Never run `codery-ci build` while a preview is up** — cancel previews promptly.
+3. **Keep playwright stopped when browser tools aren't needed** — chromium is the
    single largest consumer when actively used.
-4. Diagnosing future 502-toast storms: check
-   `cat /sys/fs/cgroup/memory.events` inside the sandbox (`oom_kill` counter),
-   `grep -E 'MemAvailable|SwapTotal' /proc/meminfo`, and correlate opencode
-   restart times (config-load lines in
-   `~/.local/share/opencode/log/opencode.log`) with docker build windows.
+4. Diagnosing 502 storms: `cat /sys/fs/cgroup/memory.events` inside a container
+   (`oom_kill` counter), `grep -E 'MemAvailable|SwapTotal' /proc/meminfo`.
 
 ---
 
 ## Port Scheme
 
-This is critical to understand before adding any service.
+`host_port = container_port + offset(color)`; offsets come from each service's YAML
+`port_scheme` (never hardcoded per service name).
 
-### Sandbox ports
+| Service | Blue offset | Green offset | Ports |
+|---------|-------------|--------------|-------|
+| paseo   | 10000 | 20000 | daemon 6767 → `code.`; ssh 2022 → stable **:2222** |
+| opendesign | 10000 | 20000 | web 7456 → `opendesign.` |
+| apps    | 0 | 10000 | nginx 8080; range 8000-9000; ssh 2022 → stable **:3333** |
+| playwright | 10000 | 20000 | ws 3000 (internal only) |
 
-The port formula is: `host_port = offset + container_port` where offset is 10000 (blue) or 20000 (green).
-
-| Color | Service     | Host port | Container port | Notes |
-|-------|-------------|-----------|----------------|-------|
-| blue  | OpenCode    | 13000     | 3000           | |
-| blue  | Open Design | 17456     | 7456           | via routes.yaml |
-| blue  | SSH         | 10022     | 22             | stable proxy: 2222 |
-| green | OpenCode    | 23000     | 3000           | |
-| green | Open Design | 27456     | 7456           | via routes.yaml |
-| green | SSH         | 20022     | 22             | stable proxy: 2222 |
-
-Extra sandbox services (beyond OpenCode) are declared in `proxy/routes.yaml`
-and do not require CoderyCI code changes — see "Adding a New Sandbox Service" below.
-
-### Apps ports
-
-| Color | Host port range | Container port range |
-|-------|----------------|---------------------|
-| blue  | 8000-9000      | 8000-9000           |
-| green | 18000-19000    | 8000-9000           |
-
-CoderyCI maps **all 1001 ports** (8000-9000) for both colors simultaneously.
-Caddy routes to the active color by using the correct host port.
+**Stable SSH ports**: the daemon's TCP proxy forwards host **:2222 → active paseo** and
+**:3333 → active apps**, so operators always reach the live container. Both bind the
+Tailscale IP only.
 
 ### How Caddy knows which color is active
 
-CoderyCI writes the active color to `/opt/codery/state/{service}` and regenerates
-`/etc/caddy/Caddyfile` by calling `caddy reload`. For apps, it adds an offset of +10000
-to all route ports when apps is green:
-
-```
-apps-routes.json port 8080
-  -> blue:  Caddy proxies localhost:8080
-  -> green: Caddy proxies localhost:18080
-```
+CoderyCI writes the active color to `/opt/codery/state/{service}.color` and regenerates
+`/etc/caddy/Caddyfile` (reload on every deploy / `reload-routes`).
 
 ---
 
 ## Service Declarations (Declarative Infrastructure)
 
-Each container service is declared in a `service.yml` file inside `containers/<name>/`. These
-are the canonical source of truth — the deploy workflows sync them to `/opt/codery/services/<name>.yml`
-on the VPS before calling `codery-ci deploy`.
-
-To change a live service definition: edit `containers/<name>/service.yml` in this repo and push.
-The next deploy will sync the updated YAML to the VPS automatically. You can also use
-the CoderyCI MCP tool `upsert_service` for out-of-band changes (takes effect on next
-`restart_service` call; will be overwritten on next CI deploy).
-
-CoderyCI reads the YAML at deploy time — **no Rust changes needed** to add,
-modify, or remove a service.
+Each container service is declared in a `service.yml` file inside `containers/<name>/` —
+the canonical source of truth. Deploy workflows sync it to `/opt/codery/services/<name>.yml`
+**before** calling `codery-ci deploy` (ordering invariant — CoderyCI reads it at deploy time).
 
 ### YAML schema
 
 ```yaml
-  service: myservice            # matches containers/<name>/service.yml
-image: ghcr.io/CoderyOSS/codery:{sha}  # {sha} substituted at deploy time
+service: myservice
+image: ghcr.io/coderyoss/codery:{sha}  # {sha} substituted at deploy time
 
-# Port formula: host_port = container_port + offset
+# Port formula: host_port = container_port + offset(color)
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
 
-# Discrete named ports (sandbox-style) — each can have a public subdomain
+# Discrete named ports — each may have a subdomain and/or a stable proxy port
 ports:
   - name: web
-    container_port: 3000
-    subdomain: foo.example.com
+    container_port: 6767
+    subdomain: code                    # optional: Caddy vhost
+    bind: loopback | tailnet | any     # publish scope (default any; prefer loopback/tailnet)
+    auth:
+      env: BASIC_AUTH_VAR              # optional: Caddy basic-auth from /opt/codery/.env
+  - name: ssh
+    container_port: 2022
+    fixed_port: 2222                   # optional: stable-port TCP proxy target
+    bind: tailnet
 
 # OR: bulk Docker binding for a port range (apps-style)
 port_range:
   container_start: 8000
-  container_end: 9000         # inclusive
-
-# Per-app routes for Caddy (applies port_scheme offset — used with port_range)
-routes_file: /opt/codery/proxy/apps-routes.json
-
-health_check:
-  type: tcp                   # TCP connect to the named port below
-  port: web                   # name from ports[] above
-  timeout_secs: 60
-  interval_secs: 2
-# OR:
-health_check:
-  type: docker                # Wait for Docker HEALTHCHECK status
-  timeout_secs: 90
+  container_end: 9000
+  bind: loopback
 
 volumes:
   - type: bind
     host: /opt/codery/projects
-    container: /home/gem/projects
+    container: /workspace
   - type: named
     name: my-volume
     container: /data
   - type: bind
-    host: "${SSH_DIR}"        # ${VAR} substituted from /opt/codery/.env
+    host: "${SSH_DIR}"                 # ${VAR} substituted from /opt/codery/.env
     container: /home/gem/.ssh
     readonly: true
 
-env_overrides:                # Applied on top of /opt/codery/.env
+env_overrides:                         # applied on top of /opt/codery/.env
   MY_KEY: /path/in/container
 
-required_env:                 # Validation fails (nothing changes) if any missing from .env
-  - GHCR_USERNAME
-  - GHCR_TOKEN
+required_env:                          # validation fails (nothing changes) if missing
+  - PASEO_PASSWORD
 
 network: codery-net
+
+health_check:
+  type: tcp                            # TCP connect to the named port
+  port: web
+  timeout_secs: 60
+  interval_secs: 2
+# OR: { type: docker, timeout_secs: 90 } for images with a HEALTHCHECK
 ```
 
 ### Pre-deploy validation
 
-Before touching any container, CoderyCI validates:
-1. All `required_env` keys exist in `/opt/codery/.env`
-2. All bind-mount host paths exist on disk
-3. All named Docker volumes exist or can be created
-4. The image is pullable from GHCR
-5. Host ports for the inactive color are not owned by foreign processes
+Before touching any container, CoderyCI validates: required env keys exist, bind-mount
+host paths exist, volumes can be created, the image is pullable, and inactive-color host
+ports aren't owned by foreign processes. **If any check fails, nothing changes.**
 
-**If any check fails, nothing changes.** The running container stays untouched.
-
-### Dry-run validation
-
-```bash
-codery-ci validate <service> <sha>
-```
-
-Runs all validation checks and exits without deploying. Use this to test a new service YAML
-before committing.
+Dry-run: `codery-ci validate <service> <sha>`.
 
 ---
 
-### Apps container — 3-tier app lifecycle
+## Apps container — 3-tier app lifecycle
 
-Apps run in the apps container under **s6-overlay** (s6-rc). Three installation
-tiers exist; `/opt/codery/codery.db` (`apps` table) is the host-side source of
-truth for all of them, with a `source` column (`build` | `runtime`) separating
-tier 1 from tiers 2/3:
+Apps are s6-supervised; `/opt/codery/codery.db` (`apps` table) is the source of truth
+with a `source` column (`build` | `runtime`):
 
 | Tier | What | How it runs |
 |------|------|-------------|
-| 1. Build-time | Bundles checked into `containers/apps/s6-overlay/s6-rc.d/<name>/` (+ `user-bundles.d/user/contents.d/<name>` link). SQLite row marked `source='build'` supplies **routing only**. | Baked into the image; s6-overlay compiles its rc database at boot → auto-starts |
-| 2. Previous session (persists) | SQLite row `source='runtime'` → `codery-ci sync_s6` renders an s6 bundle into `/opt/codery/apps-s6.d` (bind-mounted to `/etc/s6-overlay/apps.d`) | Boot-time `runtime-apps` oneshot in the image `s6-svlink`s every bundle there |
-| 3. Current session (hot-add) | `add_app` MCP: SQLite insert → `sync_s6` render → `docker exec s6-svlink` into the live rc db → poll `s6-svstat` until up | Removal: `remove_app` (`s6-svunlink`, refuses `build` rows). Restart: `restart_app` (`s6-svc -t`, escalate `-k`) |
+| 1. Build-time | Bundles in `containers/apps/s6-overlay/s6-rc.d/<name>/` (+ `user-bundles.d/user/contents.d/<name>` link) | Baked into the image; auto-starts |
+| 2. Previous session | `codery-ci sync_s6` renders bundles to `/opt/codery/apps-s6.d` (bind-mounted) | Boot-time oneshot `runtime-apps` links them |
+| 3. Current session | `add_app` MCP | SQLite insert → render → `s6-svlink` → poll until up |
 
-Bundle format (both baked and rendered): `type` = `longrun`, `run` script
-(sets env, `cd`s, `exec /command/s6-setuidgid <user> <cmd>`),
-`timeout-kill` = `10000` (SIGTERM → 10s → SIGKILL parity), `dependencies.d/base`;
-a `finish` script exists only for `restart: on_failure|never` (absent = s6
-default respawn = `always`).
-
-Routing (subdomain → port) is independent of process supervision:
-`proxy/apps-routes.json` → Caddy/Nginx — reload with `reload-routes`.
-
-### Adding a new web app to the apps container
-
-**Build-time (bundle in repo):** create `containers/apps/s6-overlay/s6-rc.d/<name>/{type,run}`
-(see existing bundles for the pattern) + an empty
-`user-bundles.d/user/contents.d/<name>` link file. Add the route to
-`proxy/apps-routes.json`. Push, then run `Build Apps` manually — the image
-bakes the bundles; CoderyCI deploys and `reload-routes` regenerates Nginx.
-
-**Runtime (instant, no rebuild):** `add_app` MCP tool — renders the bundle,
-links it into the running container, and registers the route in one step.
-
-**Route-only change** (app process already running, just updating subdomain/port): edit `proxy/apps-routes.json` directly → push → run `Sync Routes` workflow manually (~30s, no image rebuild), or call `reload_routes` via MCP (no push needed).
+**Rules:**
+- Restart an app: `restart_app` (s6-svc -t; route preserved). **NEVER**
+  `remove_app` + `add_app` to restart — that drops and recreates the route.
+- Route-only change: edit routes (SQLite via MCP, or `proxy/routes.yaml` for host
+  routes) → `reload_routes` (instant, no rebuild).
+- App logs: `get_container_info service='apps'` (container stdout).
 
 ---
 
-### SSH Access
+## SSH Access
 
-**External → sandbox:** `ssh -p 2222 gem@<host>` from any machine on the tailnet.
+| Path | Command | Notes |
+|------|---------|-------|
+| Operator → paseo | `ssh -p 2222 paseo@<host>` | Tailscale only; keys in `/opt/codery/ssh/authorized_keys` |
+| Operator → apps | `ssh -p 3333 gem@<host>` | Tailscale only; same key file |
+| paseo → apps | `ssh gem@apps` | Docker-network internal; agent-to-apps keypair; nix toolchain lives there |
 
-Connection chain: `client → :2222 (codery-ci TCP proxy) → :10xx2 (docker) → :22 (sshd)`. The TCP proxy reads the active color from state and forwards to the correct host port (blue=10022, green=20022).
+Connection chain for stable ports: `client → :2222/:3333 (codery-ci TCP proxy) →
+:1xx22/:xx22 (docker publish) → :2022 (sshd)`. The proxy reads the active color and
+forwards to the live container.
 
-Prerequisite: `ufw allow 2222/tcp` on the host. Port 2222 is not in the default `cloud-init.yaml` firewall rules.
-
-sshd runs as an s6-rc longrun (`containers/sandbox/s6-overlay/s6-rc.d/sshd`,
-run as root with flags `-D -e`). The cont-init script `40-start-sshd.sh` only
-prepares host keys and authorized_keys — it does not start sshd.
-
-**Sandbox → apps:** `ssh gem@apps` from inside the sandbox — no flags, no credentials needed. Keypair baked into both images at build time (no runtime generation). Works via Docker network alias `apps` on `codery-net`. Security: only reachable from inside the Docker network.
-
----
-
-### Adding a new container service
-
-1. Create `containers/newservice/service.yml` with the full schema above
-2. Create `containers/newservice/Dockerfile`
-3. Create `.github/workflows/deploy-newservice.yml` — copy `deploy-sandbox.yml` as a template
-   - Add a step to sync `containers/newservice/service.yml` before the `codery-ci deploy` call
-   - **Ordering invariant**: the YAML sync MUST come before `codery-ci deploy` — CoderyCI
-     reads it at deploy time, so a stale or missing YAML means wrong config
-4. Push to `main`, then run the new workflow manually
-
-No changes to `system/orchestrator/` are needed.
+Adding a device: `echo 'ssh-ed25519 AAAA...' >> /opt/codery/ssh/authorized_keys` —
+no rebuild. Host keys are persistent volumes (stable fingerprints).
 
 ---
+
+## Adding a new container service
+
+1. `containers/<name>/service.yml` (+ `Dockerfile` if not pull-only)
+2. `.github/workflows/deploy-<name>.yml` — copy `deploy-paseo.yml` as the template;
+   the YAML sync MUST come before `codery-ci deploy`
+3. `codery-ci validate <service> <sha>` to dry-run
+4. Push to `main`, run the workflow manually
+
+No orchestrator code changes needed — offsets/ports come from the YAML.
 
 ### Removing a service
 
-1. Check active state: `codery-ci validate <service> <sha>` or via MCP `get_status`
-2. Stop the old container manually: `docker stop codery-<service>-<active_color>`
+1. `codery-ci cancel-preview <service>` if applicable
+2. `docker stop codery-<service>-<active>`; `delete_service` MCP removes the YAML
 3. Delete `containers/<service>/` from the repo and push
-4. Run `codery-ci reload-routes` (or via MCP `reload_routes`) to regenerate Caddyfile
+4. `codery-ci reload-routes`
 
 ---
 
 ## Blue/Green Deployment
 
-The CoderyCI binary at `/opt/codery/codery-ci` handles all deployments.
-It is a static musl binary (no dependencies). It runs on the host, not in a container.
+**Deploy flow:** pull new image → start inactive color → health check → **cutover**
+(rewrite Caddyfile, reload, write active color) → stop old container → prune images.
 
-**Deploy flow for each service:**
-1. Pull new image from GHCR
-2. Start inactive color container (e.g., green if blue is active)
-3. Health check: sandbox uses TCP connect on the OpenCode port; apps uses Docker HEALTHCHECK
-4. **Cutover:** rewrite Caddyfile, reload Caddy, write new active color to state file
-5. Stop and remove old container
-6. Prune old images
+**No automated rollback after cutover.** Preview deploys (`deploy-preview` → verify →
+`cutover`) are the verify-before-promote path; `codery-ci rollback` redeploys the
+previous locally-cached image.
 
-**State files:** `/opt/codery/state/sandbox.color` and `/opt/codery/state/apps.color`
-contain the currently active color string (`blue` or `green`).
-`/opt/codery/state/{service}.sha` records the deployed SHA (idempotency check).
-
-**No automated rollback after cutover.** If something goes wrong after Caddy switches,
-investigate manually. See "Preview deploys" below for a verify-before-promote workflow.
-
----
-
-## Preview Deploys (verify before promote)
-
-`codery-ci deploy` cuts over immediately — fine for CI-driven pushes, dangerous
-for hand-edited Dockerfiles where a broken image kills the active sandbox
-session. Preview deploys split the flow: start the inactive color, expose it
-on a `-preview` subdomain, verify, then promote or abort.
-
-All commands run from the host shell (not inside a container). `build` wraps
-`docker build` with the canonical image tag.
-
-### Workflow
+**Local build workflow (agent, via MCP):**
 
 ```
-# 1. Build the new image locally. Run from the Codery repo root so default
-#    dockerfile paths resolve. Tag can be anything (sha, hostname, descriptive).
-codery-ci build sandbox host-xyz
-# → docker build -t ghcr.io/coderyoss/codery:sandbox-host-xyz \
-#                 -f examples/Dockerfile.sandbox .
-
-# 2. Start the inactive color and register a preview route. Active container
-#    keeps running — sessions inside it survive.
-codery-ci deploy-preview sandbox host-xyz
-# → starts codery-sandbox-{inactive}, health-checks it, adds Caddy route:
-#   sandbox-preview.{DOMAIN} → localhost:{inactive_offset+3000}
-
-# 3. Verify at https://sandbox-preview.{DOMAIN}. Check OpenCode, tools, mounts.
-#    Inspect logs: ssh gem@apps 'docker logs codery-sandbox-{inactive}'
-
-# 4a. Promote — kills any sessions in the previously-active container.
-codery-ci cutover sandbox
-# → reuses the SHA recorded by deploy-preview; or pass --sha to override.
-
-# 4b. Abort — stops inactive, removes preview route. Active untouched.
-codery-ci cancel-preview sandbox
+1. mcp_exec_enabled                    → confirm toggle is on
+2. codery_exec ["build", "<service>", "<tag>"]   → job_id
+3. codery_exec_status job_id           → poll until done
+4. codery_exec ["deploy-preview", "<service>", "<tag>"]
+   → verify at https://<service>-preview.{DOMAIN}
+5. Ask the user: run `codery-ci cutover <service>` on the host
+   (cutover/deploy are NEVER exposed via MCP — humans run those)
 ```
 
-### Preview subdomain
+`<tag>` can be anything descriptive; images stay in the local Docker cache, which
+also powers `rollback`.
 
-Fixed name: `{service}-preview`. For sandbox that's `sandbox-preview.{DOMAIN}`;
-for apps, `apps-preview.{DOMAIN}`. The route is stored in the `previews`
-SQLite table and reloaded into Caddy/Nginx on every mutation. `caddy::apply_all`
-and `nginx::generate_and_reload` both pick it up automatically.
-
-### MCP host exec (agent build loop)
-
-The MCP server exposes a build-only exec bridge so an agent can run the
-preview-deploy loop without host shell access:
-
-| Tool | Purpose |
-|------|---------|
-| `codery_exec` | Spawn allowlisted subcommand as background job (`build`, `validate`, `deploy-preview`, `cancel-preview`) |
-| `codery_exec_status` | Poll job: status, exit code, log tail |
-| `mcp_exec_enabled` | Read-only check whether the toggle is on |
-
-`cutover` and `deploy` are **never** exposed via MCP — humans run those on the
-host shell.
-
-**Toggle (host shell):** `codery-ci mcp-exec enable|disable|status`
-State file: `/opt/codery/state/mcp-exec.enabled`. Job logs: `/var/log/codery-ci-mcp/`.
-Default: disabled. Enable only while actively iterating.
-
-### Preview port auto-resolution
-
-`deploy-preview` needs to know which container port to expose. Resolution order:
-
-1. `--port <container_port>` flag, if given
-2. First named port in `service.yml` with a `subdomain` (sandbox → `opencode:3000`)
-3. `8080` if the service has a `port_range` covering it (apps → Nginx)
-4. Otherwise: error, pass `--port` explicitly
-
-### Locally-built images
-
-`validate` and `deploy-preview` skip the GHCR pull when the image is already
-present in the local Docker cache (`images::pull_if_missing`). This lets you
-`docker build` an image and immediately deploy-preview it without pushing.
-
-### State file paths
-
-- `/opt/codery/state/{service}.color` — active color (`blue`/`green`)
-- `/opt/codery/state/{service}.sha` — active SHA (used by `deploy` idempotency check)
-- `/opt/codery/codery.db` `previews` table — preview routes
-
----
-
-## Deploying Changes — Local Build (Preferred)
-
-**Always prefer local build over the GitHub Actions pipeline**, unless the user
-explicitly asks for a pipeline deploy. Local build is faster (no GHCR push/pull,
-no runner startup), keeps images in the host Docker cache (faster redeploys +
-rollback), and avoids the pipeline's 2-min container-stop timeout that leaves
-orphan stopped containers around.
-
-### Local build workflow (agent, via MCP)
-
-The `codery_exec` MCP tool runs allowlisted `codery-ci` subcommands as background
-jobs on the host. `deploy` and `cutover` are **never** exposed via MCP — the user
-runs those on the host shell.
-
-```
-1. mcp_exec_enabled            → confirm toggle is on
-2. codery_exec ["build", "<service>", "<tag>"]   → returns job_id
-3. codery_exec_status job_id    → poll every ~30s until status != running
-4. (pick one)
-   a. codery_exec ["deploy-preview", "<service>", "<tag>"]
-      → verify at https://<service>-preview.{DOMAIN}
-      → ask user: "run `codery-ci cutover <service>` on the host to promote"
-   b. ask user: "run `codery-ci deploy <service> <tag>` on the host"
-      (full blue/green, no preview verify step)
-```
-
-`<tag>` can be anything descriptive (hostname, short reason). The image is tagged
-`ghcr.io/coderyoss/codery:<service>-<tag>` locally; no GHCR push needed.
-
-If `mcp_exec_enabled` returns `enabled: false`, ask the user to run
-`codery-ci mcp-exec enable` on the host.
-
-### GitHub pipeline (fallback)
-
-Only when the user explicitly asks for a pipeline deploy, or when local build
-is unavailable (host Docker down, mcp-exec disabled and user won't enable). See
-[CI/CD Triggers](#cicd-triggers) below.
+**State files:** `/opt/codery/state/{service}.color|.sha`; previews live in
+`codery.db`. `codery-ci diagnose` reconciles everything against reality.
 
 ---
 
 ## CI/CD Triggers
 
-**All workflows are manual-only (`workflow_dispatch`), except release workflows
-which trigger on tag push, and `repair-host` which also runs hourly via cron.**
-
-**Prefer [local build](#deploying-changes--local-build-preferred) over these
-pipelines.** The pipelines are the fallback path, not the default.
+**All deploy workflows are manual-only (`workflow_dispatch`).** Pushing to `main`
+never deploys.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| Build Sandbox (`deploy-sandbox.yml`) | `workflow_dispatch` | Builds image, deploys via CoderyCI. Relevant paths: `examples/Dockerfile.sandbox`, `containers/sandbox/s6-overlay/**`, `containers/sandbox/cont-init.d/**`, `opencode.json` |
-| Build Apps (`deploy-apps.yml`) | `workflow_dispatch` | Builds image, deploys via CoderyCI |
-| Deploy Playwright (`deploy-playwright.yml`) | `workflow_dispatch` | Syncs service YAML, deploys pinned MS image from MCR (no build — pull-only) |
-| Sync Routes | `workflow_dispatch` | Syncs route file, runs `codery-ci reload-routes` (~30s, no container rebuild) |
-| Build Orchestrator | `workflow_dispatch` | Compiles musl binary, uploads to `/opt/codery/codery-ci`, restarts codery-mcp |
-| Release Orchestrator | tag push `codery-ci-v*` or `workflow_dispatch` | Builds release binaries |
-| Release Apps | tag push `apps-v*` | Builds apps image |
-| Repair Host | `workflow_dispatch` + hourly cron | Idempotent host-services repair (supervisor/Caddy/Tailscale self-heal) |
-
-**Pushing to `main` never deploys.** After pushing changes, run the relevant
-workflow manually from the Actions tab (or `gh workflow run`).
-
----
-
-## Releasing
-
-All components follow [semantic versioning](https://semver.org). Pre-1.0: minor bumps for features, patch for fixes. No stability guarantees until 1.0.
-
-### Tag format
-
-| Component | Tag prefix | Artifacts |
-|-----------|-----------|-----------|
-| CoderyCI | `codery-ci-v*` | `codery-ci-linux-x86_64`, `codery-ci-linux-aarch64` (static musl binaries) |
-| Sandbox | `sandbox-v*` | Docker image `ghcr.io/OWNER/codery:sandbox-{version}` |
-| Apps | `apps-v*` | Docker image `ghcr.io/OWNER/codery:apps-{version}` |
-
-### Cutting a CoderyCI release
-
-1. Bump version in `system/orchestrator/Cargo.toml` (`version` field in `[package]`)
-2. Commit: `git commit -m "codery-ci: bump to vX.Y.Z"`
-3. Tag: `git tag codery-ci-vX.Y.Z`
-4. Push: `github-push main && github-push codery-ci-vX.Y.Z`
-5. CI builds both x86_64 and aarch64 binaries via `cross`, attaches them to a GitHub Release
-
-### Cutting a Sandbox release
-
-1. Tag: `git tag sandbox-vX.Y.Z`
-2. Push: `github-push sandbox-vX.Y.Z`
-3. CI builds Docker image, pushes to GHCR
-
-### Cutting an Apps release
-
-1. Tag: `git tag apps-vX.Y.Z`
-2. Push: `github-push apps-vX.Y.Z`
-3. CI builds Docker image, pushes to GHCR
-
-### Release artifacts
-
-- **CoderyCI**: Static musl binaries for Linux x86_64 and aarch64. Users download from GitHub Releases.
-- **Sandbox/Apps**: Docker images pushed to GHCR. Users pull via `docker pull ghcr.io/coderyoss/codery:sandbox-latest`.
+| CI (`ci.yml`) | push / PR | fmt + clippy + tests + cargo-deny (blocking) |
+| Build Paseo (`deploy-paseo.yml`) | `workflow_dispatch` | Builds + deploys paseo (blue/green) |
+| Build Apps (`deploy-apps.yml`) | `workflow_dispatch` | Builds + deploys apps |
+| Build OpenDesign (`deploy-opendesign.yml`) | `workflow_dispatch` | Builds + deploys opendesign |
+| Deploy Playwright (`deploy-playwright.yml`) | `workflow_dispatch` | Pull-only deploy of the pinned MS image |
+| Build Orchestrator (`build-orchestrator.yml`) | `workflow_dispatch` | Compiles codery-ci, deploys binary, restarts daemon/MCP |
+| Sync Routes (`sync-routes.yml`) | `workflow_dispatch` | `reload-routes` (~30s, no rebuild) |
+| Diagnose (`diagnose.yml`) | `workflow_dispatch` | Collects system + container logs |
+| Repair Host (`setup-host.yml`) | `workflow_dispatch` | Idempotent host-services repair |
+| Release Orchestrator (`release-orchestrator.yml`) | tag `codery-ci-v*` | cross-compiled musl binaries (x86_64 + aarch64) |
+| Release Apps (`release-apps.yml`) | tag `apps-v*` | apps image to GHCR |
 
 ---
 
 ## Project Structure
 
 ```
-AGENTS.md                   # This file — for agents working on the infrastructure
-opencode.json               # OpenCode config — synced into sandbox projects dir on deploy
+AGENTS.md                   # This file — agent-facing reference
+ARCHITECTURE.md             # Durable architecture doc (start here to understand the system)
+README.md                   # Project front page
+SETUP.md                    # VPS installation guide
 
 containers/
-  sandbox/
-    nixos/
-      configuration.nix    # toolEnv: the single declarative package list
-      flake.nix            # Rootfs + store closure builder
-    service.yml            # Declarative config for the sandbox container
-    agents_file            # Copied INTO the sandbox as AGENTS.md — OpenCode reads this
-    s6-overlay/
-      s6-rc.d/             # Service bundles: sshd, opencode, opencode-diff-pruner,
-                           # opencode-serve-guard, tmux, opendesign
-      user-bundles.d/      # contents.d links — what the user bundle starts
-    cont-init.d/
-      10-fix-home.sh       # Fixes /home/gem ownership
-      15-render-domain.sh  # Renders domain into /run/env/opendesign.env
-      20-github-auth.sh    # Authenticates gh CLI via GitHub App
-      25-openrouter-auth.sh# Configures OpenRouter API key
-      30-init-projects.sh  # Ensures /home/gem/projects exists
-      40-start-sshd.sh     # Prepares sshd host keys and authorized_keys (sshd managed by s6-rc)
-      45-opencode-assert.sh# Fails boot loudly if the opencode binary is broken
-      55-dart-ca.sh        # Dart TLS CA setup
-      60-claude-mcp.sh     # Installs Claude MCP servers
-    scripts/
-      s6-import-container-env.sh # Sources docker env into s6 run scripts
-      opencode-serve-guard.sh    # RSS + port-liveness watchdog for opencode serve
-      github-app-token.sh  # Generates a GitHub App installation token
-      github-push.sh       # Wraps git push with App auth (works for branches AND tags)
-    ssh/
-      sandbox-to-apps      # Static private key for sandbox→apps SSH (baked into image)
+  paseo/                    # Agent container (Dockerfile, service.yml, sshd_config,
+    scripts/                #   entrypoint wrapper; github-app auth scripts)
+    opencode-config/        # git-managed global agent config (AGENTS.md, MCPs)
+  apps/                     # Project web servers (Dockerfile, service.yml, s6-overlay/)
+  opendesign/               # Design workspace (wrapper Dockerfile, service.yml)
+  playwright/service.yml    # Pinned MS browser image (pull-only)
 
-  playwright/
-    service.yml            # Pinned MS Playwright image (pull-only, no Dockerfile)
-
-  apps/
-    Dockerfile              # Apps image (project web servers)
-    service.yml             # Declarative config for the apps container
-    s6-overlay/
-      s6-rc.d/              # Service bundles (nginx, sshd, ssh-agent + baked apps)
-      user-bundles.d/       # contents.d links — what the user bundle starts
-    scripts/
-      healthcheck.sh        # Used by Docker HEALTHCHECK
-      ssh-agent-add-keys.sh
-    ssh/
-      sandbox-to-apps.pub   # Static public key for sandbox→apps SSH (baked into image)
-    docker-entrypoint.d/
-      20-ssh-agent.sh
-
-proxy/
-  Caddyfile.default         # Initial Caddyfile (only used on first host setup — NOT edited for routes)
-  routes.yaml               # Unified static routes (host services + sandbox/app extras)
-  scripts/
-    caddy-start.sh          # Starts Caddy with env vars resolved
-    dns-update.sh           # Updates Tailscale IP in .env
-    tailscale-up.sh         # Brings up Tailscale
-  supervisor/conf.d/        # Host supervisord configs (caddy, tailscale, etc.)
-  setup.sh                  # One-time host setup (install configs)
-  host-setup.sh             # One-time host setup (install packages)
-
-system/orchestrator/        # CoderyCI source (Rust)
-  src/
-    main.rs                 # CLI: `codery-ci deploy {sandbox|apps} {sha}`
-    deploy.rs               # Blue/green deploy logic
-    config.rs               # All port constants and paths
-    caddy.rs                # Caddyfile generation and reload
-    images.rs               # GHCR pull and prune
-    state.rs                # Read/write active color
-    preflight.rs            # Pre-deploy checks
-    daemon.rs               # Daemon / service-runner mode
-    deploy_lock.rs          # Exclusive deploy lock
-    mcp.rs                  # MCP server (CoderyCI MCP tool handlers)
-    nginx.rs                # Nginx config generation for apps container
-    service_def.rs          # Service YAML parsing and validation
-    tcp_proxy.rs            # TCP proxy for stable SSH port (2222 → active color)
-    ui.rs                   # Terminal UI for deploy progress
-    validate.rs             # `codery-ci validate` subcommand
-
-hosting/
-  cloud-init.yaml           # Cloud-init for VPS provisioning
-  examples/                 # Provider-specific setup guides
-
-docs/
-  customizing.md            # Customization guide (GitHub App setup, etc.)
-  playwright.md             # Browser runtime boundary + version coupling
-
-SETUP.md                      # VPS installation guide — start here for new installs
-
-.github/workflows/
-  deploy-sandbox.yml        # Sandbox CI/CD
-  deploy-apps.yml           # Apps CI/CD
-  deploy-playwright.yml     # Playwright CI/CD (pull-only, no build)
-  release-orchestrator.yml  # CoderyCI release (tag codery-ci-v*)
-  release-sandbox.yml       # Sandbox image release (tag sandbox-v*)
-  release-apps.yml          # Apps image release (tag apps-v*)
+proxy/                      # Host layer: Caddy/Tailscale/supervisor configs, routes.yaml
+system/orchestrator/        # CoderyCI source (Rust) + ui/ (React dashboard)
+hosting/                    # cloud-init + provider guides
+docs/                       # customizing.md, playbook.md, playwright.md
+.github/workflows/          # Manual pipelines (see table above)
 ```
-
----
-
-## Shared Projects Directory
-
-`/opt/codery/projects` on the host is bind-mounted into **both** containers:
-- Sandbox: `/home/gem/projects`
-- Apps: `/home/gem/projects`
-
-This means edits made in OpenCode or VS Code are **immediately visible** to the apps
-container without any copy or restart. Hot-reloading frameworks (Bun, Vite, etc.) will
-pick up changes instantly.
 
 ---
 
 ## Host Environment
 
-The host is an Ubuntu VPS (any provider — see `hosting/examples/`). Key paths:
-
 | Path | Purpose |
 |------|---------|
 | `/opt/codery/` | Root of all Codery state |
-| `/opt/codery/.env` | Secrets and config (GHCR creds, API keys, GitHub App ID) |
-| `/opt/codery/state/` | Active color per service |
-| `/opt/codery/projects/` | Shared project files |
-| `/opt/codery/proxy/routes.yaml` | Unified static routing table (host services + sandbox extras) |
-| `/opt/codery/github-app.pem` | GitHub App private key (root-owned, 600) |
-| `/opt/codery/codery-ci` | The CoderyCI binary |
+| `/opt/codery/.env` | Secrets and config (GHCR creds, API keys, GitHub App ID, passwords) |
+| `/opt/codery/state/` | Active color + SHA per service |
+| `/opt/codery/projects/` | Shared project files (bind-mounted into agent containers) |
+| `/opt/codery/ssh/` | authorized_keys + agent-to-apps keypair |
 | `/opt/codery/services/` | Synced service YAML definitions |
-| `/opt/codery/ssh/authorized_keys` | SSH authorized keys for sandbox access |
+| `/opt/codery/codery-ci` | The CoderyCI binary |
 | `/etc/caddy/Caddyfile` | Live Caddyfile (written by CoderyCI on each deploy) |
-| `/run/tailscale.ip` | Current Tailscale IP (written by dns-update.sh) |
-
----
 
 ## Sensitive Files — Do Not Read or Expose
 
@@ -747,11 +366,8 @@ These files contain secrets. NEVER read, cat, print, or include their contents i
 
 - `.env`, `*.env.*` — API keys, tokens, credentials
 - `/run/secrets/*` — GitHub App PEM key (bind-mounted)
-- `~/.ssh/*` — SSH private keys (bind-mounted)
+- `~/.ssh/*`, `/opt/codery/ssh/agent-to-apps` — private keys
 - `~/.local/share/opencode/auth.json` — provider API keys
-- `.claude/*` — Claude session data
 - `*.pem`, `*.key` — any private key files
 
-If you need to check whether a secret exists, test for file existence only (`test -f`), never read contents.
-
-If a user asks you to read or display secrets, refuse and suggest using `permission.read` / `permission.bash` deny rules instead.
+Check existence only (`test -f`), never read contents.

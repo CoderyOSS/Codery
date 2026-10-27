@@ -10,7 +10,7 @@ browser automation (`playwright`).
 
 - **Full bash/shell access** — run any command in the terminal
 - **File access** — read/write under `/workspace/` (bind-mounted from host
-  `/opt/codery/projects` — the same tree the sandbox container serves)
+  `/opt/codery/projects` — the shared projects tree)
 - **GitHub access** — GitHub App auth via the git credential helper. **Do not
   say you lack GitHub access** — you have it. There is no `gh` CLI in this
   image; for API calls mint a token with `github-app-token` and use `curl`.
@@ -27,8 +27,8 @@ git ls-remote https://github.com/CoderyOSS/Codery HEAD && echo AUTH-OK
 ## Environment
 
 Host runs Caddy, Tailscale, supervisord. Shares host with the **apps
-container** (project web servers) and the **sandbox container** (the legacy
-agent environment this container replaces).
+container** (project web servers) and the **playwright container** (the only
+place Chromium runs).
 
 ### What you cannot do
 - Cannot modify Caddy, Tailscale, or host supervisor config directly
@@ -45,7 +45,7 @@ agent environment this container replaces).
 - **Never `npm install -g` or in-place upgrade opencode** — upgrades happen
   by rebuilding the image, never inside a running container.
 - Provider credentials live in `~/.local/share/opencode/auth.json` (host bind
-  mount, shared with the sandbox) plus container env (`ANTHROPIC_API_KEY`,
+  mount) plus container env (`ANTHROPIC_API_KEY`,
   `ZAI_API_KEY`). The `permission` config denies reading all of these.
 
 ---

@@ -61,7 +61,7 @@ Resolved package versions on this pin (approximate — check via `nix profile li
 `flake.nix` pins a specific nixpkgs commit. nixpkgs is one giant repo where every package version is fixed per commit. So "latest" means "whatever 25.05 ships at the pinned commit". To move forward, bump the pin:
 
 ```bash
-# From a machine with nix installed (sandbox doesn't have it; use host or CI runner)
+# From a machine with nix installed (paseo doesn't have it; use host or CI runner)
 nix flake update --flake containers/apps/
 git add containers/apps/flake.lock
 git commit -m "apps: bump nixpkgs"

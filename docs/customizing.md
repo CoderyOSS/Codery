@@ -4,7 +4,7 @@ This guide covers personalizations that aren't part of the default setup.
 
 ## GitHub App for Container Authentication
 
-The sandbox and apps containers can authenticate with GitHub using a GitHub App instead of a personal access token. This is optional — personal tokens work too.
+The agent (paseo) and apps containers can authenticate with GitHub using a GitHub App instead of a personal access token. This is optional — personal tokens work too.
 
 ### Setup
 
@@ -51,7 +51,7 @@ OPENAI_API_KEY=sk-...
 OPENROUTER_API_KEY=sk-or-...
 ```
 
-The sandbox container passes all env vars through to OpenCode and any tools running inside it.
+The paseo container passes env from /opt/codery/.env through to OpenCode and any tools running inside it.
 
 ## Adding Services to the Apps Container
 
@@ -77,9 +77,9 @@ stdout_logfile_maxbytes=10MB
 
 3. Push to `main` or trigger the Build Apps workflow.
 
-## SSH into the Sandbox
+## SSH into Paseo / Apps
 
-The sandbox exposes SSH on port 2222. Add your public key:
+Both expose SSH on stable Tailscale-only ports (2222 = paseo, 3333 = apps). Add your public key:
 
 ```bash
 # On the VPS host
