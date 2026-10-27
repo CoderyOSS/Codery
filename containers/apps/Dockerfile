@@ -238,7 +238,9 @@ RUN ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
 # --- SSH server ---
 COPY containers/apps/sshd_config /etc/ssh/sshd_config
 RUN mkdir -p /run/sshd /etc/ssh/authorized_keys
-COPY containers/apps/ssh/sandbox-to-apps.pub /etc/ssh/authorized_keys/gem
+# authorized_keys is host-managed: service.yml bind-mounts
+# /opt/codery/ssh/authorized_keys -> /run/secrets/authorized_keys (append
+# a device pubkey on the host; no rebuild needed).
 RUN chmod 644 /etc/ssh/authorized_keys/gem
 
 # --- Nginx ---

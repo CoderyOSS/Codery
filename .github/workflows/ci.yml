@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: system/orchestrator
+    steps:
+      - uses: actions/checkout@v4
+
+      # ui/dist/index.html is include_str!()'d by ui.rs — build it first.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: system/orchestrator/ui/package-lock.json
+      - name: Build frontend
+        run: cd ui && npm ci && npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: system/orchestrator
+
+      - name: Format
+        run: cargo fmt --check
+
+      # Severity comes from [lints] in Cargo.toml — warnings are denied in-tree.
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+      - name: Tests
+        run: cargo test
+
+  deny:
+    name: Supply chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: system/orchestrator/Cargo.toml

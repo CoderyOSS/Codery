@@ -1,7 +1,7 @@
+use crate::{config, mcp, tcp_proxy, ui};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use crate::{config, mcp, tcp_proxy, ui};
 
 /// Run MCP, UI, and TCP-proxy servers concurrently in a single process.
 /// Exits if any server errors or if SIGTERM/SIGINT is received.
@@ -24,7 +24,7 @@ pub async fn serve() -> Result<()> {
         r = mcp::serve(config::MCP_PORT)                                        => r?,
         r = ui::serve(config::UI_PORT, Arc::clone(&events_tx), Arc::clone(&ops)) => r?,
         r = tcp_proxy::serve()                                                  => r?,
-        _ = shutdown_signal()                                                   => {
+        () = shutdown_signal()                                                   => {
             println!("[daemon] Received shutdown signal — stopping");
         }
     }
@@ -35,11 +35,7 @@ pub async fn serve() -> Result<()> {
 async fn shutdown_signal() {
     use tokio::signal;
 
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .unwrap_or(())
-    };
+    let ctrl_c = async { signal::ctrl_c().await.unwrap_or(()) };
 
     #[cfg(unix)]
     let sigterm = async {
@@ -53,7 +49,7 @@ async fn shutdown_signal() {
     let sigterm = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c  => {}
-        _ = sigterm => {}
+        () = ctrl_c  => {}
+        () = sigterm => {}
     }
 }

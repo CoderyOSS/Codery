@@ -1,0 +1,58 @@
+service: opendesign
+image: ghcr.io/coderyoss/codery:opendesign-{sha}
+
+# Port formula: host_port = container_port + offset
+# blue:  7456+10000=17456
+# green: 7456+20000=27456
+# (identical host ports to the pre-expunge layout — the public URL and any
+# client bookmarks keep working with zero route changes)
+port_scheme:
+  blue_offset: 10000
+  green_offset: 20000
+
+ports:
+  - name: web
+    container_port: 7456
+    subdomain: opendesign
+    # Loopback publish + Caddy edge; basic auth is applied at the proxy from
+    # OPENDESIGN_BASIC_AUTH (set in /opt/codery/.env) — the daemon's own API
+    # auth stays enabled per upstream defaults.
+    bind: loopback
+    auth:
+      env: OPENDESIGN_BASIC_AUTH
+
+health_check:
+  type: tcp
+  port: web
+  timeout_secs: 60
+  interval_secs: 2
+
+volumes:
+  # .od project store — host-persistent, survives container replacement.
+  - type: bind
+    host: /opt/codery/data/opendesign
+    container: /app/.od
+  # Shared projects tree (read/write, same grant every agent container has).
+  - type: bind
+    host: /opt/codery/projects
+    container: /opt/codery/projects
+  - type: bind
+    host: /opt/codery/github-app.pem
+    container: /run/secrets/github-app.pem
+    readonly: true
+
+env_overrides:
+  NODE_ENV: production
+  # Upstream default heap guard (their compose ships the same value).
+  NODE_OPTIONS: --max-old-space-size=192
+  OD_BIND_HOST: 0.0.0.0
+  OD_PORT: "7456"
+  OD_ALLOWED_ORIGINS: https://opendesign.${DOMAIN_NAME}
+  # Browser runtime for OD features that need it (codery-net alias).
+  PLAYWRIGHT_WS_ENDPOINT: ws://playwright:3000/
+
+required_env:
+  - OPENDESIGN_BASIC_AUTH
+  - DOMAIN_NAME
+
+network: codery-net

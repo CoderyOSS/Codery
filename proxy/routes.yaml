@@ -1,11 +1,10 @@
-# Static routes — host services and container extras.
-# Layer 2: overrides service.yml by subdomain, overridden by SQLite runtime apps.
+# Static routes — host services only.
+# Layer 2: overridden by SQLite runtime apps. Container subdomains are
+# declared in each service's own service.yml (ports[].subdomain).
 #
-# target: "host"    → direct localhost:port (no color offset)
-# target: "sandbox" → apply sandbox port_scheme offset
-# target: "apps"    → apply apps port_scheme offset + Nginx internal routing
+# target: "host" → direct localhost:port (no color offset)
+# target: "apps" → apply apps port_scheme offset + Nginx internal routing
 
-# codery-ci host services + container extras
 routes:
   - subdomain: mcp
     port: 4040
@@ -14,7 +13,3 @@ routes:
   - subdomain: ci
     port: 4041
     target: host
-
-  - subdomain: opendesign
-    port: 7456
-    target: sandbox

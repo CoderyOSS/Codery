@@ -24,7 +24,7 @@ pub fn check_supervisord() -> Result<()> {
         println!("[preflight] supervisord: OK");
         Ok(())
     } else {
-        bail!("[preflight] supervisord: no programs RUNNING\n{}", stdout);
+        bail!("[preflight] supervisord: no programs RUNNING\n{stdout}");
     }
 }
 
@@ -40,10 +40,10 @@ pub fn check_tailscale() -> Result<()> {
     let state = json["BackendState"].as_str().unwrap_or("unknown");
 
     if state == "Running" {
-        println!("[preflight] tailscale: OK ({})", state);
+        println!("[preflight] tailscale: OK ({state})");
         Ok(())
     } else {
-        bail!("[preflight] tailscale: BackendState = {}", state);
+        bail!("[preflight] tailscale: BackendState = {state}");
     }
 }
 
@@ -51,7 +51,7 @@ pub fn check_caddy() -> Result<()> {
     TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", config::CADDY_ADMIN_PORT)
             .parse()
-            .unwrap(),
+            .expect("hardcoded caddy admin addr parses"),
         Duration::from_secs(3),
     )
     .context(format!(
@@ -59,6 +59,9 @@ pub fn check_caddy() -> Result<()> {
         config::CADDY_ADMIN_PORT
     ))?;
 
-    println!("[preflight] caddy: OK (port {} reachable)", config::CADDY_ADMIN_PORT);
+    println!(
+        "[preflight] caddy: OK (port {} reachable)",
+        config::CADDY_ADMIN_PORT
+    );
     Ok(())
 }

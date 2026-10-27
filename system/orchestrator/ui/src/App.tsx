@@ -4,18 +4,18 @@ import { ContainerCard } from './ContainerCard';
 import { HostRail } from './HostRail';
 import './App.css';
 
-type SectionKey = 'sandbox' | 'apps' | '__other__';
-const SECTION_ORDER: SectionKey[] = ['sandbox', 'apps', '__other__'];
+type SectionKey = 'paseo' | 'apps' | '__other__';
+const SECTION_ORDER: SectionKey[] = ['paseo', 'apps', '__other__'];
 
 const SECTION_LABEL: Record<SectionKey, string> = {
-  sandbox: 'Sandbox',
+  paseo: 'Paseo',
   apps: 'Apps',
   __other__: 'Other',
 };
 
 function sectionFor(c: Container): SectionKey {
   const s = (c.service ?? '').toLowerCase();
-  if (s === 'sandbox') return 'sandbox';
+  if (s === 'paseo') return 'paseo';
   if (s === 'apps') return 'apps';
   return '__other__';
 }
@@ -50,7 +50,7 @@ export function App() {
   const inactive = containers.filter(c => c.state !== 'running').sort(alpha);
   const sorted   = [...running, ...inactive];
 
-  const groups: Record<SectionKey, Container[]> = { sandbox: [], apps: [], __other__: [] };
+  const groups: Record<SectionKey, Container[]> = { paseo: [], apps: [], __other__: [] };
   for (const c of sorted) groups[sectionFor(c)].push(c);
   const sections = SECTION_ORDER.filter(s => groups[s].length > 0);
 

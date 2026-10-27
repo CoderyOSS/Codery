@@ -2,31 +2,27 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::config;
+use crate::config::{self, Color};
 
-/// Read the active color for a service. Returns "blue" if state file missing or invalid.
-pub fn read_active(service: &str) -> Result<String> {
+/// Read the active color for a service. Returns [`Color::Blue`] if the state
+/// file is missing or holds an unrecognized value.
+pub fn read_active(service: &str) -> Result<Color> {
     let path = state_path(service);
     if !path.exists() {
-        return Ok("blue".to_string());
+        return Ok(Color::Blue);
     }
     let color = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read state file {:?}", path))?
-        .trim()
-        .to_string();
-    if color != "blue" && color != "green" {
-        return Ok("blue".to_string());
-    }
-    Ok(color)
+        .with_context(|| format!("failed to read state file {}", path.display()))?;
+    Ok(Color::parse(color.trim()).unwrap_or(Color::Blue))
 }
 
 /// Write the active color for a service.
-pub fn write_active(service: &str, color: &str) -> Result<()> {
+pub fn write_active(service: &str, color: Color) -> Result<()> {
     let path = state_path(service);
-    fs::create_dir_all(path.parent().unwrap())
-        .context("failed to create state directory")?;
-    fs::write(&path, format!("{}\n", color))
-        .with_context(|| format!("failed to write state file {:?}", path))?;
+    let parent = path.parent().expect("state path has a parent directory");
+    fs::create_dir_all(parent).context("failed to create state directory")?;
+    fs::write(&path, format!("{}\n", color.as_str()))
+        .with_context(|| format!("failed to write state file {}", path.display()))?;
     Ok(())
 }
 
@@ -39,22 +35,22 @@ pub fn read_active_sha(service: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Write the active SHA for a service (called alongside write_active after cutover).
+/// Write the active SHA for a service (called alongside `write_active` after cutover).
 pub fn write_active_sha(service: &str, sha: &str) -> Result<()> {
     let path = sha_path(service);
-    fs::create_dir_all(path.parent().unwrap())
-        .context("failed to create state directory")?;
-    fs::write(&path, format!("{}\n", sha))
-        .with_context(|| format!("failed to write SHA state file {:?}", path))?;
+    let parent = path.parent().expect("sha path has a parent directory");
+    fs::create_dir_all(parent).context("failed to create state directory")?;
+    fs::write(&path, format!("{sha}\n"))
+        .with_context(|| format!("failed to write SHA state file {}", path.display()))?;
     Ok(())
 }
 
 fn state_path(service: &str) -> PathBuf {
-    PathBuf::from(config::STATE_DIR).join(format!("{}.color", service))
+    PathBuf::from(config::STATE_DIR).join(format!("{service}.color"))
 }
 
 fn sha_path(service: &str) -> PathBuf {
-    PathBuf::from(config::STATE_DIR).join(format!("{}.sha", service))
+    PathBuf::from(config::STATE_DIR).join(format!("{service}.sha"))
 }
 
 /// Read the active color from a specific path (for testing).
@@ -76,7 +72,7 @@ fn write_to(path: &std::path::Path, color: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, format!("{}\n", color))?;
+    std::fs::write(path, format!("{color}\n"))?;
     Ok(())
 }
 
@@ -86,8 +82,8 @@ mod tests {
 
     #[test]
     fn state_paths_are_correct() {
-        let sandbox_path = state_path("sandbox");
-        assert!(sandbox_path.to_string_lossy().ends_with("sandbox.color"));
+        let paseo_path = state_path("paseo");
+        assert!(paseo_path.to_string_lossy().ends_with("paseo.color"));
 
         let apps_path = state_path("apps");
         assert!(apps_path.to_string_lossy().ends_with("apps.color"));
@@ -104,7 +100,7 @@ mod tests {
     fn round_trip_blue_and_green() {
         let dir = std::env::temp_dir().join("orch-test-state-rt");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sandbox.color");
+        let path = dir.join("paseo.color");
 
         write_to(&path, "green").unwrap();
         assert_eq!(read_from(&path).unwrap(), "green");

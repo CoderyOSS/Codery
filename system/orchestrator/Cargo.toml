@@ -2,6 +2,10 @@
 name = "codery-ci"
 version = "0.15.0"
 edition = "2021"
+rust-version = "1.90"
+description = "CoderyCI — blue/green deploy orchestrator, MCP control plane, and host metrics for the Codery platform"
+license = "MIT"
+repository = "https://github.com/CoderyOSS/Codery"
 
 [[bin]]
 name = "codery-ci"
@@ -26,3 +30,19 @@ rusqlite = { version = "0.34", features = ["bundled"] }
 [dev-dependencies]
 tempfile = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# Lint policy is enforced in-tree so local builds, CI, and editors all agree.
+# CI runs plain `cargo clippy --all-targets` — no CLI severity overrides.
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+unwrap_used = "deny"
+pedantic = { level = "warn", priority = -1 }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use schemars::JsonSchema;
+use serde::Deserialize;
 
-use crate::config;
+use crate::config::{self, Color};
 
 // ── YAML schema types ─────────────────────────────────────────────────────────
 
@@ -14,17 +14,15 @@ use crate::config;
 pub struct ServiceDef {
     pub service: String,
     /// Image template. `{sha}` is substituted at deploy time.
-    /// Example: "ghcr.io/coderyoss/codery:sandbox-{sha}"
+    /// Example: "ghcr.io/coderyoss/codery:paseo-{sha}"
     pub image: String,
-    /// Port formula: host_port = container_port + offset(color)
+    /// Port formula: `host_port` = `container_port` + offset(color)
     pub port_scheme: PortScheme,
-    /// Discrete named container ports (sandbox-style services).
+    /// Discrete named container ports (named-port services).
     #[serde(default)]
     pub ports: Vec<NamedPort>,
     /// Bulk port range for Docker binding (apps-style services).
     pub port_range: Option<PortRange>,
-    /// Path to a JSON file with extra Caddy routes (apps-routes.json pattern).
-    pub routes_file: Option<String>,
     pub volumes: Vec<VolumeMount>,
     /// Keys that must exist in /opt/codery/.env before deploy is attempted.
     #[serde(default)]
@@ -38,14 +36,14 @@ pub struct ServiceDef {
     #[serde(default)]
     pub extra_hosts: Vec<String>,
     /// Optional Docker network aliases for this container.
-    /// E.g. ["apps"] makes `ssh gem@apps` resolvable from other containers on the same network.
+    /// E.g. `["apps"]` makes `ssh gem@apps` resolvable from other containers on the same network.
     #[serde(default)]
     pub network_aliases: Vec<String>,
     /// If true, do NOT set "no-new-privileges" — allows sudo inside the container.
     #[serde(default)]
     pub allow_privilege_escalation: bool,
     /// Process command as an argv array (never a shell string). Overrides the
-    /// image CMD. E.g. ["npx", "playwright", "run-server", "--port", "3000"].
+    /// image CMD. E.g. `["npx", "playwright", "run-server", "--port", "3000"]`.
     #[serde(default)]
     pub command: Option<Vec<String>>,
     /// Override the image ENTRYPOINT.
@@ -66,8 +64,8 @@ pub struct ServiceDef {
     pub ipc: Option<String>,
 }
 
-/// host_port = container_port + offset
-/// Both sandbox and apps use this; they just have different offset values.
+/// `host_port` = `container_port` + offset
+/// Both paseo and apps use this; they just have different offset values.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PortScheme {
     pub blue_offset: u16,
@@ -75,8 +73,11 @@ pub struct PortScheme {
 }
 
 impl PortScheme {
-    pub fn host_port(&self, color: &str, container_port: u16) -> u16 {
-        let offset = if color == "blue" { self.blue_offset } else { self.green_offset };
+    pub fn host_port(&self, color: Color, container_port: u16) -> u16 {
+        let offset = match color {
+            Color::Blue => self.blue_offset,
+            Color::Green => self.green_offset,
+        };
         container_port + offset
     }
 }
@@ -101,10 +102,10 @@ pub enum PortBind {
 }
 
 impl PortBind {
-    /// The IP string passed to Docker's HostIp / used as a listen address.
+    /// The IP string passed to Docker's `HostIp` / used as a listen address.
     /// Fails closed for [`PortBind::Tailnet`] when the Tailscale IP is
     /// unavailable, rather than silently falling back to `0.0.0.0`.
-    pub fn resolve(&self) -> Result<String> {
+    pub fn resolve(self) -> Result<String> {
         match self {
             PortBind::Any => Ok("0.0.0.0".to_string()),
             PortBind::Loopback => Ok("127.0.0.1".to_string()),
@@ -214,8 +215,7 @@ impl ServiceDef {
         let path = format!("{}/{}.yml", config::SERVICES_DIR, service);
         let data = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read service definition at {path}"))?;
-        serde_yaml::from_str(&data)
-            .with_context(|| format!("failed to parse {path}"))
+        serde_yaml::from_str(&data).with_context(|| format!("failed to parse {path}"))
     }
 
     /// Load all service definitions from /opt/codery/services/*.yml.
@@ -226,16 +226,14 @@ impl ServiceDef {
             return Ok(vec![]);
         }
         let mut defs = Vec::new();
-        for entry in std::fs::read_dir(dir)
-            .with_context(|| format!("failed to read {dir}"))?
-        {
+        for entry in std::fs::read_dir(dir).with_context(|| format!("failed to read {dir}"))? {
             let entry = entry.context("failed to read directory entry")?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("yml") {
                 let data = std::fs::read_to_string(&path)
-                    .with_context(|| format!("failed to read {:?}", path))?;
+                    .with_context(|| format!("failed to read {}", path.display()))?;
                 let def: ServiceDef = serde_yaml::from_str(&data)
-                    .with_context(|| format!("failed to parse {:?}", path))?;
+                    .with_context(|| format!("failed to parse {}", path.display()))?;
                 defs.push(def);
             }
         }
@@ -253,9 +251,9 @@ impl ServiceDef {
 
     /// Return `(host_port, container_port)` pairs for Docker port bindings.
     ///
-    /// - For named-port services (sandbox): one pair per `ports[]` entry.
+    /// - For named-port services (paseo): one pair per `ports[]` entry.
     /// - For range services (apps): one pair per port in `container_start..=container_end`.
-    pub fn port_mappings(&self, color: &str) -> Vec<(u16, u16)> {
+    pub fn port_mappings(&self, color: Color) -> Vec<(u16, u16)> {
         self.port_binding_specs(color)
             .into_iter()
             .map(|s| (s.host, s.container))
@@ -264,20 +262,28 @@ impl ServiceDef {
 
     /// Like [`Self::port_mappings`], but carries the bind interface so the
     /// deployer can restrict which host address each published port listens on.
-    pub fn port_binding_specs(&self, color: &str) -> Vec<PortBindingSpec> {
+    pub fn port_binding_specs(&self, color: Color) -> Vec<PortBindingSpec> {
         let mut specs = Vec::new();
 
         // Named ports
         for p in &self.ports {
             let host = self.port_scheme.host_port(color, p.container_port);
-            specs.push(PortBindingSpec { host, container: p.container_port, bind: p.bind });
+            specs.push(PortBindingSpec {
+                host,
+                container: p.container_port,
+                bind: p.bind,
+            });
         }
 
         // Bulk range
         if let Some(ref r) = self.port_range {
             for c in r.container_start..=r.container_end {
                 let host = self.port_scheme.host_port(color, c);
-                specs.push(PortBindingSpec { host, container: c, bind: r.bind });
+                specs.push(PortBindingSpec {
+                    host,
+                    container: c,
+                    bind: r.bind,
+                });
             }
         }
 
@@ -290,7 +296,7 @@ impl ServiceDef {
     /// For `HealthCheck::Docker`, returns 0 (unused).
     /// Used in tests to verify port calculation logic.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn health_port(&self, color: &str) -> Result<u16> {
+    pub fn health_port(&self, color: Color) -> Result<u16> {
         match &self.health_check {
             HealthCheck::Tcp { port: name, .. } => {
                 let p = self
@@ -342,7 +348,11 @@ impl ServiceDef {
                 VolumeMount::Named { name, container } => {
                     binds.push(format!("{name}:{container}"));
                 }
-                VolumeMount::Bind { host, container, readonly } => {
+                VolumeMount::Bind {
+                    host,
+                    container,
+                    readonly,
+                } => {
                     let resolved = substitute_env(host, env)?;
                     let ro_suffix = if *readonly { ":ro" } else { "" };
                     binds.push(format!("{resolved}:{container}{ro_suffix}"));
@@ -392,11 +402,11 @@ fn substitute_env(s: &str, env: &HashMap<String, String>) -> Result<String> {
 mod tests {
     use super::*;
 
-    fn sandbox_def() -> ServiceDef {
+    fn paseo_def() -> ServiceDef {
         serde_yaml::from_str(
-            r#"
-service: sandbox
-image: ghcr.io/coderyoss/codery:sandbox-{sha}
+            r"
+service: paseo
+image: ghcr.io/coderyoss/codery:paseo-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -424,14 +434,14 @@ volumes:
     container: /home/gem/.local/share/opencode
 required_env: []
 network: codery-net
-"#,
+",
         )
         .unwrap()
     }
 
     fn apps_def() -> ServiceDef {
         serde_yaml::from_str(
-            r#"
+            r"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
@@ -451,24 +461,24 @@ volumes:
     readonly: true
 required_env: []
 network: codery-net
-"#,
+",
         )
         .unwrap()
     }
 
-    // Matches the old hardcoded sandbox_host_port() values
+    // Matches the old hardcoded paseo_host_port() values
     #[test]
-    fn sandbox_port_formula_blue() {
-        let def = sandbox_def();
-        assert_eq!(def.port_scheme.host_port("blue", 3000), 13000);
-        assert_eq!(def.port_scheme.host_port("blue", 7000), 17000);
-        assert_eq!(def.port_scheme.host_port("blue", 7681), 17681);
+    fn paseo_port_formula_blue() {
+        let def = paseo_def();
+        assert_eq!(def.port_scheme.host_port(Color::Blue, 3000), 13000);
+        assert_eq!(def.port_scheme.host_port(Color::Blue, 7000), 17000);
+        assert_eq!(def.port_scheme.host_port(Color::Blue, 7681), 17681);
     }
 
     #[test]
     fn port_bind_defaults_to_any_and_parses() {
         let def: ServiceDef = serde_yaml::from_str(
-            r#"
+            r"
 service: t
 image: ghcr.io/test/t:{sha}
 port_scheme:
@@ -490,19 +500,47 @@ health_check:
   type: docker
   timeout_secs: 30
 network: codery-net
-"#,
+",
         )
         .unwrap();
         assert_eq!(def.ports[0].bind, PortBind::Loopback);
         assert_eq!(def.ports[1].bind, PortBind::Any); // serde default
         assert_eq!(def.port_range.as_ref().unwrap().bind, PortBind::Tailnet);
 
-        let specs = def.port_binding_specs("blue");
+        let specs = def.port_binding_specs(Color::Blue);
         assert_eq!(specs.len(), 4);
-        assert_eq!(specs[0], PortBindingSpec { host: 3000, container: 3000, bind: PortBind::Loopback });
-        assert_eq!(specs[1], PortBindingSpec { host: 4000, container: 4000, bind: PortBind::Any });
-        assert_eq!(specs[2], PortBindingSpec { host: 8000, container: 8000, bind: PortBind::Tailnet });
-        assert_eq!(specs[3], PortBindingSpec { host: 8001, container: 8001, bind: PortBind::Tailnet });
+        assert_eq!(
+            specs[0],
+            PortBindingSpec {
+                host: 3000,
+                container: 3000,
+                bind: PortBind::Loopback
+            }
+        );
+        assert_eq!(
+            specs[1],
+            PortBindingSpec {
+                host: 4000,
+                container: 4000,
+                bind: PortBind::Any
+            }
+        );
+        assert_eq!(
+            specs[2],
+            PortBindingSpec {
+                host: 8000,
+                container: 8000,
+                bind: PortBind::Tailnet
+            }
+        );
+        assert_eq!(
+            specs[3],
+            PortBindingSpec {
+                host: 8001,
+                container: 8001,
+                bind: PortBind::Tailnet
+            }
+        );
     }
 
     #[test]
@@ -514,7 +552,7 @@ network: codery-net
     #[test]
     fn basic_auth_field_parses() {
         let def: ServiceDef = serde_yaml::from_str(
-            r#"
+            r"
 service: t
 image: ghcr.io/test/t:{sha}
 port_scheme:
@@ -531,24 +569,27 @@ health_check:
   type: docker
   timeout_secs: 30
 network: codery-net
-"#,
+",
         )
         .unwrap();
-        assert_eq!(def.ports[0].auth.as_ref().unwrap().env, "OPENCODE_BASIC_AUTH");
+        assert_eq!(
+            def.ports[0].auth.as_ref().unwrap().env,
+            "OPENCODE_BASIC_AUTH"
+        );
     }
 
     #[test]
-    fn sandbox_port_formula_green() {
-        let def = sandbox_def();
-        assert_eq!(def.port_scheme.host_port("green", 3000), 23000);
-        assert_eq!(def.port_scheme.host_port("green", 7000), 27000);
-        assert_eq!(def.port_scheme.host_port("green", 7681), 27681);
+    fn paseo_port_formula_green() {
+        let def = paseo_def();
+        assert_eq!(def.port_scheme.host_port(Color::Green, 3000), 23000);
+        assert_eq!(def.port_scheme.host_port(Color::Green, 7000), 27000);
+        assert_eq!(def.port_scheme.host_port(Color::Green, 7681), 27681);
     }
 
     #[test]
-    fn sandbox_port_mappings_blue() {
-        let def = sandbox_def();
-        let mappings = def.port_mappings("blue");
+    fn paseo_port_mappings_blue() {
+        let def = paseo_def();
+        let mappings = def.port_mappings(Color::Blue);
         assert!(mappings.contains(&(13000, 3000)));
         assert!(mappings.contains(&(17000, 7000)));
         assert!(mappings.contains(&(17681, 7681)));
@@ -556,31 +597,31 @@ network: codery-net
     }
 
     #[test]
-    fn sandbox_port_mappings_green() {
-        let def = sandbox_def();
-        let mappings = def.port_mappings("green");
+    fn paseo_port_mappings_green() {
+        let def = paseo_def();
+        let mappings = def.port_mappings(Color::Green);
         assert!(mappings.contains(&(23000, 3000)));
         assert!(mappings.contains(&(27000, 7000)));
         assert!(mappings.contains(&(27681, 7681)));
     }
 
     #[test]
-    fn sandbox_health_port_blue() {
-        let def = sandbox_def();
-        assert_eq!(def.health_port("blue").unwrap(), 13000);
+    fn paseo_health_port_blue() {
+        let def = paseo_def();
+        assert_eq!(def.health_port(Color::Blue).unwrap(), 13000);
     }
 
     #[test]
-    fn sandbox_health_port_green() {
-        let def = sandbox_def();
-        assert_eq!(def.health_port("green").unwrap(), 23000);
+    fn paseo_health_port_green() {
+        let def = paseo_def();
+        assert_eq!(def.health_port(Color::Green).unwrap(), 23000);
     }
 
     // Matches the old hardcoded apps_ports() values
     #[test]
     fn apps_blue_port_range() {
         let def = apps_def();
-        let mappings = def.port_mappings("blue");
+        let mappings = def.port_mappings(Color::Blue);
         assert_eq!(mappings.len(), 1001);
         assert!(mappings.contains(&(8000, 8000)));
         assert!(mappings.contains(&(9000, 9000)));
@@ -589,7 +630,7 @@ network: codery-net
     #[test]
     fn apps_green_port_range() {
         let def = apps_def();
-        let mappings = def.port_mappings("green");
+        let mappings = def.port_mappings(Color::Green);
         assert_eq!(mappings.len(), 1001);
         assert!(mappings.contains(&(18000, 8000)));
         assert!(mappings.contains(&(19000, 9000)));
@@ -597,16 +638,16 @@ network: codery-net
 
     #[test]
     fn image_ref_substitution() {
-        let def = sandbox_def();
+        let def = paseo_def();
         assert_eq!(
             def.image_ref("abc123"),
-            "ghcr.io/coderyoss/codery:sandbox-abc123"
+            "ghcr.io/coderyoss/codery:paseo-abc123"
         );
     }
 
     #[test]
     fn resolved_binds_named_and_bind() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let env = HashMap::new();
         let binds = def.resolved_binds(&env).unwrap();
         assert!(binds.contains(&"/opt/codery/projects:/home/gem/projects".to_string()));
@@ -615,7 +656,8 @@ network: codery-net
 
     #[test]
     fn resolved_binds_with_env_var() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
+        let def: ServiceDef = serde_yaml::from_str(
+            r#"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
@@ -634,7 +676,9 @@ volumes:
     readonly: true
 required_env: []
 network: codery-net
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let mut env = HashMap::new();
         env.insert("SSH_DIR".to_string(), "/home/deploy/.ssh".to_string());
         let binds = def.resolved_binds(&env).unwrap();
@@ -643,7 +687,8 @@ network: codery-net
 
     #[test]
     fn resolved_env_applies_overrides() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
+        let def: ServiceDef = serde_yaml::from_str(
+            r"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
@@ -660,31 +705,34 @@ required_env: []
 env_overrides:
   GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
 network: codery-net
-"#).unwrap();
+",
+        )
+        .unwrap();
         let raw = vec![
             "GITHUB_APP_PRIVATE_KEY_PATH=/old/path".to_string(),
             "OTHER=value".to_string(),
         ];
         let resolved = def.resolved_env(&raw);
         assert!(!resolved.contains(&"GITHUB_APP_PRIVATE_KEY_PATH=/old/path".to_string()));
-        assert!(resolved.contains(&"GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem".to_string()));
+        assert!(resolved
+            .contains(&"GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem".to_string()));
         assert!(resolved.contains(&"OTHER=value".to_string()));
     }
 
     #[test]
     fn health_check_bad_port_name_returns_error() {
-        let mut def = sandbox_def();
+        let mut def = paseo_def();
         def.health_check = HealthCheck::Tcp {
             port: "nonexistent".to_string(),
             timeout_secs: 60,
             interval_secs: 2,
         };
-        assert!(def.health_port("blue").is_err());
+        assert!(def.health_port(Color::Blue).is_err());
     }
 
     #[test]
     fn parse_network_aliases() {
-        let yaml = r#"
+        let yaml = r"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
@@ -701,16 +749,16 @@ network: codery-net
 network_aliases:
   - apps
   - myalias
-"#;
+";
         let def: ServiceDef = serde_yaml::from_str(yaml).expect("parse failed");
         assert_eq!(def.network_aliases, vec!["apps", "myalias"]);
     }
 
     #[test]
     fn parse_network_aliases_default_empty() {
-        let yaml = r#"
-service: sandbox
-image: ghcr.io/coderyoss/codery:sandbox-{sha}
+        let yaml = r"
+service: paseo
+image: ghcr.io/coderyoss/codery:paseo-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -719,16 +767,17 @@ health_check:
   timeout_secs: 60
 volumes: []
 network: codery-net
-"#;
+";
         let def: ServiceDef = serde_yaml::from_str(yaml).expect("parse failed");
-        assert!(def.network_aliases.is_empty());
+        assert_eq!(def.network_aliases, [] as [std::string::String; 0]);
     }
 
     #[test]
     fn named_port_fixed_port_deserializes() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
-service: sandbox
-image: ghcr.io/test/x:sandbox-{sha}
+        let def: ServiceDef = serde_yaml::from_str(
+            r"
+service: paseo
+image: ghcr.io/test/x:paseo-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -744,7 +793,9 @@ health_check:
 volumes: []
 required_env: []
 network: test-net
-"#).unwrap();
+",
+        )
+        .unwrap();
         let ssh = def.ports.iter().find(|p| p.name == "ssh").unwrap();
         assert_eq!(ssh.fixed_port, Some(2222));
         let web = def.ports.iter().find(|p| p.name == "web").unwrap();
@@ -753,7 +804,8 @@ network: test-net
 
     #[test]
     fn generic_process_fields_deserialize() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
+        let def: ServiceDef = serde_yaml::from_str(
+            r#"
 service: playwright
 image: mcr.microsoft.com/playwright:v1.54.1-noble
 port_scheme:
@@ -784,7 +836,9 @@ user: pwuser
 workdir: /home/pwuser
 init: true
 ipc: host
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert_eq!(def.image, "mcr.microsoft.com/playwright:v1.54.1-noble");
         assert_eq!(
             def.image_ref("v1.54.1"),
@@ -810,7 +864,7 @@ ipc: host
 
     #[test]
     fn generic_process_fields_default_empty() {
-        let def = sandbox_def();
+        let def = paseo_def();
         assert_eq!(def.command, None);
         assert_eq!(def.entrypoint, None);
         assert_eq!(def.user, None);

@@ -17,7 +17,9 @@ use anyhow::{Context, Result};
 use bollard::Docker;
 use serde::Serialize;
 
+use crate::config::Color;
 use crate::{config, db, service_def::ServiceDef, state};
+use std::fmt::Write as _;
 
 // ── Report types ─────────────────────────────────────────────────────────────
 
@@ -89,51 +91,52 @@ impl DiagnoseReport {
                 Severity::Stale => "STALE",
                 Severity::Info => "INFO",
             };
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "[{}] {:<8} state={}",
-                svc.service,
-                tag,
-                svc.state_color
-            ));
+                svc.service, tag, svc.state_color
+            );
             if let Some(c) = &svc.running_color {
-                out.push_str(&format!("  running={}", c));
+                let _ = write!(out, "  running={c}");
             }
             if let Some(name) = &svc.running_container {
-                out.push_str(&format!("  container={}", name));
+                let _ = write!(out, "  container={name}");
             }
             if let Some(img) = &svc.image {
-                out.push_str(&format!("\n[{}]   image   {}", svc.service, img));
+                let _ = write!(out, "\n[{}]   image   {}", svc.service, img);
             }
             for fix in &svc.fix {
-                out.push_str(&format!("\n[{}]   fix     {}", svc.service, fix));
+                let _ = write!(out, "\n[{}]   fix     {}", svc.service, fix);
             }
             out.push('\n');
         }
 
         for r in &self.routes {
-            out.push_str(&format!(
+            let _ = writeln!(
+                out,
                 "[routes] {:<40} → :{}  NO LISTENER\n",
                 r.subdomain, r.host_port
-            ));
+            );
             for fix in &r.fix {
-                out.push_str(&format!("[routes]   fix     {}\n", fix));
+                let _ = writeln!(out, "[routes]   fix     {fix}\n");
             }
         }
 
         for p in &self.previews {
-            out.push_str(&format!(
+            let _ = writeln!(
+                out,
                 "[previews] {:<12} sha={} color={}\n",
                 p.service, p.sha, p.color
-            ));
+            );
             for fix in &p.fix {
-                out.push_str(&format!("[previews]   {}\n", fix));
+                let _ = writeln!(out, "[previews]   {fix}\n");
             }
         }
 
         if self.all_healthy {
             out.push_str("\nAll healthy. No issues found.\n");
         } else {
-            out.push_str(&format!("\n{} issue(s) found.\n", self.issue_count));
+            let _ = writeln!(out, "\n{} issue(s) found.\n", self.issue_count);
             out.push_str("Run with --json for machine-readable output.\n");
         }
 
@@ -150,7 +153,7 @@ impl DiagnoseReport {
 /// - Both colors present → Info.
 /// - Exactly one running and it matches `state_color` → Ok.
 /// - Exactly one running and it does NOT match `state_color` → Mismatch.
-pub fn classify_service(state_color: &str, running: &[&str]) -> Severity {
+pub fn classify_service(state_color: Color, running: &[Color]) -> Severity {
     match running.len() {
         0 => Severity::Dead,
         1 => {
@@ -223,14 +226,17 @@ pub fn parse_listening_ports(ss_output: &str) -> HashSet<u16> {
 /// Compute the host port a route targets given the service's recorded color.
 ///
 /// - `target == "host"` → route.port is already a host port.
-/// - `target == "sandbox"` → blue offset 10000, green offset 20000.
+/// - `target == "paseo"` → blue offset 10000, green offset 20000.
 /// - Other services → use their `port_scheme` from the service YAML.
-pub fn route_host_port(target: &str, container_port: u16, state_color: &str) -> u16 {
+pub fn route_host_port(target: &str, container_port: u16, state_color: Color) -> u16 {
     if target == "host" {
         return container_port;
     }
-    if target == "sandbox" {
-        let offset = if state_color == "blue" { 10000 } else { 20000 };
+    if target == "paseo" {
+        let offset = match state_color {
+            Color::Blue => 10000,
+            Color::Green => 20000,
+        };
         return container_port + offset;
     }
     if let Ok(def) = ServiceDef::load(target) {
@@ -252,11 +258,7 @@ struct ContainerState {
 /// (or `None` if the container does not exist).
 async fn inspect_container(docker: &Docker, name: &str) -> Option<ContainerState> {
     let info = docker.inspect_container(name, None).await.ok()?;
-    let running = info
-        .state
-        .as_ref()
-        .and_then(|s| s.running)
-        .unwrap_or(false);
+    let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
     let image = info
         .config
         .as_ref()
@@ -267,44 +269,55 @@ async fn inspect_container(docker: &Docker, name: &str) -> Option<ContainerState
 
 /// Run the full diagnostic. Connects to Docker, reads the state file,
 /// queries the previews table, and shells out to `ss -tlnp` once.
+#[allow(clippy::too_many_lines)] // linear check pipeline (services/routes/previews/render)
 pub async fn run() -> Result<DiagnoseReport> {
     let defs = ServiceDef::load_all().context("failed to load service definitions")?;
-    let docker = Docker::connect_with_socket_defaults()
-        .context("failed to connect to Docker socket")?;
+    let docker =
+        Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
 
     // ── Service checks ───────────────────────────────────────────────────────
+    // The db is opened first: pending previews influence service severity below.
+    let conn = db::open().context("failed to open codery.db")?;
+    db::init(&conn).context("failed to init codery.db")?;
+    let previews_db = db::list_previews(&conn).context("failed to list previews")?;
+
     let mut services: Vec<ServiceIssue> = Vec::new();
-    let mut state_colors: std::collections::HashMap<String, String> =
+    let mut state_colors: std::collections::HashMap<String, Color> =
         std::collections::HashMap::new();
 
     for def in &defs {
         let service = &def.service;
-        let state_color = state::read_active(service).unwrap_or_else(|_| "blue".to_string());
-        state_colors.insert(service.clone(), state_color.clone());
+        let state_color = state::read_active(service).unwrap_or(Color::Blue);
+        state_colors.insert(service.clone(), state_color);
 
-        let blue = config::container_name(service, "blue");
-        let green = config::container_name(service, "green");
+        let blue = config::container_name(service, Color::Blue);
+        let green = config::container_name(service, Color::Green);
 
         let blue_state = inspect_container(&docker, &blue).await;
         let green_state = inspect_container(&docker, &green).await;
 
-        let mut running_colors: Vec<&str> = Vec::new();
+        let mut running_colors: Vec<Color> = Vec::new();
         if let Some(s) = &blue_state {
             if s.running {
-                running_colors.push("blue");
+                running_colors.push(Color::Blue);
             }
         }
         if let Some(s) = &green_state {
             if s.running {
-                running_colors.push("green");
+                running_colors.push(Color::Green);
             }
         }
 
-        let severity = classify_service(&state_color, &running_colors);
+        let severity = if previews_db.iter().any(|p| p.service == *service) {
+            // A preview deploy is pending cutover for this service.
+            Severity::Stale
+        } else {
+            classify_service(state_color, &running_colors)
+        };
         let (running_container, image) = match severity {
             Severity::Ok | Severity::Mismatch => {
                 let c = running_colors[0];
-                let img = if c == "blue" {
+                let img = if c == Color::Blue {
                     blue_state.as_ref().and_then(|s| s.image.clone())
                 } else {
                     green_state.as_ref().and_then(|s| s.image.clone())
@@ -317,8 +330,8 @@ pub async fn run() -> Result<DiagnoseReport> {
         services.push(ServiceIssue {
             service: service.clone(),
             severity: severity.clone(),
-            state_color: state_color.clone(),
-            running_color: running_colors.first().map(|s| s.to_string()),
+            state_color: state_color.as_str().to_string(),
+            running_color: running_colors.first().map(|c| c.as_str().to_string()),
             running_container,
             image,
             fix: service_fix(service, &severity),
@@ -326,8 +339,6 @@ pub async fn run() -> Result<DiagnoseReport> {
     }
 
     // ── Route checks ─────────────────────────────────────────────────────────
-    let conn = db::open().context("failed to open codery.db")?;
-    db::init(&conn).context("failed to init codery.db")?;
     let unified = db::build_route_map(&conn).context("failed to build route map")?;
     let domain = config::load_domain();
 
@@ -336,7 +347,7 @@ pub async fn run() -> Result<DiagnoseReport> {
 
     let mut routes: Vec<RouteIssue> = Vec::new();
     for r in &unified {
-        let color = state_colors.get(&r.target).map(|s| s.as_str()).unwrap_or("blue");
+        let color = state_colors.get(&r.target).copied().unwrap_or(Color::Blue);
         let host_port = route_host_port(&r.target, r.port, color);
         if listening.contains(&host_port) {
             continue;
@@ -355,7 +366,6 @@ pub async fn run() -> Result<DiagnoseReport> {
     }
 
     // ── Preview checks ───────────────────────────────────────────────────────
-    let previews_db = db::list_previews(&conn).context("failed to list previews")?;
     let previews: Vec<PreviewIssue> = previews_db
         .iter()
         .map(|p| PreviewIssue {
@@ -370,10 +380,12 @@ pub async fn run() -> Result<DiagnoseReport> {
         .collect();
 
     // ── Aggregate ────────────────────────────────────────────────────────────
-    let svc_unhealthy = services.iter().any(|s| matches!(
-        s.severity,
-        Severity::Mismatch | Severity::Dead | Severity::Stale
-    ));
+    let svc_unhealthy = services.iter().any(|s| {
+        matches!(
+            s.severity,
+            Severity::Mismatch | Severity::Dead | Severity::Stale
+        )
+    });
     let all_healthy = !svc_unhealthy && routes.is_empty() && previews.is_empty();
     let issue_count = services
         .iter()
@@ -416,30 +428,39 @@ mod tests {
 
     #[test]
     fn classify_ok_when_state_matches_running() {
-        assert_eq!(classify_service("blue", &["blue"]), Severity::Ok);
-        assert_eq!(classify_service("green", &["green"]), Severity::Ok);
+        assert_eq!(classify_service(Color::Blue, &[Color::Blue]), Severity::Ok);
+        assert_eq!(
+            classify_service(Color::Green, &[Color::Green]),
+            Severity::Ok
+        );
     }
 
     #[test]
     fn classify_mismatch_when_state_disagrees_with_running() {
-        assert_eq!(classify_service("green", &["blue"]), Severity::Mismatch);
-        assert_eq!(classify_service("blue", &["green"]), Severity::Mismatch);
+        assert_eq!(
+            classify_service(Color::Green, &[Color::Blue]),
+            Severity::Mismatch
+        );
+        assert_eq!(
+            classify_service(Color::Blue, &[Color::Green]),
+            Severity::Mismatch
+        );
     }
 
     #[test]
     fn classify_dead_when_nothing_running() {
-        assert_eq!(classify_service("blue", &[]), Severity::Dead);
-        assert_eq!(classify_service("green", &[]), Severity::Dead);
+        assert_eq!(classify_service(Color::Blue, &[]), Severity::Dead);
+        assert_eq!(classify_service(Color::Green, &[]), Severity::Dead);
     }
 
     #[test]
     fn classify_info_when_both_running() {
         assert_eq!(
-            classify_service("blue", &["blue", "green"]),
+            classify_service(Color::Blue, &[Color::Blue, Color::Green]),
             Severity::Info
         );
         assert_eq!(
-            classify_service("green", &["blue", "green"]),
+            classify_service(Color::Green, &[Color::Blue, Color::Green]),
             Severity::Info
         );
     }
@@ -447,35 +468,41 @@ mod tests {
     #[test]
     fn service_fix_mismatch_suggests_cutover() {
         assert_eq!(
-            service_fix("sandbox", &Severity::Mismatch),
-            vec!["codery-ci cutover sandbox"]
+            service_fix("paseo", &Severity::Mismatch),
+            vec!["codery-ci cutover paseo"]
         );
     }
 
     #[test]
     fn service_fix_dead_lists_recovery_options() {
-        let fixes = service_fix("sandbox", &Severity::Dead);
+        let fixes = service_fix("paseo", &Severity::Dead);
         assert!(fixes.iter().any(|f| f.contains("restart_service")));
         assert!(fixes.iter().any(|f| f.contains("codery-ci deploy")));
     }
 
     #[test]
     fn service_fix_stale_offers_cutover_and_cancel() {
-        let fixes = service_fix("sandbox", &Severity::Stale);
+        let fixes = service_fix("paseo", &Severity::Stale);
         assert!(fixes.iter().any(|f| f.contains("cutover")));
         assert!(fixes.iter().any(|f| f.contains("cancel-preview")));
     }
 
     #[test]
     fn service_fix_ok_is_empty() {
-        assert!(service_fix("sandbox", &Severity::Ok).is_empty());
-        assert!(service_fix("sandbox", &Severity::Info).is_empty());
+        assert_eq!(
+            service_fix("paseo", &Severity::Ok),
+            [] as [std::string::String; 0]
+        );
+        assert_eq!(
+            service_fix("paseo", &Severity::Info),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]
     fn route_fix_non_host_suggests_cutover() {
-        let fixes = route_fix("opencode.example.com", "sandbox");
-        assert_eq!(fixes, vec!["codery-ci cutover sandbox"]);
+        let fixes = route_fix("opencode.example.com", "paseo");
+        assert_eq!(fixes, vec!["codery-ci cutover paseo"]);
     }
 
     #[test]
@@ -517,57 +544,57 @@ mod tests {
 
     #[test]
     fn route_host_port_for_host_target_is_passthrough() {
-        assert_eq!(route_host_port("host", 4040, "blue"), 4040);
-        assert_eq!(route_host_port("host", 4040, "green"), 4040);
+        assert_eq!(route_host_port("host", 4040, Color::Blue), 4040);
+        assert_eq!(route_host_port("host", 4040, Color::Green), 4040);
     }
 
     #[test]
-    fn route_host_port_for_sandbox_applies_offset() {
-        assert_eq!(route_host_port("sandbox", 3000, "blue"), 13000);
-        assert_eq!(route_host_port("sandbox", 3000, "green"), 23000);
-        assert_eq!(route_host_port("sandbox", 22, "blue"), 10022);
-        assert_eq!(route_host_port("sandbox", 22, "green"), 20022);
+    fn route_host_port_for_named_port_applies_offset() {
+        assert_eq!(route_host_port("paseo", 3000, Color::Blue), 13000);
+        assert_eq!(route_host_port("paseo", 3000, Color::Green), 23000);
+        assert_eq!(route_host_port("paseo", 22, Color::Blue), 10022);
+        assert_eq!(route_host_port("paseo", 22, Color::Green), 20022);
     }
 
     #[test]
     fn diagnose_report_format_human_lists_each_issue() {
         let report = DiagnoseReport {
             services: vec![ServiceIssue {
-                service: "sandbox".to_string(),
+                service: "paseo".to_string(),
                 severity: Severity::Mismatch,
                 state_color: "green".to_string(),
                 running_color: Some("blue".to_string()),
-                running_container: Some("codery-sandbox-blue".to_string()),
-                image: Some("sandbox-nixos-v1".to_string()),
-                fix: vec!["codery-ci cutover sandbox".to_string()],
+                running_container: Some("codery-paseo-blue".to_string()),
+                image: Some("paseo-v1".to_string()),
+                fix: vec!["codery-ci cutover paseo".to_string()],
             }],
             routes: vec![RouteIssue {
                 subdomain: "opencode.example.com".to_string(),
                 host_port: 23000,
                 listening: false,
-                fix: vec!["codery-ci cutover sandbox".to_string()],
+                fix: vec!["codery-ci cutover paseo".to_string()],
             }],
             previews: vec![PreviewIssue {
-                service: "sandbox".to_string(),
-                sha: "sandbox-nixos-v1".to_string(),
+                service: "paseo".to_string(),
+                sha: "paseo-v1".to_string(),
                 color: "blue".to_string(),
                 fix: vec![
-                    "codery-ci cutover sandbox".to_string(),
-                    "codery-ci cancel-preview sandbox".to_string(),
+                    "codery-ci cutover paseo".to_string(),
+                    "codery-ci cancel-preview paseo".to_string(),
                 ],
             }],
             all_healthy: false,
             issue_count: 3,
         };
         let out = report.format_human();
-        assert!(out.contains("[sandbox] MISMATCH"));
+        assert!(out.contains("[paseo] MISMATCH"));
         assert!(out.contains("state=green"));
         assert!(out.contains("running=blue"));
-        assert!(out.contains("image   sandbox-nixos-v1"));
-        assert!(out.contains("fix     codery-ci cutover sandbox"));
+        assert!(out.contains("image   paseo-v1"));
+        assert!(out.contains("fix     codery-ci cutover paseo"));
         assert!(out.contains("[routes] opencode.example.com"));
         assert!(out.contains("NO LISTENER"));
-        assert!(out.contains("[previews] sandbox"));
+        assert!(out.contains("[previews] paseo"));
         assert!(out.contains("3 issue(s) found."));
     }
 
@@ -575,11 +602,11 @@ mod tests {
     fn diagnose_report_format_human_healthy() {
         let report = DiagnoseReport {
             services: vec![ServiceIssue {
-                service: "sandbox".to_string(),
+                service: "paseo".to_string(),
                 severity: Severity::Ok,
                 state_color: "blue".to_string(),
                 running_color: Some("blue".to_string()),
-                running_container: Some("codery-sandbox-blue".to_string()),
+                running_container: Some("codery-paseo-blue".to_string()),
                 image: None,
                 fix: vec![],
             }],
@@ -589,7 +616,7 @@ mod tests {
             issue_count: 0,
         };
         let out = report.format_human();
-        assert!(out.contains("[sandbox] OK"));
+        assert!(out.contains("[paseo] OK"));
         assert!(out.contains("All healthy."));
     }
 }

@@ -11,7 +11,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{caddy, config, db, deploy, images, mcp_exec, nginx, preflight, service_def::ServiceDef, state};
+use bollard::container::{DownloadFromContainerOptions, LogsOptions};
+use futures_util::StreamExt;
+use std::io::Read;
+
+use crate::config::Color;
+use crate::{
+    caddy, config, db, deploy, images, mcp_exec, nginx, preflight, service_def::ServiceDef, state,
+};
 
 // ── Data shapes returned by tools ────────────────────────────────────────────
 
@@ -20,7 +27,7 @@ struct ServiceStatus {
     service: String,
     active_color: String,
     /// Color recorded in /opt/codery/state/{service}.color (what routing uses).
-    /// May differ from active_color when a deploy-preview was not cut over.
+    /// May differ from `active_color` when a deploy-preview was not cut over.
     state_file_color: String,
     active_sha: Option<String>,
     container: String,
@@ -36,7 +43,7 @@ struct RouteEntry {
     service: String,
     color: Option<String>,
     note: Option<String>,
-    /// True if a TCP listener is bound on host_port (from `ss -tlnp`).
+    /// True if a TCP listener is bound on `host_port` (from `ss -tlnp`).
     healthy: bool,
 }
 
@@ -69,19 +76,19 @@ struct ServiceKnownParam {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ServiceParam {
-    #[schemars(description = "Service name (e.g. 'sandbox', 'apps')")]
+    #[schemars(description = "Service name (e.g. 'paseo', 'apps')")]
     service: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ServiceNameParam {
-    #[schemars(description = "Service name without .yml extension (e.g. 'sandbox', 'apps')")]
+    #[schemars(description = "Service name without .yml extension (e.g. 'paseo', 'apps')")]
     name: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct UpsertServiceParams {
-    #[schemars(description = "Service name without .yml extension (e.g. 'sandbox', 'apps')")]
+    #[schemars(description = "Service name without .yml extension (e.g. 'paseo', 'apps')")]
     name: String,
     #[schemars(description = "Complete service definition YAML content")]
     yaml: String,
@@ -89,7 +96,7 @@ struct UpsertServiceParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReadContainerFileParams {
-    #[schemars(description = "Service name (e.g. 'sandbox', 'apps')")]
+    #[schemars(description = "Service name (e.g. 'paseo', 'apps')")]
     service: String,
     #[schemars(
         description = "Absolute path to file inside container, e.g. '/etc/hosts' or '/tmp/opencode.log'"
@@ -125,7 +132,9 @@ struct AddAppParams {
     directory: String,
     #[schemars(description = "Optional environment variables for the process")]
     env: Option<HashMap<String, String>>,
-    #[schemars(description = "If true, Caddy and Nginx will send Cache-Control: no-store and related headers to prevent client caching")]
+    #[schemars(
+        description = "If true, Caddy and Nginx will send Cache-Control: no-store and related headers to prevent client caching"
+    )]
     no_cache: Option<bool>,
     /// 'runtime' (default): orchestrator-managed process via s6 bundle.
     /// 'build': image-baked app — registers routing only, no process management.
@@ -149,7 +158,7 @@ struct RestartAppParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CoderyExecParams {
     #[schemars(
-        description = "Arguments to pass to `codery-ci` (e.g. [\"build\", \"sandbox\", \"host-xyz\"]). \
+        description = "Arguments to pass to `codery-ci` (e.g. [\"build\", \"paseo\", \"host-xyz\"]). \
                        First element must be one of: build, validate, deploy-preview, cancel-preview. \
                        Cutover and deploy are NOT exposed via MCP — run those on the host shell."
     )]
@@ -177,13 +186,13 @@ async fn shell_output(program: &str, args: &[&str]) -> Result<String, String> {
         .args(args)
         .output()
         .await
-        .map_err(|e| format!("failed to spawn '{}': {}", program, e))?;
+        .map_err(|e| format!("failed to spawn '{program}': {e}"))?;
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     let combined = match (stdout.is_empty(), stderr.is_empty()) {
-        (false, false) => format!("{}\n[stderr]\n{}", stdout, stderr),
+        (false, false) => format!("{stdout}\n[stderr]\n{stderr}"),
         (false, true) => stdout.to_string(),
         (true, false) => stderr.to_string(),
         (true, true) => String::new(),
@@ -192,9 +201,9 @@ async fn shell_output(program: &str, args: &[&str]) -> Result<String, String> {
     if !out.status.success() {
         let code = out.status.code().unwrap_or(-1);
         return Ok(if combined.is_empty() {
-            format!("[exited {}]", code)
+            format!("[exited {code}]")
         } else {
-            format!("[exited {}]\n{}", code, combined)
+            format!("[exited {code}]\n{combined}")
         });
     }
 
@@ -204,7 +213,7 @@ async fn shell_output(program: &str, args: &[&str]) -> Result<String, String> {
 /// Run a command inside the active container for a service via `docker exec`.
 async fn container_exec(service: &str, cmd: &[&str]) -> Result<String, String> {
     let color = state::read_active(service).map_err(|e| e.to_string())?;
-    let container = config::container_name(service, &color);
+    let container = config::container_name(service, color);
     let mut args = vec!["exec", container.as_str()];
     args.extend_from_slice(cmd);
     shell_output("docker", &args).await
@@ -213,13 +222,20 @@ async fn container_exec(service: &str, cmd: &[&str]) -> Result<String, String> {
 /// Read per-service status from an s6-based container. Err if the container
 /// isn't s6-based (no /command/s6-svstat or /run/service).
 async fn svc_stats(service: &str) -> Result<Vec<crate::s6::SvcStat>, String> {
-    let out = container_exec(service, &["bash", "-c", crate::s6::SVSTAT_BATCH_CMD]).await?;
+    let out = container_exec(
+        service,
+        &["bash", "-c", crate::s6::svstat_batch_cmd().as_str()],
+    )
+    .await?;
     if out.starts_with("[exited") {
-        return Err(format!("s6 status read failed: {}", out));
+        return Err(format!("s6 status read failed: {out}"));
     }
     Ok(crate::s6::parse_svstat_batch(&out))
 }
 
+// Kept Result-returning so every MCP handler body has the same shape
+// (`tool_ok(..)` / `Err(tool_err(..))`) regardless of fallibility.
+#[allow(clippy::unnecessary_wraps)]
 fn tool_ok(s: impl Into<String>) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![Content::text(s.into())]))
 }
@@ -240,7 +256,7 @@ impl OrchestratorMcp {
     async fn get_status(&self) -> Result<CallToolResult, McpError> {
         let defs = ServiceDef::load_all().map_err(|e| tool_err(e.to_string()))?;
         let docker = bollard::Docker::connect_with_socket_defaults()
-            .map_err(|e| tool_err(format!("failed to connect to Docker: {}", e)))?;
+            .map_err(|e| tool_err(format!("failed to connect to Docker: {e}")))?;
 
         let is_running = |info: Option<bollard::models::ContainerInspectResponse>| -> bool {
             info.and_then(|i| i.state)
@@ -250,27 +266,26 @@ impl OrchestratorMcp {
 
         let mut statuses = Vec::new();
         for def in &defs {
-            let blue = config::container_name(&def.service, "blue");
-            let green = config::container_name(&def.service, "green");
+            let blue = config::container_name(&def.service, Color::Blue);
+            let green = config::container_name(&def.service, Color::Green);
             let blue_running = is_running(docker.inspect_container(&blue, None).await.ok());
             let green_running = is_running(docker.inspect_container(&green, None).await.ok());
 
             let color = if blue_running && !green_running {
-                "blue".to_string()
+                Color::Blue
             } else if green_running && !blue_running {
-                "green".to_string()
+                Color::Green
             } else {
-                state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string())
+                state::read_active(&def.service).unwrap_or(Color::Blue)
             };
             let running = blue_running || green_running;
-            let state_file_color =
-                state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string());
+            let state_file_color = state::read_active(&def.service).unwrap_or(Color::Blue);
 
             statuses.push(ServiceStatus {
-                container: config::container_name(&def.service, &color),
+                container: config::container_name(&def.service, color),
                 active_sha: state::read_active_sha(&def.service),
-                active_color: color,
-                state_file_color,
+                active_color: color.as_str().to_string(),
+                state_file_color: state_file_color.as_str().to_string(),
                 service: def.service.clone(),
                 running,
             });
@@ -301,7 +316,7 @@ impl OrchestratorMcp {
 
         let mut services_map = HashMap::new();
         for def in &defs {
-            let color = state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string());
+            let color = state::read_active(&def.service).unwrap_or(Color::Blue);
             services_map.insert(def.service.clone(), color);
         }
 
@@ -315,44 +330,54 @@ impl OrchestratorMcp {
             .map(|s| crate::diagnose::parse_listening_ports(&s))
             .unwrap_or_default();
 
-        let route_entries: Vec<RouteEntry> = unified.iter().map(|r| {
-            let fqdn = if r.subdomain.contains('.') {
-                r.subdomain.clone()
-            } else {
-                format!("{}.{}", r.subdomain, domain)
-            };
-            let color = services_map.get(&r.target).map(|s| s.as_str());
-            let host_port = match r.target.as_str() {
-                "host" => r.port,
-                "sandbox" => {
-                    let c = color.unwrap_or("blue");
-                    r.port + if c == "blue" { 10000 } else { 20000 }
-                }
-                _ => {
-                    let c = color.unwrap_or("blue");
-                    let def = ServiceDef::load(&r.target).ok();
-                    if let Some(def) = def {
-                        def.port_scheme.host_port(c, r.port)
-                    } else {
+        let route_entries: Vec<RouteEntry> = unified
+            .iter()
+            .map(|r| {
+                let fqdn = if r.subdomain.contains('.') {
+                    r.subdomain.clone()
+                } else {
+                    format!("{}.{}", r.subdomain, domain)
+                };
+                let color = services_map.get(&r.target).copied();
+                let host_port = match r.target.as_str() {
+                    "host" => r.port,
+                    "paseo" => {
+                        let c = color.unwrap_or(Color::Blue);
                         r.port
+                            + match c {
+                                Color::Blue => 10000,
+                                Color::Green => 20000,
+                            }
                     }
+                    _ => {
+                        let def = ServiceDef::load(&r.target).ok();
+                        if let Some(def) = def {
+                            def.port_scheme
+                                .host_port(color.unwrap_or(Color::Blue), r.port)
+                        } else {
+                            r.port
+                        }
+                    }
+                };
+                RouteEntry {
+                    subdomain: fqdn,
+                    host_port,
+                    container_port: Some(r.port),
+                    internal_port: r.internal_port,
+                    service: r.target.clone(),
+                    color: color.map(|c| c.as_str().to_string()),
+                    note: None,
+                    healthy: listening_ports.contains(&host_port),
                 }
-            };
-            RouteEntry {
-                subdomain: fqdn,
-                host_port,
-                container_port: Some(r.port),
-                internal_port: r.internal_port,
-                service: r.target.clone(),
-                color: color.map(|s| s.to_string()),
-                note: None,
-                healthy: listening_ports.contains(&host_port),
-            }
-        }).collect();
+            })
+            .collect();
 
         let unhealthy_count = route_entries.iter().filter(|r| !r.healthy).count();
         let table = RoutingTable {
-            services: services_map,
+            services: services_map
+                .into_iter()
+                .map(|(k, v)| (k, v.as_str().to_string()))
+                .collect(),
             routes: route_entries,
         };
         let response = json!({
@@ -360,7 +385,7 @@ impl OrchestratorMcp {
             "guidance": {
                 "routing_model": "Traffic: Internet → Tailscale → Caddy → Nginx (8080) → app (internal_port)",
                 "apps_ports": "For apps: container_port is always 8080 (Nginx). internal_port is where app listens.",
-                "sandbox_ports": "For sandbox: container_port is the actual service port (e.g. 3000).",
+                "named_ports": "For named-port services (paseo): container_port is the actual service port (e.g. 6767).",
                 "to_add_route": "Use add_app for instant routing, or edit devcontainer.json for permanent.",
                 "healthy_field": "Each route has `healthy: bool` based on whether host_port has a TCP listener.",
                 "if_unhealthy": format!("{} route(s) have no listener. Run `diagnose` for fix commands.", unhealthy_count)
@@ -372,7 +397,7 @@ impl OrchestratorMcp {
 
     /// List locally available Docker images for a service. Useful before rollback.
     #[tool(
-        description = "List locally cached Docker images for a service (e.g. 'sandbox', 'apps'), newest first"
+        description = "List locally cached Docker images for a service (e.g. 'paseo', 'apps'), newest first"
     )]
     async fn list_images(
         &self,
@@ -380,8 +405,7 @@ impl OrchestratorMcp {
     ) -> Result<CallToolResult, McpError> {
         if ServiceDef::load(&service).is_err() {
             return Err(tool_err(format!(
-                "unknown service '{}' — no service definition found",
-                service
+                "unknown service '{service}' — no service definition found"
             )));
         }
         let imgs = images::list_local(&service)
@@ -416,8 +440,7 @@ impl OrchestratorMcp {
     ) -> Result<CallToolResult, McpError> {
         if ServiceDef::load(&service).is_err() {
             return Err(tool_err(format!(
-                "unknown service '{}' — no service definition found",
-                service
+                "unknown service '{service}' — no service definition found"
             )));
         }
 
@@ -478,7 +501,7 @@ impl OrchestratorMcp {
     ) -> Result<CallToolResult, McpError> {
         let info = deploy::recreate_active_container(&service)
             .await
-            .map_err(|e| tool_err(format!("recreate failed for '{}': {:#}", service, e)))?;
+            .map_err(|e| tool_err(format!("recreate failed for '{service}': {e:#}")))?;
 
         let response = json!({
             "service": info.service,
@@ -507,31 +530,25 @@ impl OrchestratorMcp {
     ) -> Result<CallToolResult, McpError> {
         if ServiceDef::load(&service).is_err() {
             return Err(tool_err(format!(
-                "unknown service '{}' — no service definition found",
-                service
+                "unknown service '{service}' — no service definition found"
             )));
         }
 
-        let color = state::read_active(&service).unwrap_or_else(|_| "blue".to_string());
-        let container = config::container_name(&service, &color);
+        let color = state::read_active(&service).unwrap_or(Color::Blue);
+        let container = config::container_name(&service, color);
 
         let docker = bollard::Docker::connect_with_socket_defaults()
-            .map_err(|e| tool_err(format!("failed to connect to Docker: {}", e)))?;
+            .map_err(|e| tool_err(format!("failed to connect to Docker: {e}")))?;
 
         let info = docker
             .inspect_container(&container, None)
             .await
-            .map_err(|e| {
-                tool_err(format!(
-                    "failed to inspect container '{}': {}",
-                    container, e
-                ))
-            })?;
+            .map_err(|e| tool_err(format!("failed to inspect container '{container}': {e}")))?;
 
         let state = info.state.as_ref();
         let status = state
             .and_then(|s| s.status.as_ref())
-            .map(|s| format!("{:?}", s));
+            .map(|s| format!("{s:?}"));
         let running = state.and_then(|s| s.running).unwrap_or(false);
         let restart_count = info.restart_count.unwrap_or(0);
         let exit_code = state.and_then(|s| s.exit_code).unwrap_or(0);
@@ -548,8 +565,6 @@ impl OrchestratorMcp {
             .unwrap_or("")
             .to_string();
 
-        use bollard::container::LogsOptions;
-        use futures_util::StreamExt;
         let log_opts = LogsOptions::<String> {
             stdout: true,
             stderr: true,
@@ -565,10 +580,8 @@ impl OrchestratorMcp {
                     let line = match output {
                         LogOutput::StdOut { message }
                         | LogOutput::StdErr { message }
-                        | LogOutput::Console { message } => {
-                            String::from_utf8_lossy(&message).trim_end().to_string()
-                        }
-                        LogOutput::StdIn { message } => {
+                        | LogOutput::Console { message }
+                        | LogOutput::StdIn { message } => {
                             String::from_utf8_lossy(&message).trim_end().to_string()
                         }
                     };
@@ -612,7 +625,11 @@ impl OrchestratorMcp {
             .await
             .map_err(|e| tool_err(e.to_string()))?;
         let after = std::fs::read_to_string(config::CADDY_CONFIG).unwrap_or_default();
-        let status = if before == after { "unchanged" } else { "changed" };
+        let status = if before == after {
+            "unchanged"
+        } else {
+            "changed"
+        };
         let response = json!({
             "status": status,
             "guidance": {
@@ -675,14 +692,14 @@ impl OrchestratorMcp {
             return tool_ok(json);
         }
         let mut names: Vec<String> = std::fs::read_dir(dir)
-            .map_err(|e| tool_err(format!("failed to read services dir: {}", e)))?
-            .filter_map(|e| e.ok())
+            .map_err(|e| tool_err(format!("failed to read services dir: {e}")))?
+            .filter_map(std::result::Result::ok)
             .filter_map(|e| {
                 let p = e.path();
                 if p.extension().and_then(|x| x.to_str()) == Some("yml") {
                     p.file_stem()
                         .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
+                        .map(std::string::ToString::to_string)
                 } else {
                     None
                 }
@@ -702,13 +719,13 @@ impl OrchestratorMcp {
     ) -> Result<CallToolResult, McpError> {
         let path = service_path(&name).map_err(tool_err)?;
         let content = std::fs::read_to_string(&path)
-            .map_err(|_| tool_err(format!("service '{}' not found at {:?}", name, path)))?;
-        tool_ok(format!("{}\n\n---\nGuidance: Edit with upsert_service, then reload_routes to apply routing changes.", content))
+            .map_err(|_| tool_err(format!("service '{name}' not found at {}", path.display())))?;
+        tool_ok(format!("{content}\n\n---\nGuidance: Edit with upsert_service, then reload_routes to apply routing changes."))
     }
 
     /// Create or replace a service definition YAML.
     ///
-    /// Validates the YAML against the ServiceDef schema before writing.
+    /// Validates the YAML against the `ServiceDef` schema before writing.
     /// The `service` field inside the YAML must match the `name` parameter.
     /// Call `reload_routes` afterward to make any routing changes take effect.
     /// A full container deploy is still required for port, volume, or image changes.
@@ -723,7 +740,7 @@ impl OrchestratorMcp {
         validate_service_name(&name).map_err(tool_err)?;
 
         let def: crate::service_def::ServiceDef = serde_yaml::from_str(&yaml)
-            .map_err(|e| tool_err(format!("invalid service YAML: {}", e)))?;
+            .map_err(|e| tool_err(format!("invalid service YAML: {e}")))?;
 
         if def.service != name {
             return Err(tool_err(format!(
@@ -738,14 +755,19 @@ impl OrchestratorMcp {
         let path = service_path(&name).map_err(tool_err)?;
         let tmp = path.with_extension("yml.tmp");
         std::fs::write(&tmp, &yaml)
-            .map_err(|e| tool_err(format!("failed to write {:?}: {}", tmp, e)))?;
-        std::fs::rename(&tmp, &path)
-            .map_err(|e| tool_err(format!("failed to rename {:?} to {:?}: {}", tmp, path, e)))?;
+            .map_err(|e| tool_err(format!("failed to write {}: {e}", tmp.display())))?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            tool_err(format!(
+                "failed to rename {} to {}: {e}",
+                tmp.display(),
+                path.display()
+            ))
+        })?;
 
         tool_ok(format!(
             "service '{}' written to {:?} ({} bytes)",
             name,
-            path,
+            path.display(),
             yaml.len()
         ))
     }
@@ -753,7 +775,7 @@ impl OrchestratorMcp {
     /// Delete a service definition from disk.
     ///
     /// Does NOT stop running containers — you must stop them manually before or
-    /// after deletion. Run reload_routes afterward to remove the service's routes
+    /// after deletion. Run `reload_routes` afterward to remove the service's routes
     /// from the Caddyfile.
     #[tool(
         description = "Delete a service definition YAML from /opt/codery/services/. \
@@ -767,18 +789,18 @@ impl OrchestratorMcp {
         let path = service_path(&name).map_err(tool_err)?;
         if !path.exists() {
             return Err(tool_err(format!(
-                "service '{}' not found at {:?}",
-                name, path
+                "service '{name}' not found at {}",
+                path.display()
             )));
         }
         std::fs::remove_file(&path)
-            .map_err(|e| tool_err(format!("failed to delete {:?}: {}", path, e)))?;
-        tool_ok(format!("service '{}' deleted from {:?}", name, path))
+            .map_err(|e| tool_err(format!("failed to delete {}: {e}", path.display())))?;
+        tool_ok(format!("service '{name}' deleted from {}", path.display()))
     }
 
     /// Return the JSON Schema for the service definition YAML format.
     ///
-    /// Use this before calling upsert_service to understand which fields are
+    /// Use this before calling `upsert_service` to understand which fields are
     /// required, their types, and valid values. The schema is derived directly
     /// from the Rust structs that codery-ci uses to parse service YAMLs,
     /// so it is always accurate.
@@ -807,22 +829,18 @@ impl OrchestratorMcp {
     ) -> Result<CallToolResult, McpError> {
         if ServiceDef::load(&service).is_err() {
             return Err(tool_err(format!(
-                "unknown service '{}' — no service definition found",
-                service
+                "unknown service '{service}' — no service definition found"
             )));
         }
         if !path.starts_with('/') {
-            return Err(tool_err(format!("path must be absolute, got: {}", path)));
+            return Err(tool_err(format!("path must be absolute, got: {path}")));
         }
 
-        let color = state::read_active(&service).unwrap_or_else(|_| "blue".to_string());
-        let container = config::container_name(&service, &color);
+        let color = state::read_active(&service).unwrap_or(Color::Blue);
+        let container = config::container_name(&service, color);
 
         let docker = bollard::Docker::connect_with_socket_defaults()
-            .map_err(|e| tool_err(format!("failed to connect to Docker: {}", e)))?;
-
-        use bollard::container::DownloadFromContainerOptions;
-        use futures_util::StreamExt;
+            .map_err(|e| tool_err(format!("failed to connect to Docker: {e}")))?;
 
         let mut stream = docker.download_from_container(
             &container,
@@ -837,8 +855,7 @@ impl OrchestratorMcp {
                 Ok(bytes) => tar_bytes.extend_from_slice(&bytes),
                 Err(e) => {
                     return Err(tool_err(format!(
-                        "error reading from container '{}': {}",
-                        container, e
+                        "error reading from container '{container}': {e}"
                     )))
                 }
             }
@@ -846,8 +863,7 @@ impl OrchestratorMcp {
 
         if tar_bytes.is_empty() {
             return Err(tool_err(format!(
-                "no data returned for '{}' in container '{}'",
-                path, container
+                "no data returned for '{path}' in container '{container}'"
             )));
         }
 
@@ -855,19 +871,18 @@ impl OrchestratorMcp {
         let mut content = String::new();
         if let Some(entry) = archive
             .entries()
-            .map_err(|e| tool_err(format!("failed to read tar: {}", e)))?
+            .map_err(|e| tool_err(format!("failed to read tar: {e}")))?
             .next()
         {
             let mut entry =
-                entry.map_err(|e| tool_err(format!("failed to read tar entry: {}", e)))?;
-            use std::io::Read;
+                entry.map_err(|e| tool_err(format!("failed to read tar entry: {e}")))?;
             entry
                 .read_to_string(&mut content)
-                .map_err(|e| tool_err(format!("failed to read file content: {}", e)))?;
+                .map_err(|e| tool_err(format!("failed to read file content: {e}")))?;
         }
 
         if content.is_empty() {
-            return tool_ok(format!("(empty file: {})", path));
+            return tool_ok(format!("(empty file: {path})"));
         }
 
         let result = serde_json::json!({
@@ -890,31 +905,28 @@ impl OrchestratorMcp {
         &self,
         Parameters(ServiceParam { service }): Parameters<ServiceParam>,
     ) -> Result<CallToolResult, McpError> {
-        match svc_stats(&service).await {
-            Ok(stats) => {
-                let response = serde_json::json!({
-                    "service": service,
-                    "supervisor": "s6-overlay",
-                    "services": stats,
-                });
-                let json =
-                    serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
-                tool_ok(json)
-            }
-            Err(_) => {
-                // Not an s6 container (e.g. playwright).
-                let output = container_exec(&service, &["supervisorctl", "status"])
-                    .await
-                    .map_err(|e| tool_err(format!("failed to get supervisor status: {}", e)))?;
-                let response = serde_json::json!({
-                    "service": service,
-                    "supervisor": "supervisord-or-none",
-                    "raw": output,
-                });
-                let json =
-                    serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
-                tool_ok(json)
-            }
+        if let Ok(stats) = svc_stats(&service).await {
+            let response = serde_json::json!({
+                "service": service,
+                "supervisor": "s6-overlay",
+                "services": stats,
+            });
+            let json =
+                serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
+            tool_ok(json)
+        } else {
+            // Not an s6 container (e.g. playwright).
+            let output = container_exec(&service, &["supervisorctl", "status"])
+                .await
+                .map_err(|e| tool_err(format!("failed to get supervisor status: {e}")))?;
+            let response = serde_json::json!({
+                "service": service,
+                "supervisor": "supervisord-or-none",
+                "raw": output,
+            });
+            let json =
+                serde_json::to_string_pretty(&response).map_err(|e| tool_err(e.to_string()))?;
+            tool_ok(json)
         }
     }
 
@@ -928,14 +940,13 @@ impl OrchestratorMcp {
         &self,
         Parameters(ServiceParam { service }): Parameters<ServiceParam>,
     ) -> Result<CallToolResult, McpError> {
-        let color = state::read_active(&service).unwrap_or_else(|_| "blue".to_string());
-        let container = config::container_name(&service, &color);
+        let color = state::read_active(&service).unwrap_or(Color::Blue);
+        let container = config::container_name(&service, color);
         let output = shell_output("docker", &["port", &container])
             .await
-            .map_err(|e| tool_err(e))?;
+            .map_err(tool_err)?;
         tool_ok(format!(
-            "{}\n\n---\nGuidance: These are the Docker port mappings from host to container.",
-            output
+            "{output}\n\n---\nGuidance: These are the Docker port mappings from host to container."
         ))
     }
 
@@ -948,8 +959,8 @@ impl OrchestratorMcp {
     )]
     async fn get_caddyfile(&self) -> Result<CallToolResult, McpError> {
         let content = std::fs::read_to_string(config::CADDY_CONFIG)
-            .map_err(|e| tool_err(format!("failed to read Caddyfile: {}", e)))?;
-        tool_ok(format!("{}\n\n---\nGuidance: Live Caddyfile as Caddy sees it. Regenerated by reload_routes or deploys.", content))
+            .map_err(|e| tool_err(format!("failed to read Caddyfile: {e}")))?;
+        tool_ok(format!("{content}\n\n---\nGuidance: Live Caddyfile as Caddy sees it. Regenerated by reload_routes or deploys."))
     }
 
     /// Check whether a TCP port is actively listening on the host.
@@ -963,10 +974,8 @@ impl OrchestratorMcp {
         &self,
         Parameters(PortParam { port }): Parameters<PortParam>,
     ) -> Result<CallToolResult, McpError> {
-        let raw = shell_output("ss", &["-tlnp"])
-            .await
-            .map_err(|e| tool_err(e))?;
-        let port_str = format!(":{}", port);
+        let raw = shell_output("ss", &["-tlnp"]).await.map_err(tool_err)?;
+        let port_str = format!(":{port}");
         let mut lines: Vec<&str> = raw
             .lines()
             .enumerate()
@@ -980,7 +989,7 @@ impl OrchestratorMcp {
     }
 
     /// Run `supervisorctl status` on the HOST supervisor (not inside a container).
-    /// The host supervisor manages Caddy, Tailscale, and the CoderyCI MCP server.
+    /// The host supervisor manages Caddy, Tailscale, and the `CoderyCI` MCP server.
     #[tool(
         description = "Run 'supervisorctl status' on the HOST supervisor (not inside a container). \
                         Shows state of caddy, tailscale, and codery-ci on the VPS itself."
@@ -988,10 +997,9 @@ impl OrchestratorMcp {
     async fn get_host_supervisor_status(&self) -> Result<CallToolResult, McpError> {
         let output = shell_output("supervisorctl", &["-c", config::SUPERVISORD_CONF, "status"])
             .await
-            .map_err(|e| tool_err(e))?;
+            .map_err(tool_err)?;
         tool_ok(format!(
-            "{}\n\n---\nGuidance: Host supervisor manages caddy, tailscale, and codery-ci-mcp.",
-            output
+            "{output}\n\n---\nGuidance: Host supervisor manages caddy, tailscale, and codery-ci-mcp."
         ))
     }
 
@@ -1004,8 +1012,8 @@ impl OrchestratorMcp {
     async fn get_tailscale_status(&self) -> Result<CallToolResult, McpError> {
         let output = shell_output("tailscale", &["status"])
             .await
-            .map_err(|e| tool_err(e))?;
-        tool_ok(format!("{}\n\n---\nGuidance: All traffic enters through Tailscale VPN. If peers show no connection, check tailscale-up.sh.", output))
+            .map_err(tool_err)?;
+        tool_ok(format!("{output}\n\n---\nGuidance: All traffic enters through Tailscale VPN. If peers show no connection, check tailscale-up.sh."))
     }
 
     /// Report disk usage for /opt/codery and /var/lib/docker.
@@ -1015,8 +1023,8 @@ impl OrchestratorMcp {
     async fn get_disk_usage(&self) -> Result<CallToolResult, McpError> {
         let output = shell_output("df", &["-h", "/opt/codery", "/var/lib/docker"])
             .await
-            .map_err(|e| tool_err(e))?;
-        tool_ok(format!("{}\n\n---\nGuidance: Full disk causes silent deploy failures. If >90%, prune old images or docker system prune.", output))
+            .map_err(tool_err)?;
+        tool_ok(format!("{output}\n\n---\nGuidance: Full disk causes silent deploy failures. If >90%, prune old images or docker system prune."))
     }
 
     /// List all Docker containers on the host, running and stopped.
@@ -1036,8 +1044,8 @@ impl OrchestratorMcp {
             ],
         )
         .await
-        .map_err(|e| tool_err(e))?;
-        tool_ok(format!("{}\n\n---\nGuidance: Shows all containers including stopped ones from previous deploys.", output))
+        .map_err(tool_err)?;
+        tool_ok(format!("{output}\n\n---\nGuidance: Shows all containers including stopped ones from previous deploys."))
     }
 
     /// Register a new app in the apps container without rebuilding the image.
@@ -1061,7 +1069,7 @@ impl OrchestratorMcp {
 
         let check = container_exec("apps", &["test", "-d", &p.directory])
             .await
-            .map_err(|e| tool_err(format!("failed to check directory: {}", e)))?;
+            .map_err(|e| tool_err(format!("failed to check directory: {e}")))?;
         if check.starts_with("[exited") {
             return Err(tool_err(format!(
                 "directory '{}' does not exist in apps container",
@@ -1079,15 +1087,19 @@ impl OrchestratorMcp {
             )));
         }
 
-        if db::find_app_by_name(&conn, &p.name).map_err(|e| tool_err(e.to_string()))?.is_some() {
-            return Err(tool_err(format!(
-                "app '{}' already exists",
-                p.name
-            )));
+        if db::find_app_by_name(&conn, &p.name)
+            .map_err(|e| tool_err(e.to_string()))?
+            .is_some()
+        {
+            return Err(tool_err(format!("app '{}' already exists", p.name)));
         }
 
         let env_json = p.env.as_ref().and_then(|e| {
-            if e.is_empty() { None } else { Some(serde_json::to_string(e).unwrap()) }
+            if e.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(e).expect("error value serializes"))
+            }
         });
 
         let record = db::AppRecord {
@@ -1108,8 +1120,7 @@ impl OrchestratorMcp {
         let source = p.source.clone().unwrap_or_else(|| "runtime".to_string());
         if source != "runtime" && source != "build" {
             return Err(tool_err(format!(
-                "invalid source '{}' — must be 'runtime' or 'build'",
-                source
+                "invalid source '{source}' — must be 'runtime' or 'build'"
             )));
         }
 
@@ -1122,7 +1133,7 @@ impl OrchestratorMcp {
             let bundle = format!("/etc/s6-overlay/apps.d/{}", p.name);
             container_exec("apps", &["/command/s6-svlink", "/run/service", &bundle])
                 .await
-                .map_err(|e| tool_err(format!("failed to link s6 service: {}", e)))?;
+                .map_err(|e| tool_err(format!("failed to link s6 service: {e}")))?;
 
             // Wait until the service reports up (s6-svstat -o up => "true").
             let svc = format!("/run/service/{}", p.name);
@@ -1150,10 +1161,10 @@ impl OrchestratorMcp {
 
         // Register routes (Caddy + Nginx) — unchanged from before.
         if let Err(e) = caddy::apply_all() {
-            return Err(tool_err(format!("app added but Caddy reload failed: {}", e)));
+            return Err(tool_err(format!("app added but Caddy reload failed: {e}")));
         }
         if let Err(e) = nginx::generate_and_reload().await {
-            return Err(tool_err(format!("app added but Nginx reload failed: {}", e)));
+            return Err(tool_err(format!("app added but Nginx reload failed: {e}")));
         }
 
         let response = json!({
@@ -1176,7 +1187,7 @@ impl OrchestratorMcp {
         tool_ok(json)
     }
 
-    /// Remove an app added via add_app. Downs the service via s6-svunlink,
+    /// Remove an app added via `add_app`. Downs the service via s6-svunlink,
     /// removes the route, and reloads Nginx and Caddy.
     #[tool(
         description = "Remove an app from the apps container: stop process, delete s6 bundle \
@@ -1210,8 +1221,10 @@ impl OrchestratorMcp {
         // Unlink first while the bundle still exists. s6-svunlink downs the
         // service and waits for the supervisor to exit; warn-and-continue so
         // removal is idempotent even if the service was never linked.
-        if let Err(e) = container_exec("apps", &["/command/s6-svunlink", "/run/service", &p.name]).await {
-            eprintln!("[remove_app] s6-svunlink warning (continuing): {}", e);
+        if let Err(e) =
+            container_exec("apps", &["/command/s6-svunlink", "/run/service", &p.name]).await
+        {
+            eprintln!("[remove_app] s6-svunlink warning (continuing): {e}");
         }
 
         db::delete_app(&conn, &p.name).map_err(|e| tool_err(e.to_string()))?;
@@ -1219,10 +1232,14 @@ impl OrchestratorMcp {
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         if let Err(e) = caddy::apply_all() {
-            return Err(tool_err(format!("app removed but Caddy reload failed: {}", e)));
+            return Err(tool_err(format!(
+                "app removed but Caddy reload failed: {e}"
+            )));
         }
         if let Err(e) = nginx::generate_and_reload().await {
-            return Err(tool_err(format!("app removed but Nginx reload failed: {}", e)));
+            return Err(tool_err(format!(
+                "app removed but Nginx reload failed: {e}"
+            )));
         }
 
         let response = json!({
@@ -1272,7 +1289,7 @@ impl OrchestratorMcp {
         // SIGTERM; s6-supervise respawns automatically (restart=always bundles).
         container_exec("apps", &["/command/s6-svc", "-t", &svc])
             .await
-            .map_err(|e| tool_err(format!("failed to signal service: {}", e)))?;
+            .map_err(|e| tool_err(format!("failed to signal service: {e}")))?;
 
         for attempt in 1..=10u32 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1338,7 +1355,7 @@ impl OrchestratorMcp {
 
         let stats = svc_stats("apps")
             .await
-            .map_err(|e| tool_err(format!("failed to read s6 service status: {}", e)))?;
+            .map_err(|e| tool_err(format!("failed to read s6 service status: {e}")))?;
 
         let services: Vec<_> = stats
             .iter()
@@ -1349,7 +1366,7 @@ impl OrchestratorMcp {
                     "pid": st.pid,
                     "status": if st.up { "running" } else { "down" },
                     "uptime_secs": st.uptime_secs,
-                    "source": rec.map(|a| a.source.as_str()).unwrap_or("build"),
+                    "source": rec.map_or("build", |a| a.source.as_str()),
                     "subdomain": rec.map(|a| a.subdomain.as_str()),
                     "internal_port": rec.map(|a| a.internal_port),
                 })
@@ -1369,13 +1386,11 @@ impl OrchestratorMcp {
         tool_ok(json)
     }
 
-    /// Report whether the codery_exec MCP tool is currently enabled.
+    /// Report whether the `codery_exec` MCP tool is currently enabled.
     /// Safe to call regardless of toggle state — pure read-only check.
-    #[tool(
-        description = "Check whether codery_exec is enabled. \
+    #[tool(description = "Check whether codery_exec is enabled. \
                           Returns {enabled: bool, allowed_subcommands: [...]}. \
-                          Toggle by running `codery-ci mcp-exec enable|disable` on the host."
-    )]
+                          Toggle by running `codery-ci mcp-exec enable|disable` on the host.")]
     async fn mcp_exec_enabled(&self) -> Result<CallToolResult, McpError> {
         let enabled = mcp_exec::toggle_enabled();
         let response = json!({
@@ -1394,7 +1409,7 @@ impl OrchestratorMcp {
     }
 
     /// Spawn a build-only codery-ci subcommand as a background job. Returns a
-    /// job_id immediately — poll with codery_exec_status for output.
+    /// `job_id` immediately — poll with `codery_exec_status` for output.
     #[tool(
         description = "Spawn a codery-ci subcommand as a background job (async). \
                           Returns job_id + log_path immediately; poll codery_exec_status for output. \
@@ -1403,20 +1418,15 @@ impl OrchestratorMcp {
     )]
     async fn codery_exec(
         &self,
-        Parameters(CoderyExecParams {
-            args,
-            timeout_secs,
-        }): Parameters<CoderyExecParams>,
+        Parameters(CoderyExecParams { args, timeout_secs }): Parameters<CoderyExecParams>,
     ) -> Result<CallToolResult, McpError> {
         let timeout = timeout_secs.unwrap_or(1800);
-        let resp = mcp_exec::spawn(args, timeout)
-            .await
-            .map_err(tool_err)?;
+        let resp = mcp_exec::spawn(args, timeout).await.map_err(tool_err)?;
         let json = serde_json::to_string_pretty(&resp).map_err(|e| tool_err(e.to_string()))?;
         tool_ok(json)
     }
 
-    /// Poll a previously-spawned codery_exec job. Returns status, exit code,
+    /// Poll a previously-spawned `codery_exec` job. Returns status, exit code,
     /// elapsed time, log path, and the tail of the log output.
     #[tool(
         description = "Poll a codery_exec job by ID. Returns status (running|done|failed|timeout), \
@@ -1425,12 +1435,12 @@ impl OrchestratorMcp {
     )]
     async fn codery_exec_status(
         &self,
-        Parameters(CoderyExecStatusParams { job_id, tail_bytes }): Parameters<CoderyExecStatusParams>,
+        Parameters(CoderyExecStatusParams { job_id, tail_bytes }): Parameters<
+            CoderyExecStatusParams,
+        >,
     ) -> Result<CallToolResult, McpError> {
         let tail = tail_bytes.unwrap_or(65536);
-        let resp = mcp_exec::status(&job_id, tail)
-            .await
-            .map_err(tool_err)?;
+        let resp = mcp_exec::status(&job_id, tail).await.map_err(tool_err)?;
         let json = serde_json::to_string_pretty(&resp).map_err(|e| tool_err(e.to_string()))?;
         tool_ok(json)
     }
@@ -1451,6 +1461,9 @@ fn run_check(name: &'static str, f: fn() -> anyhow::Result<()>) -> PreflightChec
     }
 }
 
+// rmcp's tool_handler macro generates the async-trait shape; whether each
+// handler awaits is up to the tool. The async signature is not ours to remove.
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler]
 impl ServerHandler for OrchestratorMcp {
     fn get_info(&self) -> ServerInfo {
@@ -1467,7 +1480,7 @@ CoderyCI MCP server — operational guide for agents.
 The Codery infrastructure has three layers:
 
 1. **Host layer** — Caddy (reverse proxy + TLS), Tailscale (VPN), supervisord
-2. **Sandbox container** — AI coding environment (OpenCode on port 3000)
+2. **Paseo container** — AI coding environment (OpenCode on port 3000)
 3. **Apps container** — Project web servers, supervised by s6-overlay (s6-rc bundles)
 
 ### Traffic flow for apps
@@ -1625,15 +1638,15 @@ To add a new container service:
 Build and preview a container image without leaving the agent session:
 
 1. `mcp_exec_enabled` → confirm the toggle is on
-2. `codery_exec args=["build", "sandbox", "mytag"]` → returns job_id immediately
+2. `codery_exec args=["build", "paseo", "mytag"]` → returns job_id immediately
 3. Poll `codery_exec_status job_id=...` every ~30s until status != running
 4. On failure, read `tail` from the status response, fix, rebuild
-5. `codery_exec args=["deploy-preview", "sandbox", "mytag"]` → verify at `sandbox-preview.{DOMAIN}`
-6. Ask the user to run `codery-ci cutover sandbox` on the host (never exposed via MCP)
+5. `codery_exec args=["deploy-preview", "paseo", "mytag"]` → verify at `paseo-preview.{DOMAIN}`
+6. Ask the user to run `codery-ci cutover paseo` on the host (never exposed via MCP)
 
 Note: `build` runs `docker build` on the host — full toolchain available there.
-The sandbox container itself has NO compiler/linker; never try to `cargo build`
-inside the sandbox.
+The paseo container itself has NO compiler/linker; never try to `cargo build`
+inside paseo.
 
 ## Port formula
 
@@ -1641,7 +1654,7 @@ inside the sandbox.
 
 | Service | Blue offset | Green offset |
 |---------|------------|-------------|
-| sandbox | 10000 | 20000 |
+| paseo | 10000 | 20000 |
 | apps | 0 | 10000 |
 
 ## When to use reload_routes vs full redeploy
@@ -1662,11 +1675,11 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
     };
     use tokio_util::sync::CancellationToken;
 
-    let addr: SocketAddr = format!("0.0.0.0:{}", port)
+    let addr: SocketAddr = format!("0.0.0.0:{port}")
         .parse()
         .context("invalid bind address")?;
 
-    println!("[mcp] Starting CoderyCI MCP server on {}", addr);
+    println!("[mcp] Starting CoderyCI MCP server on {addr}");
 
     let ct = CancellationToken::new();
 
@@ -1695,7 +1708,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .await
         .context("failed to bind TCP listener")?;
 
-    println!("[mcp] Listening — MCP endpoint: http://{}/sse", addr);
+    println!("[mcp] Listening — MCP endpoint: http://{addr}/sse");
 
     let ct_shutdown = ct.clone();
     axum::serve(listener, router)
@@ -1728,8 +1741,7 @@ fn validate_service_name(name: &str) -> Result<(), String> {
         .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
         return Err(format!(
-            "invalid service name '{}': use only letters, digits, hyphens, underscores",
-            name
+            "invalid service name '{name}': use only letters, digits, hyphens, underscores"
         ));
     }
     Ok(())
@@ -1738,7 +1750,7 @@ fn validate_service_name(name: &str) -> Result<(), String> {
 /// Build the full path to a service YAML file, validating the name first.
 fn service_path(name: &str) -> Result<std::path::PathBuf, String> {
     validate_service_name(name)?;
-    Ok(std::path::Path::new(config::SERVICES_DIR).join(format!("{}.yml", name)))
+    Ok(std::path::Path::new(config::SERVICES_DIR).join(format!("{name}.yml")))
 }
 
 #[cfg(test)]
@@ -1747,7 +1759,7 @@ mod tests {
 
     #[test]
     fn validate_name_accepts_valid_names() {
-        assert!(validate_service_name("sandbox").is_ok());
+        assert!(validate_service_name("paseo").is_ok());
         assert!(validate_service_name("my-service").is_ok());
         assert!(validate_service_name("apps_v2").is_ok());
         assert!(validate_service_name("Service123").is_ok());
@@ -1774,8 +1786,8 @@ mod tests {
 
     #[test]
     fn service_path_builds_correct_path() {
-        let p = service_path("sandbox").unwrap();
-        assert_eq!(p, std::path::Path::new("/opt/codery/services/sandbox.yml"));
+        let p = service_path("paseo").unwrap();
+        assert_eq!(p, std::path::Path::new("/opt/codery/services/paseo.yml"));
     }
 
     #[test]
@@ -1785,9 +1797,9 @@ mod tests {
 
     #[test]
     fn upsert_rejects_name_service_mismatch() {
-        let yaml = r#"
-service: sandbox
-image: ghcr.io/coderyoss/codery:sandbox-{sha}
+        let yaml = r"
+service: paseo
+image: ghcr.io/coderyoss/codery:paseo-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -1798,8 +1810,8 @@ health_check:
 volumes: []
 required_env: []
 network: codery-net
-"#;
-        let name = "apps"; // intentional mismatch: YAML says 'sandbox', name says 'apps'
+";
+        let name = "apps"; // intentional mismatch: YAML says 'paseo', name says 'apps'
         let def: crate::service_def::ServiceDef = serde_yaml::from_str(yaml).unwrap();
         assert_ne!(
             def.service, name,
@@ -1809,7 +1821,7 @@ network: codery-net
             "service field '{}' in YAML does not match name parameter '{}'",
             def.service, name
         );
-        assert!(err_msg.contains("sandbox"));
+        assert!(err_msg.contains("paseo"));
         assert!(err_msg.contains("apps"));
     }
 }

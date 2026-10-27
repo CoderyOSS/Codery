@@ -3,10 +3,10 @@ use anyhow::{anyhow, Context, Result};
 mod caddy;
 mod config;
 mod daemon;
-mod diagnose;
 mod db;
 mod deploy;
 mod deploy_lock;
+mod diagnose;
 mod host_metrics;
 mod images;
 mod mcp;
@@ -27,31 +27,54 @@ pub(crate) fn open_port_for_docker_bridges(port: u16) {
     let port_str = port.to_string();
     // -C checks if the rule exists; exit code 0 = exists, non-zero = absent.
     let already_open = std::process::Command::new("iptables")
-        .args(["-C", "INPUT", "-p", "tcp", "--dport", &port_str,
-               "-s", "172.16.0.0/12", "-j", "ACCEPT"])
+        .args([
+            "-C",
+            "INPUT",
+            "-p",
+            "tcp",
+            "--dport",
+            &port_str,
+            "-s",
+            "172.16.0.0/12",
+            "-j",
+            "ACCEPT",
+        ])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
 
-    if !already_open {
+    if already_open {
+        println!("[mcp] iptables ACCEPT rule already present for port {port}");
+    } else {
         let result = std::process::Command::new("iptables")
-            .args(["-I", "INPUT", "1", "-p", "tcp", "--dport", &port_str,
-                   "-s", "172.16.0.0/12", "-j", "ACCEPT"])
+            .args([
+                "-I",
+                "INPUT",
+                "1",
+                "-p",
+                "tcp",
+                "--dport",
+                &port_str,
+                "-s",
+                "172.16.0.0/12",
+                "-j",
+                "ACCEPT",
+            ])
             .output();
         match result {
-            Ok(o) if o.status.success() =>
-                println!("[mcp] Added iptables ACCEPT rule: Docker bridges → port {}", port),
-            Ok(o) =>
-                eprintln!("[mcp] iptables rule failed: {}", String::from_utf8_lossy(&o.stderr)),
-            Err(e) =>
-                eprintln!("[mcp] iptables not available: {}", e),
+            Ok(o) if o.status.success() => {
+                println!("[mcp] Added iptables ACCEPT rule: Docker bridges → port {port}");
+            }
+            Ok(o) => eprintln!(
+                "[mcp] iptables rule failed: {}",
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => eprintln!("[mcp] iptables not available: {e}"),
         }
-    } else {
-        println!("[mcp] iptables ACCEPT rule already present for port {}", port);
     }
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // CLI dispatch; splitting obscures the command table
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -59,7 +82,7 @@ async fn main() -> Result<()> {
     // discover usage without reading the flat usage string at the bottom.
     // e.g. `codery-ci cutover --help` prints focused cutover usage.
     if args.len() >= 3 {
-        let third = args.get(2).map(|s| s.as_str()).unwrap_or("");
+        let third = args.get(2).map_or("", std::string::String::as_str);
         if third == "--help" || third == "-h" {
             if let Some(sub) = args.get(1) {
                 print_subcommand_help(sub);
@@ -68,8 +91,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    match args.get(1).map(|s| s.as_str()) {
-        Some("--version") | Some("-V") => {
+    match args.get(1).map(std::string::String::as_str) {
+        Some("--version" | "-V") => {
             println!("codery-ci {}", env!("CARGO_PKG_VERSION"));
         }
         Some("preflight") => {
@@ -86,7 +109,7 @@ async fn main() -> Result<()> {
             let _lock = match deploy_lock::DeployLock::try_acquire(service) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("[deploy] ERROR ({}): {}", service, e);
+                    eprintln!("[deploy] ERROR ({service}): {e}");
                     std::process::exit(1);
                 }
             };
@@ -105,9 +128,9 @@ async fn main() -> Result<()> {
             let def = service_def::ServiceDef::load(service)?;
             let docker = bollard::Docker::connect_with_socket_defaults()?;
             let active = state::read_active(service)?;
-            let inactive = config::flip(&active);
+            let inactive = config::flip(active);
             validate::check_deploy(&def, sha, inactive, &docker).await?;
-            println!("[validate] Passed — safe to deploy {} @ {}", service, sha);
+            println!("[validate] Passed — safe to deploy {service} @ {sha}");
         }
         Some("reload-routes") => {
             let conn = db::open()?;
@@ -131,12 +154,9 @@ async fn main() -> Result<()> {
             db::init(&conn)?;
             if db::set_app_source(&conn, &name, &source)? {
                 db::sync_s6(&conn)?;
-                println!(
-                    "[db] app '{}' source set to '{}' (bundles re-rendered)",
-                    name, source
-                );
+                println!("[db] app '{name}' source set to '{source}' (bundles re-rendered)");
             } else {
-                eprintln!("app '{}' not found", name);
+                eprintln!("app '{name}' not found");
                 std::process::exit(1);
             }
         }
@@ -154,7 +174,7 @@ async fn main() -> Result<()> {
             let report = diagnose::run().await?;
             if as_json {
                 let json = serde_json::to_string_pretty(&report)?;
-                println!("{}", json);
+                println!("{json}");
             } else {
                 print!("{}", report.format_human());
             }
@@ -186,7 +206,8 @@ async fn main() -> Result<()> {
                 .and_then(|w| w[1].parse::<u16>().ok())
                 .unwrap_or(config::UI_PORT);
             let (events_tx, _) = tokio::sync::broadcast::channel::<String>(64);
-            let ops: ui::Ops = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let ops: ui::Ops =
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
             ui::serve(port, std::sync::Arc::new(events_tx), ops).await?;
         }
         Some("serve-tcp-proxy") => {
@@ -202,7 +223,7 @@ async fn main() -> Result<()> {
             // Run from the Codery repo root so the default dockerfile paths resolve.
             //
             // Default dockerfile lookup:
-            //   sandbox → examples/Dockerfile.sandbox
+            //   paseo → containers/paseo/Dockerfile
             //   apps    → containers/apps/Dockerfile
             //   <other> → containers/<service>/Dockerfile
             //
@@ -215,12 +236,15 @@ async fn main() -> Result<()> {
                 .get(3)
                 .ok_or_else(|| anyhow!("missing tag argument (e.g. host-XYZ or a sha)"))?;
 
-            let dockerfile = flag_value(&args, "--dockerfile").map(PathBuf::from).unwrap_or_else(|| {
-                default_dockerfile(service)
-                    .unwrap_or_else(|| PathBuf::from(format!("containers/{}/Dockerfile", service)))
-            });
-            let context = flag_value(&args, "--context")
-                .unwrap_or_else(|| ".".to_string());
+            let dockerfile = flag_value(&args, "--dockerfile").map_or_else(
+                || {
+                    default_dockerfile(service).unwrap_or_else(|| {
+                        PathBuf::from(format!("containers/{service}/Dockerfile"))
+                    })
+                },
+                PathBuf::from,
+            );
+            let context = flag_value(&args, "--context").unwrap_or_else(|| ".".to_string());
             let image = config::image_ref(service, tag);
 
             println!(
@@ -238,13 +262,22 @@ async fn main() -> Result<()> {
             }
 
             let status = std::process::Command::new("docker")
-                .args(["build", "-t", &image, "-f", &dockerfile.to_string_lossy(), &context])
+                .args([
+                    "build",
+                    "-t",
+                    &image,
+                    "-f",
+                    &dockerfile.to_string_lossy(),
+                    &context,
+                ])
                 .status()
                 .context("failed to spawn docker build")?;
             if !status.success() {
                 return Err(anyhow!("docker build failed (exit {:?})", status.code()));
             }
-            println!("[build] Built {} — deploy with: codery-ci deploy-preview {} {}", image, service, tag);
+            println!(
+                "[build] Built {image} — deploy with: codery-ci deploy-preview {service} {tag}"
+            );
         }
         Some("deploy-preview") => {
             // Usage: codery-ci deploy-preview <service> <sha> [--port <container_port>]
@@ -256,7 +289,7 @@ async fn main() -> Result<()> {
             //
             // Preview port auto-resolution:
             //   1. --port flag if given
-            //   2. First named port with a subdomain (e.g. sandbox → opencode:3000)
+            //   2. First named port with a subdomain (e.g. paseo → code:6767)
             //   3. 8080 if the service has a port_range that includes it (apps)
             //
             // Follow up with either:
@@ -265,14 +298,12 @@ async fn main() -> Result<()> {
             let service = args
                 .get(2)
                 .ok_or_else(|| anyhow!("missing service argument"))?;
-            let sha = args
-                .get(3)
-                .ok_or_else(|| anyhow!("missing sha argument"))?;
+            let sha = args.get(3).ok_or_else(|| anyhow!("missing sha argument"))?;
 
             let _lock = match deploy_lock::DeployLock::try_acquire(service) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("[deploy-preview] ERROR ({}): {}", service, e);
+                    eprintln!("[deploy-preview] ERROR ({service}): {e}");
                     std::process::exit(1);
                 }
             };
@@ -287,34 +318,30 @@ async fn main() -> Result<()> {
             let inactive = deploy::run_start_inactive(service, sha).await?;
 
             // Compute host port for the inactive color and register the preview route.
-            let host_port = def.port_scheme.host_port(&inactive, preview_container_port);
+            let host_port = def.port_scheme.host_port(inactive, preview_container_port);
             let subdomain = db::preview_subdomain(service);
             let conn = db::open()?;
             db::init(&conn)?;
-            db::upsert_preview(&conn, &db::PreviewRecord {
-                service: service.to_string(),
-                subdomain: subdomain.clone(),
-                host_port,
-                sha: sha.to_string(),
-                color: inactive.clone(),
-                created_at: String::new(),
-            })?;
+            db::upsert_preview(
+                &conn,
+                &db::PreviewRecord {
+                    service: service.clone(),
+                    subdomain: subdomain.clone(),
+                    host_port,
+                    sha: sha.clone(),
+                    color: inactive.as_str().to_string(),
+                    created_at: String::new(),
+                },
+            )?;
             caddy::apply_all()?;
             nginx::generate_and_reload().await?;
 
             let domain = config::load_domain();
             println!(
-                "[deploy-preview] {} inactive={} started. Preview at https://{}:{} (direct) or https://{}.{}",
-                service, inactive, "localhost", host_port, subdomain, domain
+                "[deploy-preview] {service} inactive={inactive} started. Preview at https://localhost:{host_port} (direct) or https://{subdomain}.{domain}"
             );
-            println!(
-                "[deploy-preview] promote:    codery-ci cutover {}",
-                service
-            );
-            println!(
-                "[deploy-preview] abort:      codery-ci cancel-preview {}",
-                service
-            );
+            println!("[deploy-preview] promote:    codery-ci cutover {service}");
+            println!("[deploy-preview] abort:      codery-ci cancel-preview {service}");
         }
         Some("cutover") => {
             // Usage: codery-ci cutover <service> [--sha <sha>]
@@ -337,7 +364,7 @@ async fn main() -> Result<()> {
             let _lock = match deploy_lock::DeployLock::try_acquire(service) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("[cutover] ERROR ({}): {}", service, e);
+                    eprintln!("[cutover] ERROR ({service}): {e}");
                     std::process::exit(1);
                 }
             };
@@ -347,7 +374,7 @@ async fn main() -> Result<()> {
             let sha_opt = flag_value(&args, "--sha");
             let preview = db::find_preview(&conn, service)?.map(|p| p.sha);
             if let (None, Some(p)) = (sha_opt.as_deref(), preview.as_deref()) {
-                println!("[cutover] Found staged preview sha={}", p);
+                println!("[cutover] Found staged preview sha={p}");
             }
 
             deploy::run_cutover(service, sha_opt.as_deref(), preview.as_deref()).await?;
@@ -356,9 +383,9 @@ async fn main() -> Result<()> {
             if db::delete_preview(&conn, service)? {
                 caddy::apply_all()?;
                 nginx::generate_and_reload().await?;
-                println!("[cutover] Removed preview route for {}", service);
+                println!("[cutover] Removed preview route for {service}");
             }
-            println!("[cutover] {} promoted.", service);
+            println!("[cutover] {service} promoted.");
         }
         Some("cancel-preview") => {
             // Usage: codery-ci cancel-preview <service>
@@ -371,7 +398,7 @@ async fn main() -> Result<()> {
             let _lock = match deploy_lock::DeployLock::try_acquire(service) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("[cancel-preview] ERROR ({}): {}", service, e);
+                    eprintln!("[cancel-preview] ERROR ({service}): {e}");
                     std::process::exit(1);
                 }
             };
@@ -383,9 +410,9 @@ async fn main() -> Result<()> {
             if db::delete_preview(&conn, service)? {
                 caddy::apply_all()?;
                 nginx::generate_and_reload().await?;
-                println!("[cancel-preview] Removed preview route for {}", service);
+                println!("[cancel-preview] Removed preview route for {service}");
             }
-            println!("[cancel-preview] {} preview cancelled — active untouched.", service);
+            println!("[cancel-preview] {service} preview cancelled — active untouched.");
         }
         Some("recreate") => {
             // Usage: codery-ci recreate <service>
@@ -418,7 +445,7 @@ async fn main() -> Result<()> {
             // disable when not actively iterating to keep the security surface flat.
             let sub = args
                 .get(2)
-                .map(|s| s.as_str())
+                .map(std::string::String::as_str)
                 .ok_or_else(|| anyhow!("missing subcommand: enable|disable|status"))?;
             match sub {
                 "enable" => {
@@ -430,25 +457,28 @@ async fn main() -> Result<()> {
                     println!("[mcp-exec] Disabled — codery_exec MCP tool will refuse all calls");
                 }
                 "status" => {
-                    let state = if mcp_exec::toggle_enabled() { "enabled" } else { "disabled" };
-                    println!("[mcp-exec] {}", state);
+                    let state = if mcp_exec::toggle_enabled() {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
+                    println!("[mcp-exec] {state}");
                 }
                 other => {
                     return Err(anyhow!(
-                        "unknown mcp-exec subcommand '{}': expected enable|disable|status",
-                        other
+                        "unknown mcp-exec subcommand '{other}': expected enable|disable|status"
                     ));
                 }
             }
         }
         _ => {
-            match args.get(1).map(|s| s.as_str()) {
+            match args.get(1).map(std::string::String::as_str) {
                 None => {
                     print_main_help();
                     // Bare `codery-ci` is a help request, not an error.
                 }
                 Some(unknown) => {
-                    eprintln!("error: unrecognized command '{}'\n", unknown);
+                    eprintln!("error: unrecognized command '{unknown}'\n");
                     print_main_help();
                     std::process::exit(1);
                 }
@@ -499,17 +529,21 @@ Run `codery-ci <command> --help` for detailed usage of any subcommand.",
 
 // ── Per-subcommand --help ────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)] // help text is naturally long; data-driven help tracked for later
 fn print_subcommand_help(sub: &str) {
     let text = match sub {
-        "preflight" => "\
+        "preflight" => {
+            "\
 codery-ci preflight
 
 Run preflight health checks: supervisord, Tailscale, and the Caddy admin API.
 Exits non-zero if any check fails.
 
 Docs: AGENTS.md → \"Host Environment\"
-",
-        "deploy" => "\
+"
+        }
+        "deploy" => {
+            "\
 codery-ci deploy <service> <sha>
 
 Full blue/green deploy. Pulls the image from GHCR, starts the inactive color,
@@ -517,15 +551,17 @@ health-checks it, cuts over (rewrites Caddyfile + state file), stops the old
 container, prunes stale images. Acquires a per-service deploy lock.
 
 Arguments:
-  <service>  Service name (sandbox, apps, ...)
+  <service>  Service name (paseo, apps, ...)
   <sha>      Image tag suffix (resolved as ghcr.io/coderyoss/codery:<service>-<sha>)
 
 Example:
-  codery-ci deploy sandbox abc123
+  codery-ci deploy paseo abc123
 
 Docs: AGENTS.md → \"Blue/Green Deployment\"
-",
-        "validate" => "\
+"
+        }
+        "validate" => {
+            "\
 codery-ci validate <service> <sha>
 
 Dry-run pre-deploy validation. Runs all preconditions (required_env, bind-mount
@@ -537,11 +573,13 @@ Arguments:
   <sha>      Image tag suffix
 
 Example:
-  codery-ci validate sandbox host-xyz
+  codery-ci validate paseo host-xyz
 
 Docs: AGENTS.md → \"Pre-deploy validation\" / \"Dry-run validation\"
-",
-        "reload-routes" => "\
+"
+        }
+        "reload-routes" => {
+            "\
 codery-ci reload-routes
 
 Regenerate the Caddyfile and Nginx config from all service YAMLs, routes.yaml,
@@ -551,8 +589,10 @@ Use after editing proxy/routes.yaml or a service YAML's routing fields.
 For Dockerfile / volume / image changes, push to main and run a full deploy.
 
 Docs: AGENTS.md → \"Service Declarations\"
-",
-        "diagnose" => "\
+"
+        }
+        "diagnose" => {
+            "\
 codery-ci diagnose [--json]
 
 Read-only mismatch detector. Cross-checks the state file against running
@@ -569,8 +609,10 @@ Example:
   codery-ci diagnose --json
 
 Docs: docs/superpowers/specs/2026-07-28-diagnose-command-design.md
-",
-        "build" => "\
+"
+        }
+        "build" => {
+            "\
 codery-ci build <service> <tag> [--dockerfile PATH] [--context PATH]
 
 Wraps `docker build` with the canonical image tag for the service. Tags the
@@ -578,7 +620,7 @@ result as ghcr.io/coderyoss/codery:<service>-<tag> so deploy-preview / deploy
 can find it locally without a GHCR pull.
 
 Default Dockerfile lookup:
-  sandbox → examples/Dockerfile.sandbox
+  paseo → containers/paseo/Dockerfile
   apps    → containers/apps/Dockerfile
   <other> → containers/<service>/Dockerfile
 
@@ -587,11 +629,13 @@ Flags:
   --context PATH     Override the build context (default: current directory)
 
 Example:
-  codery-ci build sandbox host-xyz
+  codery-ci build paseo host-xyz
 
 Docs: AGENTS.md → \"Preview Deploys\"
-",
-        "deploy-preview" => "\
+"
+        }
+        "deploy-preview" => {
+            "\
 codery-ci deploy-preview <service> <sha> [--port N]
 
 Start the inactive color with the given image and register a preview route at
@@ -609,11 +653,13 @@ Flags:
             Auto-resolved from service YAML if omitted.
 
 Example:
-  codery-ci deploy-preview sandbox host-xyz
+  codery-ci deploy-preview paseo host-xyz
 
 Docs: AGENTS.md → \"Preview Deploys\"
-",
-        "cutover" => "\
+"
+        }
+        "cutover" => {
+            "\
 codery-ci cutover <service> [--sha <sha>]
 
 Promote the inactive color to active. Updates the state file, regenerates the
@@ -641,12 +687,14 @@ Flags:
   --sha <sha>  Promote this SHA explicitly. Default: preview → newest local.
 
 Example:
-  codery-ci cutover sandbox
-  codery-ci cutover sandbox --sha sandbox-nixos-v1
+  codery-ci cutover paseo
+  codery-ci cutover paseo --sha paseo-v1
 
 Docs: AGENTS.md → \"Preview Deploys\"
-",
-        "cancel-preview" => "\
+"
+        }
+        "cancel-preview" => {
+            "\
 codery-ci cancel-preview <service>
 
 Abort a preview deploy. Stops the inactive container and removes the preview
@@ -656,11 +704,13 @@ Arguments:
   <service>  Service name
 
 Example:
-  codery-ci cancel-preview sandbox
+  codery-ci cancel-preview paseo
 
 Docs: AGENTS.md → \"Preview Deploys\"
-",
-        "recreate" => "\
+"
+        }
+        "recreate" => {
+            "\
 codery-ci recreate <service>
 
 Recreate the active color container in-place from its current image: remove,
@@ -671,14 +721,16 @@ Use to pick up volume, env, or network changes from the service YAML without a
 full deploy, or to recover a wedged container.
 
 Arguments:
-  <service>  Service name (sandbox, apps, ...)
+  <service>  Service name (paseo, apps, ...)
 
 Example:
-  codery-ci recreate sandbox
+  codery-ci recreate paseo
 
 Docs: AGENTS.md → \"Service Declarations\"
-",
-        "mcp-exec" => "\
+"
+        }
+        "mcp-exec" => {
+            "\
 codery-ci mcp-exec <enable|disable|status>
 
 Toggle whether the codery_exec MCP tool is allowed to spawn build/validate/
@@ -694,49 +746,57 @@ Subcommands:
   status   Print current state
 
 Docs: AGENTS.md → \"MCP host exec (agent build loop)\"
-",
-        "serve" => "\
+"
+        }
+        "serve" => {
+            "\
 codery-ci serve [--port N]
 
 Start the CoderyCI MCP server (HTTP+SSE on /sse). Default port 4040.
 
-OpenCode in the sandbox connects to this endpoint to call infrastructure tools.
+Agent containers (paseo) connect to this endpoint to call infrastructure tools.
 An iptables ACCEPT rule is added so Docker bridge networks can reach the port.
 
 Flags:
   --port N  Port to listen on (default: MCP_PORT from /opt/codery/.env or 4040)
-",
-        "serve-ui" => "\
+"
+        }
+        "serve-ui" => {
+            "\
 codery-ci serve-ui [--port N]
 
 Start the deploy-progress terminal UI server. Default port 4041.
 
 Flags:
   --port N  Port to listen on (default: 4041)
-",
-        "serve-tcp-proxy" => "\
+"
+        }
+        "serve-tcp-proxy" => {
+            "\
 codery-ci serve-tcp-proxy
 
-Run the stable-port TCP proxy (e.g. :2222 → active sandbox sshd). Reads the
+Run the stable-port TCP proxy (e.g. :2222 → active paseo sshd). Reads the
 active color from the state file on each inbound connection and forwards to
 the color-specific host port.
-",
-        "daemon" => "\
+"
+        }
+        "daemon" => {
+            "\
 codery-ci daemon
 
 Run the orchestrator daemon (background coordinator mode).
-",
+"
+        }
         _ => {
             eprintln!(
-                "No help for '{}'. Known subcommands: preflight, deploy, validate, \
+                "No help for '{sub}'. Known subcommands: preflight, deploy, validate, \
                  recreate, reload-routes, diagnose, build, deploy-preview, cutover, \
-                 cancel-preview, mcp-exec, serve, serve-ui, serve-tcp-proxy, daemon.",
-                sub
+                 cancel-preview, mcp-exec, serve, serve-ui, serve-tcp-proxy, daemon."
             );
             return;
         }
     };
-    print!("{}", text);
+    print!("{text}");
 }
 
 // ── CLI helpers ───────────────────────────────────────────────────────────────
@@ -745,15 +805,14 @@ use std::path::PathBuf;
 
 /// Read the value of a `--flag VALUE` argument from argv.
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == flag)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
 /// Default dockerfile path for known services.
 fn default_dockerfile(service: &str) -> Option<PathBuf> {
     match service {
-        "sandbox" => Some(PathBuf::from("examples/Dockerfile.sandbox")),
+        "paseo" => Some(PathBuf::from("containers/paseo/Dockerfile")),
+        "opendesign" => Some(PathBuf::from("containers/opendesign/Dockerfile")),
         "apps" => Some(PathBuf::from("containers/apps/Dockerfile")),
         _ => None,
     }
@@ -762,8 +821,8 @@ fn default_dockerfile(service: &str) -> Option<PathBuf> {
 /// Resolve which container port to expose via the preview subdomain.
 ///
 /// Priority:
-///   1. First named port with a subdomain (e.g. sandbox → opencode:3000)
-///   2. 8080 if the service has a port_range that includes it (apps/Nginx)
+///   1. First named port with a subdomain (e.g. paseo → code:6767)
+///   2. 8080 if the service has a `port_range` that includes it (apps/Nginx)
 ///   3. Error — caller must pass --port explicitly
 fn resolve_preview_port(def: &service_def::ServiceDef) -> Result<u16> {
     if let Some(p) = def.ports.iter().find(|p| p.subdomain.is_some()) {
@@ -790,7 +849,7 @@ mod tests {
     fn flag_value_reads_dash_flag() {
         let args = vec![
             "deploy-preview".to_string(),
-            "sandbox".to_string(),
+            "paseo".to_string(),
             "abc".to_string(),
             "--port".to_string(),
             "7456".to_string(),
@@ -802,8 +861,8 @@ mod tests {
     #[test]
     fn default_dockerfile_known_services() {
         assert_eq!(
-            default_dockerfile("sandbox").unwrap().to_string_lossy(),
-            "examples/Dockerfile.sandbox"
+            default_dockerfile("paseo").unwrap().to_string_lossy(),
+            "containers/paseo/Dockerfile"
         );
         assert_eq!(
             default_dockerfile("apps").unwrap().to_string_lossy(),
@@ -814,9 +873,10 @@ mod tests {
 
     #[test]
     fn resolve_preview_port_picks_first_subdomain_port() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
-service: sandbox
-image: ghcr.io/coderyoss/codery:sandbox-{sha}
+        let def: ServiceDef = serde_yaml::from_str(
+            r"
+service: paseo
+image: ghcr.io/coderyoss/codery:paseo-{sha}
 port_scheme: {blue_offset: 10000, green_offset: 20000}
 ports:
   - name: ssh
@@ -830,13 +890,16 @@ ports:
 health_check: {type: docker, timeout_secs: 30}
 volumes: []
 network: codery-net
-"#).unwrap();
+",
+        )
+        .unwrap();
         assert_eq!(resolve_preview_port(&def).unwrap(), 3000);
     }
 
     #[test]
     fn resolve_preview_port_apps_falls_back_to_8080() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
+        let def: ServiceDef = serde_yaml::from_str(
+            r"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme: {blue_offset: 0, green_offset: 10000}
@@ -844,13 +907,16 @@ port_range: {container_start: 8000, container_end: 9000}
 health_check: {type: docker, timeout_secs: 90}
 volumes: []
 network: codery-net
-"#).unwrap();
+",
+        )
+        .unwrap();
         assert_eq!(resolve_preview_port(&def).unwrap(), 8080);
     }
 
     #[test]
     fn resolve_preview_port_no_subdomain_no_8080_errors() {
-        let def: ServiceDef = serde_yaml::from_str(r#"
+        let def: ServiceDef = serde_yaml::from_str(
+            r"
 service: weird
 image: ghcr.io/coderyoss/codery:weird-{sha}
 port_scheme: {blue_offset: 0, green_offset: 10000}
@@ -860,7 +926,9 @@ ports:
 health_check: {type: docker, timeout_secs: 30}
 volumes: []
 network: codery-net
-"#).unwrap();
+",
+        )
+        .unwrap();
         assert!(resolve_preview_port(&def).is_err());
     }
 }

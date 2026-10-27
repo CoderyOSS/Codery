@@ -3,7 +3,7 @@ pub const STATE_DIR: &str = "/opt/codery/state";
 pub const CADDY_CONFIG: &str = "/etc/caddy/Caddyfile";
 pub const NGINX_CONFIG: &str = "/opt/codery/proxy/apps-nginx.conf";
 /// Host directory bind-mounted into the apps container at /etc/s6-overlay/apps.d/.
-/// MCP add_app/remove_app render s6 service bundles here; a boot-time oneshot
+/// MCP `add_app/remove_app` render s6 service bundles here; a boot-time oneshot
 /// in the apps image links them into supervision.
 pub const APPS_S6_DIR: &str = "/opt/codery/apps-s6.d";
 pub const ENV_FILE: &str = "/opt/codery/.env";
@@ -43,11 +43,10 @@ pub const MCP_EXEC_TOGGLE: &str = "/opt/codery/state/mcp-exec.enabled";
 // Per-job stdout/stderr logs. Created on first use.
 pub const MCP_EXEC_LOG_DIR: &str = "/var/log/codery-ci-mcp";
 
-/// Read DOMAIN_NAME from /opt/codery/.env. Returns DEFAULT_DOMAIN if not set.
+/// Read `DOMAIN_NAME` from /opt/codery/.env. Returns `DEFAULT_DOMAIN` if not set.
 pub fn load_domain() -> String {
-    let content = match std::fs::read_to_string(ENV_FILE) {
-        Ok(c) => c,
-        Err(_) => return DEFAULT_DOMAIN.to_string(),
+    let Ok(content) = std::fs::read_to_string(ENV_FILE) else {
+        return DEFAULT_DOMAIN.to_string();
     };
     for line in content.lines() {
         let line = line.trim();
@@ -64,35 +63,64 @@ pub fn load_domain() -> String {
     DEFAULT_DOMAIN.to_string()
 }
 
-pub fn mcp_host(domain: &str) -> String {
-    format!("mcp.{}", domain)
+/// Deployment color — one half of a blue/green pair.
+///
+/// Parsed once at IO boundaries (state files, CLI args, MCP params); logic
+/// downstream matches on the enum instead of comparing strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Color {
+    Blue,
+    Green,
 }
 
-#[allow(dead_code)]
-pub fn ui_host(domain: &str) -> String {
-    format!("ci.{}", domain)
+impl Color {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Color::Blue => "blue",
+            Color::Green => "green",
+        }
+    }
+
+    /// Parse a color string; `None` for anything but "blue"/"green".
+    pub fn parse(s: &str) -> Option<Color> {
+        match s {
+            "blue" => Some(Color::Blue),
+            "green" => Some(Color::Green),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Color {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Returns the container name for a service+color pair.
-pub fn container_name(service: &str, color: &str) -> String {
-    format!("codery-{}-{}", service, color)
+pub fn container_name(service: &str, color: Color) -> String {
+    format!("codery-{service}-{}", color.as_str())
 }
 
 /// Returns the local tag for a `codery-ci build` result. Image *pulling* does
 /// NOT use this — the pull path resolves the opaque OCI reference from the
 /// service YAML (`ServiceDef::image_ref`).
 pub fn image_ref(service: &str, sha: &str) -> String {
-    format!("{}:{}-{}", REGISTRY, service, sha)
+    format!("{REGISTRY}:{service}-{sha}")
 }
 
 /// Returns the opposite color.
-pub fn flip(color: &str) -> &'static str {
-    if color == "blue" { "green" } else { "blue" }
+pub fn flip(color: Color) -> Color {
+    match color {
+        Color::Blue => Color::Green,
+        Color::Green => Color::Blue,
+    }
 }
 
 /// Returns the deploy lock file path for a service.
 pub fn deploy_lock_path(service: &str) -> String {
-    format!("/run/codery-ci-deploy-{}.lock", service)
+    format!("/run/codery-ci-deploy-{service}.lock")
 }
 
 #[cfg(test)]
@@ -101,34 +129,31 @@ mod tests {
 
     #[test]
     fn flip_colors() {
-        assert_eq!(flip("blue"), "green");
-        assert_eq!(flip("green"), "blue");
+        assert_eq!(flip(Color::Blue), Color::Green);
+        assert_eq!(flip(Color::Green), Color::Blue);
     }
 
     #[test]
     fn container_names() {
-        assert_eq!(container_name("sandbox", "blue"), "codery-sandbox-blue");
-        assert_eq!(container_name("apps", "green"), "codery-apps-green");
+        assert_eq!(container_name("paseo", Color::Blue), "codery-paseo-blue");
+        assert_eq!(container_name("apps", Color::Green), "codery-apps-green");
     }
 
     #[test]
     fn image_refs() {
         assert_eq!(
-            image_ref("sandbox", "abc123"),
-            "ghcr.io/coderyoss/codery:sandbox-abc123"
+            image_ref("paseo", "abc123"),
+            "ghcr.io/coderyoss/codery:paseo-abc123"
         );
     }
 
     #[test]
     fn deploy_lock_path_uses_service_name() {
         assert_eq!(
-            deploy_lock_path("sandbox"),
-            "/run/codery-ci-deploy-sandbox.lock"
+            deploy_lock_path("paseo"),
+            "/run/codery-ci-deploy-paseo.lock"
         );
-        assert_eq!(
-            deploy_lock_path("apps"),
-            "/run/codery-ci-deploy-apps.lock"
-        );
+        assert_eq!(deploy_lock_path("apps"), "/run/codery-ci-deploy-apps.lock");
     }
 
     #[test]

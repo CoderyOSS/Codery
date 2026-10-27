@@ -1,0 +1,21 @@
+#!/bin/bash
+# Paseo entrypoint wrapper: starts sshd (root, :2022 inside the container)
+# before handing off to the base image's entrypoint, which performs first-run
+# mounted-volume setup and drops the daemon + agents to the `paseo` user.
+set -eu
+
+# Privilege-separation dir required by sshd on Debian.
+mkdir -p /run/sshd
+
+# Persistent host keys (named volume) — stable fingerprints across recreates.
+KEYS_DIR=/etc/ssh/host_keys
+mkdir -p "$KEYS_DIR"
+if [ ! -f "$KEYS_DIR/ssh_host_ed25519_key" ]; then
+    echo "[sshd] generating host key (first boot)"
+    ssh-keygen -t ed25519 -f "$KEYS_DIR/ssh_host_ed25519_key" -N '' -C "codery-paseo"
+fi
+
+/usr/sbin/sshd -f /etc/ssh/sshd_config
+echo "[sshd] listening on :2022 (published as tailnet-only :2222)"
+
+exec /usr/local/bin/paseo-docker-entrypoint "$@"

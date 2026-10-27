@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bollard::auth::DockerCredentials;
-use bollard::Docker;
 use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
+use bollard::Docker;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
@@ -9,8 +9,8 @@ use crate::config;
 
 /// Check whether an image reference is present in the local Docker cache.
 pub async fn image_exists_locally(image: &str) -> Result<bool> {
-    let docker = Docker::connect_with_socket_defaults()
-        .context("failed to connect to Docker socket")?;
+    let docker =
+        Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
     let mut filters = HashMap::new();
     filters.insert("reference".to_string(), vec![image.to_string()]);
     let images = docker
@@ -29,7 +29,7 @@ pub async fn image_exists_locally(image: &str) -> Result<bool> {
 /// have never been pushed to a registry.
 pub async fn pull_if_missing(image: &str) -> Result<()> {
     if image_exists_locally(image).await? {
-        println!("[images] Image {} present locally — skipping pull", image);
+        println!("[images] Image {image} present locally — skipping pull");
         return Ok(());
     }
     pull(image).await
@@ -39,10 +39,10 @@ pub async fn pull_if_missing(image: &str) -> Result<()> {
 /// "mcr.microsoft.com/playwright:v1.54.1-noble"). The reference is opaque:
 /// no registry is assumed. Streams progress to stdout.
 pub async fn pull(image: &str) -> Result<()> {
-    println!("[images] Pulling {}...", image);
+    println!("[images] Pulling {image}...");
 
-    let docker = Docker::connect_with_socket_defaults()
-        .context("failed to connect to Docker socket")?;
+    let docker =
+        Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
 
     // Credentials are resolved from the registry hostname in the reference:
     // ghcr.io pulls use the GitHub credentials from /opt/codery/.env, other
@@ -62,13 +62,13 @@ pub async fn pull(image: &str) -> Result<()> {
         match result {
             Ok(info) => {
                 if let (Some(status), Some(progress)) = (info.status, info.progress) {
-                    print!("\r[images] {} {}", status, progress);
+                    print!("\r[images] {status} {progress}");
                 }
             }
-            Err(e) => anyhow::bail!("pull failed: {}", e),
+            Err(e) => anyhow::bail!("pull failed: {e}"),
         }
     }
-    println!("\n[images] Pull complete: {}", image);
+    println!("\n[images] Pull complete: {image}");
     Ok(())
 }
 
@@ -101,8 +101,8 @@ pub fn credentials_for(image: &str) -> Option<DockerCredentials> {
 
 /// Prune images for a service, keeping the two most recently created.
 pub async fn prune(service: &str) -> Result<()> {
-    let docker = Docker::connect_with_socket_defaults()
-        .context("failed to connect to Docker socket")?;
+    let docker =
+        Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
 
     let mut filters = HashMap::new();
     filters.insert(
@@ -120,7 +120,7 @@ pub async fn prune(service: &str) -> Result<()> {
         .context("failed to list images")?;
 
     // Sort by Created descending (newest first)
-    images.sort_by(|a, b| b.created.cmp(&a.created));
+    images.sort_by_key(|a| std::cmp::Reverse(a.created));
 
     // Keep the first 2, remove the rest
     let mut removed = 0;
@@ -143,7 +143,7 @@ pub async fn prune(service: &str) -> Result<()> {
         }
     }
 
-    println!("[images] Pruned {} old image(s) for {}", removed, service);
+    println!("[images] Pruned {removed} old image(s) for {service}");
     Ok(())
 }
 
@@ -156,10 +156,10 @@ pub struct LocalImage {
 }
 
 /// List images available locally for a service, newest first.
-/// Extracts the git SHA from tags like `ghcr.io/coderyoss/codery:sandbox-abc123`.
+/// Extracts the git SHA from tags like `ghcr.io/coderyoss/codery:paseo-abc123`.
 pub async fn list_local(service: &str) -> anyhow::Result<Vec<LocalImage>> {
-    let docker = Docker::connect_with_socket_defaults()
-        .context("failed to connect to Docker socket")?;
+    let docker =
+        Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
 
     let mut filters = HashMap::new();
     filters.insert(
@@ -182,13 +182,20 @@ pub async fn list_local(service: &str) -> anyhow::Result<Vec<LocalImage>> {
         .flat_map(|img| {
             img.repo_tags
                 .iter()
-                .filter_map(|tag| tag.strip_prefix(&prefix).map(|sha| (sha.to_string(), tag.clone())))
-                .map(|(sha, tag)| LocalImage { sha, tag, created: img.created })
+                .filter_map(|tag| {
+                    tag.strip_prefix(&prefix)
+                        .map(|sha| (sha.to_string(), tag.clone()))
+                })
+                .map(|(sha, tag)| LocalImage {
+                    sha,
+                    tag,
+                    created: img.created,
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
 
-    result.sort_by(|a, b| b.created.cmp(&a.created));
+    result.sort_by_key(|a| std::cmp::Reverse(a.created));
     Ok(result)
 }
 
@@ -205,17 +212,16 @@ fn ghcr_credentials() -> Option<DockerCredentials> {
             password = Some(v.to_string());
         }
     }
-    match (username, password) {
-        (Some(u), Some(p)) => Some(DockerCredentials {
+    if let (Some(u), Some(p)) = (username, password) {
+        Some(DockerCredentials {
             username: Some(u),
             password: Some(p),
             serveraddress: Some(config::GHCR_HOST.to_string()),
             ..Default::default()
-        }),
-        _ => {
-            println!("[images] Warning: GHCR_USERNAME/GHCR_TOKEN not in .env — pulling anonymously");
-            None
-        }
+        })
+    } else {
+        println!("[images] Warning: GHCR_USERNAME/GHCR_TOKEN not in .env — pulling anonymously");
+        None
     }
 }
 
@@ -226,7 +232,7 @@ mod tests {
     #[test]
     fn registry_of_ghcr() {
         assert_eq!(
-            registry_of("ghcr.io/coderyoss/codery:sandbox-abc123"),
+            registry_of("ghcr.io/coderyoss/codery:paseo-abc123"),
             Some("ghcr.io")
         );
     }
@@ -247,7 +253,10 @@ mod tests {
 
     #[test]
     fn registry_of_localhost_with_port() {
-        assert_eq!(registry_of("localhost:5000/team/app:v1"), Some("localhost:5000"));
+        assert_eq!(
+            registry_of("localhost:5000/team/app:v1"),
+            Some("localhost:5000")
+        );
     }
 
     #[test]
@@ -260,6 +269,6 @@ mod tests {
     fn credentials_for_ghcr_is_some_when_env_configured() {
         // ghcr.io refs get GHCR credentials; on a host without /opt/codery/.env
         // ghcr_credentials() itself falls back to None (anonymous).
-        let _ = credentials_for("ghcr.io/coderyoss/codery:sandbox-abc123");
+        let _ = credentials_for("ghcr.io/coderyoss/codery:paseo-abc123");
     }
 }

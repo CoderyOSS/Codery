@@ -7,7 +7,7 @@
 //! Safety model:
 //! - Gated by a host-side toggle file (`codery-ci mcp-exec enable`).
 //! - Allowlist excludes cutover / deploy / serve / daemon — those can touch
-//!   the active sandbox session and stay human-only via the host shell.
+//!   the active paseo session and stay human-only via the host shell.
 //! - Jobs are spawned from the daemon process (root under supervisord).
 
 use std::collections::HashMap;
@@ -61,7 +61,7 @@ fn registry() -> &'static JobRegistry {
     REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-/// Is the MCP exec toggle enabled? Toggle = file presence at config::MCP_EXEC_TOGGLE.
+/// Is the MCP exec toggle enabled? Toggle = file presence at `config::MCP_EXEC_TOGGLE`.
 pub fn toggle_enabled() -> bool {
     toggle_enabled_at(Path::new(config::MCP_EXEC_TOGGLE))
 }
@@ -99,15 +99,13 @@ pub fn allowlist() -> &'static [&'static str] {
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn gen_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     // Lower 48 bits as hex — enough uniqueness within a daemon lifetime.
     format!("{:0>12x}", nanos & 0xFFFF_FFFF_FFFF)
 }
@@ -134,6 +132,7 @@ pub async fn spawn(args: Vec<String>, timeout_secs: u64) -> Result<SpawnResponse
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // single spawn pipeline: validate/spawn/tail
 async fn spawn_with(
     args: Vec<String>,
     timeout_secs: u64,
@@ -142,32 +141,29 @@ async fn spawn_with(
     bin: &str,
 ) -> Result<SpawnResponse, String> {
     if !toggle_enabled_at(toggle_path) {
-        return Err(format!(
-            "MCP exec disabled. Run on host: codery-ci mcp-exec enable"
-        ));
+        return Err("MCP exec disabled. Run on host: codery-ci mcp-exec enable".to_string());
     }
     let subcmd = args
         .first()
         .ok_or_else(|| "no subcommand provided".to_string())?;
     if !is_allowed(subcmd) {
         return Err(format!(
-            "subcommand '{}' not in allowlist (allowed: {:?}). \
-             Cutover and deploy are never exposed via MCP — run on host shell.",
-            subcmd, ALLOWLIST
+            "subcommand '{subcmd}' not in allowlist (allowed: {ALLOWLIST:?}). \
+             Cutover and deploy are never exposed via MCP — run on host shell."
         ));
     }
 
-    std::fs::create_dir_all(&log_dir).map_err(|e| format!("failed to create log dir: {}", e))?;
+    std::fs::create_dir_all(&log_dir).map_err(|e| format!("failed to create log dir: {e}"))?;
 
     let id = gen_id();
     let started_at = now_secs();
-    let log_path = log_dir.join(format!("exec-{}-{}-{}.log", started_at, subcmd, id));
+    let log_path = log_dir.join(format!("exec-{started_at}-{subcmd}-{id}.log"));
 
     let log_file = std::fs::File::create(&log_path)
-        .map_err(|e| format!("failed to create log file {:?}: {}", log_path, e))?;
+        .map_err(|e| format!("failed to create log file {}: {e}", log_path.display()))?;
     let log_file_stderr = log_file
         .try_clone()
-        .map_err(|e| format!("failed to clone log file handle: {}", e))?;
+        .map_err(|e| format!("failed to clone log file handle: {e}"))?;
 
     let mut cmd = Command::new(bin);
     cmd.args(&args)
@@ -175,7 +171,7 @@ async fn spawn_with(
         .stderr(std::process::Stdio::from(log_file_stderr));
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("failed to spawn '{}': {}", bin, e))?;
+        .map_err(|e| format!("failed to spawn '{bin}': {e}"))?;
 
     let pid = child.id();
 
@@ -197,27 +193,24 @@ async fn spawn_with(
     tokio::spawn(async move {
         let wait_result = if timeout_secs == 0 {
             child.wait().await
+        } else if let Ok(r) = timeout(Duration::from_secs(timeout_secs), child.wait()).await {
+            r
         } else {
-            match timeout(Duration::from_secs(timeout_secs), child.wait()).await {
-                Ok(r) => r,
-                Err(_) => {
-                    let _ = child.start_kill();
-                    {
-                        let mut jobs = registry().lock().await;
-                        if let Some(job) = jobs.get_mut(&id_for_task) {
-                            job.status = JobStatus::Timeout;
-                            job.finished_at = Some(now_secs());
-                        }
-                    }
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .append(true)
-                        .open(&log_path_for_task)
-                    {
-                        let _ = writeln!(f, "\n[mcp-exec] TIMEOUT after {}s", timeout_secs);
-                    }
-                    return;
+            let _ = child.start_kill();
+            {
+                let mut jobs = registry().lock().await;
+                if let Some(job) = jobs.get_mut(&id_for_task) {
+                    job.status = JobStatus::Timeout;
+                    job.finished_at = Some(now_secs());
                 }
             }
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path_for_task)
+            {
+                let _ = writeln!(f, "\n[mcp-exec] TIMEOUT after {timeout_secs}s");
+            }
+            return;
         };
 
         let (new_status, new_exit_code) = match wait_result {
@@ -237,7 +230,7 @@ async fn spawn_with(
                     .append(true)
                     .open(&log_path_for_task)
                 {
-                    let _ = writeln!(f, "\n[mcp-exec] process wait error: {}", e);
+                    let _ = writeln!(f, "\n[mcp-exec] process wait error: {e}");
                 }
                 (JobStatus::Failed, None)
             }
@@ -275,7 +268,7 @@ pub async fn status(job_id: &str, tail_bytes: usize) -> Result<JobStatusResponse
         let jobs = registry().lock().await;
         jobs.get(job_id)
             .cloned()
-            .ok_or_else(|| format!("unknown job_id: {}", job_id))?
+            .ok_or_else(|| format!("unknown job_id: {job_id}"))?
     };
 
     let elapsed = now_secs().saturating_sub(snapshot.started_at);
@@ -293,18 +286,15 @@ pub async fn status(job_id: &str, tail_bytes: usize) -> Result<JobStatusResponse
 
 /// Read last N bytes of a file as UTF-8 (lossy). Empty string if unreadable.
 fn read_tail(path: &Path, max_bytes: usize) -> String {
-    let mut file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return String::new(),
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
     };
-    let size = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
-    if size > max_bytes {
-        if file
-            .seek(SeekFrom::End(-(max_bytes as i64)))
-            .is_err()
-        {
-            return String::new();
-        }
+    #[allow(clippy::cast_possible_truncation)] // file sizes on this host fit usize
+    let size = file.metadata().map_or(0, |m| m.len() as usize);
+    #[allow(clippy::cast_possible_wrap)] // max_bytes is a small config bound
+    let seek_back = -(max_bytes as i64);
+    if size > max_bytes && file.seek(SeekFrom::End(seek_back)).is_err() {
+        return String::new();
     }
     let mut buf = Vec::with_capacity(max_bytes.min(size));
     let _ = file.read_to_end(&mut buf);
@@ -418,7 +408,7 @@ mod tests {
         let log_dir = dir.join("logs");
 
         let result = spawn_with(
-            vec!["build".to_string(), "sandbox".to_string(), "t".to_string()],
+            vec!["build".to_string(), "paseo".to_string(), "t".to_string()],
             30,
             &toggle,
             log_dir,
@@ -427,7 +417,7 @@ mod tests {
         .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("disabled"), "err = {}", err);
+        assert!(err.contains("disabled"), "err = {err}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -442,7 +432,7 @@ mod tests {
         let log_dir = dir.join("logs");
 
         let result = spawn_with(
-            vec!["cutover".to_string(), "sandbox".to_string()],
+            vec!["cutover".to_string(), "paseo".to_string()],
             30,
             &toggle,
             log_dir,
@@ -451,7 +441,7 @@ mod tests {
         .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("not in allowlist"), "err = {}", err);
+        assert!(err.contains("not in allowlist"), "err = {err}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -468,7 +458,7 @@ mod tests {
         // "true" (PATH-resolved) simulates codery-ci succeeding. Bare name on
         // purpose: /bin/true does not exist in the nix-based apps container.
         let resp = spawn_with(
-            vec!["build".to_string(), "sandbox".to_string(), "t".to_string()],
+            vec!["build".to_string(), "paseo".to_string(), "t".to_string()],
             10,
             &toggle,
             log_dir,
@@ -482,7 +472,7 @@ mod tests {
         for _ in 0..20 {
             if let Ok(s) = status(&resp.job_id, 4096).await {
                 if s.status != JobStatus::Running {
-                    assert_eq!(s.status, JobStatus::Done, "expected Done, got {:?}", s);
+                    assert_eq!(s.status, JobStatus::Done, "expected Done, got {s:?}");
                     assert_eq!(s.exit_code, Some(0));
                     break;
                 }
@@ -490,7 +480,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        let final_status = status(&resp.job_id, 4096).await.expect("status should resolve");
+        let final_status = status(&resp.job_id, 4096)
+            .await
+            .expect("status should resolve");
         assert_eq!(final_status.status, JobStatus::Done);
 
         let _ = std::fs::remove_dir_all(&dir);

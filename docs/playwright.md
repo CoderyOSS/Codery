@@ -1,12 +1,12 @@
-# Playwright — Browser Runtime (Separate from the Sandbox)
+# Playwright — Browser Runtime (Separate from the Agent Containers)
 
 ## The boundary
 
 Codery runs browser automation in **Microsoft's official Playwright image**,
-not in the Sandbox.
+not in the agent containers.
 
 ```
-Sandbox (Nix rootfs — dev tools only)      Playwright (mcr.microsoft.com/playwright)
+Paseo (agent container)      Playwright (mcr.microsoft.com/playwright)
   OpenCode                                     ├── Chromium (headless, no X)
     └── MCP @playwright/mcp                    └── npx playwright run-server :3000
           │                                               │
@@ -16,13 +16,13 @@ Sandbox (Nix rootfs — dev tools only)      Playwright (mcr.microsoft.com/playw
                                         Apps (alias "apps", user apps on 0.0.0.0)
 ```
 
-- **Nix owns development tools.** Adding a CLI tool to the sandbox = adding
-  one package to `containers/sandbox/nixos/configuration.nix`.
+- **One runtime per image.** Adding a CLI to an agent container is a Dockerfile
+  line, not a host change.
 - **Microsoft owns Chromium's Linux dependencies.** Codery owns only: image
   version, startup argv, networking, security flags
   (`containers/playwright/service.yml`).
 - **Never** add Chromium shared-library packages (libnss, libgbm, gtk, …) to
-  the sandbox to make a browser start. That is the anti-pattern this boundary
+  an agent container to make a browser start. That is the anti-pattern this boundary
   eliminates.
 
 ## Version coupling (upgrade all in one commit)
@@ -48,12 +48,12 @@ tools and the MCP shows `failed: "Failed to get tools"`. Pinning zod to the
 properly pins its own zod, the extra pins can be dropped.
 
 Mechanism: `@playwright/mcp@0.0.30` connects to the remote browser server via
-its config file `remoteEndpoint` option (`containers/sandbox/
+the agent config (`containers/paseo/opencode-config/
 playwright-mcp-config.json`, baked to
 `/home/gem/.config/opencode/playwright-mcp-config.json`). Note: 0.0.30 does
 NOT support a `--endpoint` CLI flag — `remoteEndpoint` is the supported
 remote-server mechanism at this version, so the MCP *client* runs in the
-sandbox while Chromium itself runs in the Playwright container.
+the agent container while Chromium itself runs in the Playwright container.
 
 Playwright refuses to run when client and server versions mismatch. All three
 pins must move together — a Playwright upgrade is a deliberate, single change:
@@ -67,7 +67,7 @@ pins must move together — a Playwright upgrade is a deliberate, single change:
    `command` and `image` in `containers/playwright/service.yml`, and the
    default in `.github/workflows/deploy-playwright.yml` — one commit.
 4. Deploy: `codery-ci deploy playwright vX.Y.Z` (or the Deploy Playwright
-   workflow), then deploy the sandbox image (its MCP pin changed).
+   workflow), then rebuild the agent image (its MCP pin changed).
 
 ## Sandboxing note
 
@@ -78,22 +78,22 @@ with `no-new-privileges` — the browser process would fail to start otherwise.
 This is the standard, documented setting for Chromium in CI containers: the
 container itself is unprivileged, internal-only (no public route), and runs
 no user data. It is a security *flag*, not a library dependency — do not
-confuse it with installing Chromium dependencies into the sandbox.
+confuse it with installing Chromium dependencies into agent containers.
 
 ## Networking semantics
 
 - All three containers share `codery-net`. The Playwright service exposes the
   Docker DNS alias **`playwright`**; Apps already exposes **`apps`**.
 - `localhost` is container-local:
-  - `localhost` in the Sandbox = the Sandbox
+  - `localhost` inside an agent container = that container
   - `localhost` in Playwright/Chromium = the Playwright container
   - `localhost` in Apps = the Apps container
 - Chromium must address user applications by DNS identity:
   `http://apps:<port>`. Apps intended for browser access bind to
   `0.0.0.0:<port>` inside the Apps container.
-- The Sandbox proxies no application HTTP traffic — it is control-plane only
+- Agent containers proxy no application HTTP traffic — control-plane only
   (OpenCode → MCP → Playwright server → Chromium).
-- `PLAYWRIGHT_WS_ENDPOINT=ws://playwright:3000/` is exported in the sandbox
+- `PLAYWRIGHT_WS_ENDPOINT=ws://playwright:3000/` is exported in the agent containers
   for user/test code: `chromium.connect(process.env.PLAYWRIGHT_WS_ENDPOINT)`.
 
 ## Operations
@@ -110,7 +110,7 @@ confuse it with installing Chromium dependencies into the sandbox.
 
 1. **Version mismatch** — first check: does the MCP's bundled `playwright`
    version equal the image tag? Mismatch errors surface in the MCP server
-   logs (`read_container_file service='sandbox' path='/tmp/opencode.log'`).
+   logs (`get_container_info service='paseo'`).
 2. **OpenCode reports `playwright: failed — "Failed to get tools"`** — the
    MCP is sending `inputSchema` stubs without `type: "object"`. Check
    `npm view zod version` behavior: this happens when zod 4 resolves instead
@@ -118,9 +118,9 @@ confuse it with installing Chromium dependencies into the sandbox.
    Verify the `npm exec --package=zod@3.24.1 ...` pins are intact in
    `opencode.json`, then reconnect via `POST /mcp/playwright/connect` or
    restart `opencode serve`.
-3. **WS unreachable** — from the sandbox:
+3. **WS unreachable** — from an agent container:
    `node -e "new WebSocket('ws://playwright:3000/')"` or check
    `get_container_info service='playwright'`.
 4. **Chromium fails to launch** — check `docker logs` of the Playwright
    container; verify `ipc: host` and `--headless` are in effect. Do **not**
-   install libraries into the Sandbox as a fix.
+   install libraries into agent containers as a fix.

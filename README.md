@@ -1,108 +1,83 @@
-```
-   ______          __               
-  / ____/___  ____/ /__  _______  __
- / /   / __ \/ __  / _ \/ ___/ / / /
-/ /___/ /_/ / /_/ /  __/ /  / /_/ / 
-\____/\____/\__,_/\___/_/   \__, /  
-                            /____/   
-```
-
 # Codery
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)] [![GitHub Release](https://img.shields.io/github/v/release/CoderyOSS/Codery)] [![Status](https://img.shields.io/badge/status-pre--alpha-orange)] [![Coverage](https://img.shields.io/badge/coverage-pending-lightgrey)]
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/CoderyOSS/Codery)](https://github.com/CoderyOSS/Codery/releases)
+[![CI](https://github.com/CoderyOSS/Codery/actions/workflows/ci.yml/badge.svg)](https://github.com/CoderyOSS/Codery/actions/workflows/ci.yml)
+![Status](https://img.shields.io/badge/status-experimental-orange)
 
-Infrastructure for a VPS-hosted AI development environment. Two Docker containers — a sandbox (OpenCode + VS Code) and an apps container (project web servers) — deployed via CoderyCI with blue/green zero-downtime deployments.
+**Codery is the infrastructure this site runs on**: a self-hosted AI development platform
+where coding agents work inside isolated containers, projects deploy as web apps with
+zero-downtime blue/green releases, and a Rust control plane owns routing, health,
+rollback, and diagnostics — all reachable over a private tailnet.
 
-> **Status:** This project is pre-1.0 and under active development. All components follow [semantic versioning](https://semver.org). APIs, configuration formats, and deployment workflows may change without notice. Not recommended for production use yet.
+<!-- TODO: hero screenshot — CoderyCI dashboard (Host Health + services). -->
+<!-- TODO: second screenshot — a deploy mid-preview (blue/green state). -->
+
+## Why this exists
+
+Running AI coding agents directly on a host means giving a model's shell your kernel,
+your Docker socket, and your home directory. Codery inverts that: agents get an
+isolated container on a shared, bind-mounted projects tree — and *nothing else*.
+Every project runs as its own supervised process in a separate runtime container.
+The host runs one small Rust binary that turns `git push`-driven builds into
+health-checked blue/green cutovers it can also diagnose and roll back.
 
 ## Components
 
-| Component | Description |
-|-----------|-------------|
-| **Sandbox** | AI-assisted development environment (OpenCode + VS Code in browser) |
-| **Apps** | Host project web servers (Bun/Node/etc.) |
-| **CoderyCI** | Rust orchestrator binary — handles blue/green deploys on the host |
-| **ShellGate** | Secure shell access component (in development) |
+| Component | What it is |
+|-----------|------------|
+| **CoderyCI** | Rust orchestrator binary + web dashboard: blue/green deploys, preview staging, TCP port proxy, MCP control plane, host metrics, `diagnose`, rollback |
+| **Paseo** | Agent environment (paseo.sh daemon + OpenCode CLI); iPad/CLI clients connect over WebSocket; hardened tailnet-only SSH |
+| **Apps** | Project web servers (Bun/Node), s6-supervised; every app gets a subdomain, basic-auth gates available |
+| **OpenDesign** | Standalone design workspace (upstream image + pinned wrapper), same blue/green treatment |
+| **Playwright** | Dedicated browser runtime container — the only place Chromium runs |
+| **Host layer** | Caddy (TLS + subdomain routing), Tailscale (the perimeter), supervisord |
+
+## Engineering notes
+
+- **Blue/green, not mutable containers.** Every service deploys to the inactive
+  color, health-checks, verifies the replacement is running, *then* cuts over —
+  cutover refuses to stop the live container without a verified replacement.
+- **Declarative services.** Adding a service is one YAML file (`service.yml`):
+  ports, volumes, health checks, env, network. CoderyCI derives Docker port
+  bindings, Caddy vhosts, Nginx config, and color offsets from it.
+- **One trust boundary.** Nothing is public. External access is Tailscale; Caddy
+  serves subdomains over the tailnet; raw TCP (SSH) binds the tailnet IP only.
+- **Agent containment.** Agent containers have no Docker socket, no host config,
+  no Caddy/Tailscale access. Route and infra changes go through this repo.
+- **Operated, not demo'd.** Memory budgets with OOM mitigations, a postmortem
+  playbook, `codery-ci diagnose` state-vs-reality reconciliation, and preview
+  deploys that never touch live traffic. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Quickstart
 
-### 1. Provision a VPS
-
-Create an Ubuntu 24.04 server on any provider. Apply `hosting/cloud-init.yaml` as user data. See `hosting/examples/` for provider-specific instructions:
-
-- [Hetzner](hosting/examples/hetzner.md)
-- [DigitalOcean](hosting/examples/digitalocean.md)
-- [AWS Lightsail / EC2](hosting/examples/aws-lightsail.md)
-
-### 2. Configure GitHub secrets
-
-Add to your fork's **Settings > Secrets and variables > Actions**:
-
-| Secret | Description |
-|--------|-------------|
-| `DEPLOY_HOST` | VPS IP address or hostname |
-| `DEPLOY_SSH_KEY` | SSH private key for the `deploy` user |
-| `ENV_FILE` | Full contents of your `.env` file (API keys, domain, etc.) |
-
-### 3. Deploy
+Provision an Ubuntu 24.04 VPS, apply [`hosting/cloud-init.yaml`](hosting/cloud-init.yaml),
+then follow [SETUP.md](SETUP.md). In short:
 
 ```bash
-# One-time host setup (Caddy, Tailscale, supervisord)
-gh workflow run "Setup Host" --ref main
-
-# Deploy containers
-gh workflow run "Build Apps" --ref main
-gh workflow run "Build Sandbox" --ref main
+# 1. Clone this repo on (or into) the box, configure /opt/codery/.env
+# 2. One-time host setup (Caddy, Tailscale, supervisord):
+gh workflow run "Setup Host"
+# 3. Deploy services (manual pipelines — pushes never deploy):
+gh workflow run "Build Paseo"
+gh workflow run "Build Apps"
 ```
 
-## Adding a web service
+## Status
 
-1. Write a server listening on port **8000-9000** (inside the apps container)
-2. Add `containers/apps/supervisor/conf.d/myapp.conf`
-3. Add entry to `proxy/apps-routes.json`: `{"subdomain": "...", "port": PORT}`
-4. Push to `main`
-
-## Access
-
-- OpenCode: `https://opencode.yourdomain.com`
-- VS Code: `https://vscode.yourdomain.com`
-
-## Troubleshooting
-
-```bash
-/opt/codery/codery-ci --version
-cat /opt/codery/state/sandbox    # active color
-cat /opt/codery/state/apps
-```
+Experimental / pre-1.0. Codery runs real infrastructure — it serves this site —
+but its interfaces and configuration formats are still evolving. It is not yet a
+polished product for strangers; semver applies to what ships, and documented
+breaking changes land as `feat!:` commits.
 
 ## Documentation
 
-- [CLAUDE.md](CLAUDE.md) — Full architecture reference
-- [hosting/examples/](hosting/examples/) — Provider-specific setup guides
-- [docs/customizing.md](docs/customizing.md) — Customization guide
-
-## Releasing
-
-All components use [semver](https://semver.org). Cut a release by pushing a tag:
-
-```bash
-# CoderyCI (bump Cargo.toml version first)
-git tag codery-ci-v0.1.0
-git push origin codery-ci-v0.1.0
-
-# Sandbox
-git tag sandbox-v0.1.0
-git push origin sandbox-v0.1.0
-
-# Apps
-git tag apps-v0.1.0
-git push origin apps-v0.1.0
-```
-
-CI builds and publishes artifacts automatically. See [CLAUDE.md](CLAUDE.md) for full release instructions.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — architecture, port scheme, deploy semantics, operational lessons
+- [AGENTS.md](AGENTS.md) — the reference agents load when working inside this repo
+- [SETUP.md](SETUP.md) — VPS installation guide
+- [docs/customizing.md](docs/customizing.md) — GitHub App auth, domains, env
+- [docs/playwright.md](docs/playwright.md) — browser runtime boundary
 
 ## Support
 
 [![GitHub Sponsors](https://img.shields.io/badge/GitHub-Sponsors-ea4aaa?logo=github)](https://github.com/sponsors/rm-rf-etc)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buymeacoffee)](https://buymeacoffee.com/coldfusioncoder)
-[![Patreon](https://img.shields.io/badge/Patreon-ff424d?logo=patreon)](https://www.patreon.com/c/climatechangeanswer)

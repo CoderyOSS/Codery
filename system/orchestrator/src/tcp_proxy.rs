@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::config::Color;
 use crate::service_def::{PortBind, PortScheme, ServiceDef};
 use crate::state;
 
@@ -99,8 +100,8 @@ async fn proxy_connection(
     scheme: &PortScheme,
     bind_ip: &str,
 ) -> Result<()> {
-    let color = state::read_active(service)?;
-    let target_port = scheme.host_port(&color, container_port);
+    let color: Color = state::read_active(service)?;
+    let target_port = scheme.host_port(color, container_port);
     let mut outbound = TcpStream::connect((bind_ip, target_port))
         .await
         .with_context(|| format!("tcp-proxy: failed to connect to {bind_ip}:{target_port}"))?;
@@ -115,7 +116,7 @@ mod tests {
 
     fn def_with_fixed_port(service: &str, container_port: u16, fixed_port: u16) -> ServiceDef {
         serde_yaml::from_str(&format!(
-            r#"
+            r"
 service: {service}
 image: ghcr.io/test/test:{service}-{{sha}}
 port_scheme:
@@ -131,14 +132,14 @@ health_check:
 volumes: []
 required_env: []
 network: test-net
-"#
+"
         ))
         .unwrap()
     }
 
     fn def_without_fixed_port(service: &str) -> ServiceDef {
         serde_yaml::from_str(&format!(
-            r#"
+            r"
 service: {service}
 image: ghcr.io/test/test:{service}-{{sha}}
 port_scheme:
@@ -154,7 +155,7 @@ health_check:
 volumes: []
 required_env: []
 network: test-net
-"#
+"
         ))
         .unwrap()
     }
@@ -162,12 +163,12 @@ network: test-net
     #[test]
     fn collect_finds_fixed_ports() {
         let defs = vec![
-            def_with_fixed_port("sandbox", 22, 2222),
+            def_with_fixed_port("paseo", 22, 2222),
             def_without_fixed_port("apps"),
         ];
         let targets = collect_proxy_targets(&defs);
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].service, "sandbox");
+        assert_eq!(targets[0].service, "paseo");
         assert_eq!(targets[0].fixed_port, 2222);
         assert_eq!(targets[0].container_port, 22);
         assert_eq!(targets[0].scheme.blue_offset, 10000);
@@ -184,7 +185,7 @@ network: test-net
     #[test]
     fn collect_multiple_services() {
         let defs = vec![
-            def_with_fixed_port("sandbox", 22, 2222),
+            def_with_fixed_port("paseo", 22, 2222),
             def_with_fixed_port("other", 22, 3333),
         ];
         let targets = collect_proxy_targets(&defs);
@@ -196,11 +197,17 @@ network: test-net
 
     #[test]
     fn collect_port_scheme_preserved() {
-        let defs = vec![def_with_fixed_port("sandbox", 22, 2222)];
+        let defs = vec![def_with_fixed_port("paseo", 22, 2222)];
         let targets = collect_proxy_targets(&defs);
         let target = &targets[0];
         // Verify the scheme computes correct target ports for both colors
-        assert_eq!(target.scheme.host_port("blue", target.container_port), 10022);
-        assert_eq!(target.scheme.host_port("green", target.container_port), 20022);
+        assert_eq!(
+            target.scheme.host_port(Color::Blue, target.container_port),
+            10022
+        );
+        assert_eq!(
+            target.scheme.host_port(Color::Green, target.container_port),
+            20022
+        );
     }
 }

@@ -92,29 +92,21 @@ Once working, update `DEPLOY_HOST` in GitHub secrets to the Tailscale IP for sec
 
 ---
 
-## Step 5: Open Firewall for SSH
+## Step 5: SSH Access (no firewall changes)
 
-The sandbox container exposes SSH on port 2222 via a TCP proxy. Open it:
-
-```bash
-ufw allow 2222/tcp
-```
-
-This is not included in the default `cloud-init.yaml` firewall rules. Without this rule, `ssh -p 2222` will hang.
+SSH is **Tailscale-only**: the proxy binds the tailnet IP, so no public
+firewall rule is needed (do **not** `ufw allow 2222/tcp`). Add your public
+key to `/opt/codery/ssh/authorized_keys` on the VPS.
 
 ---
 
 ## Step 6: First Deploy
 
-Push to `main` to trigger container builds and deploys:
+Deploy pipelines are **manual** — pushing to `main` never deploys:
 
-```bash
-git push origin main
-```
 
-Or trigger workflows manually:
 
-- **Actions → Build Sandbox → Run workflow** — deploys the AI coding environment
+- **Actions → Build Paseo → Run workflow** — deploys the AI coding environment
 - **Actions → Build Apps → Run workflow** — deploys the apps container (if needed)
 
 The first build takes ~5-8 minutes. Subsequent builds use Docker layer caching.
@@ -135,27 +127,28 @@ Check that everything is running:
 ```bash
 # On the VPS
 supervisorctl status          # caddy, tailscale, codery-ci-daemon should be RUNNING
-docker ps                     # codery-sandbox-<color> and codery-apps-<color>
+docker ps                     # codery-paseo-<color> and codery-apps-<color>
 tailscale status              # should show connected
 ```
 
-### Test OpenCode
+### Test Paseo
 
-OpenCode serves on port 3000 inside the sandbox container. It's accessible via Caddy at:
+The paseo daemon serves on port 6767 inside its container, via Caddy:
 
 ```
-https://opencode.<yourdomain.com>
+https://code.<yourdomain.com>
 ```
 
-Or via the Tailscale IP at the mapped host port (blue=13000, green=23000).
+Or via the Tailscale IP at the mapped host port (blue=16767, green=26767).
 
 ### Test SSH
 
 ```bash
-ssh -p 2222 gem@<tailscale-ip>
+ssh -p 2222 paseo@<tailscale-ip>
 ```
 
-Connection chain: `client → :2222 (codery-ci TCP proxy) → :10xx2 (docker) → :22 (sshd)`.
+Connection chain: `client → :2222 (codery-ci TCP proxy) → :1xx22 (docker publish) → :2022 (sshd)`.
+Apps SSH is the same pattern on :3333 (`gem@`).
 
 ---
 
@@ -174,7 +167,10 @@ Connection chain: `client → :2222 (codery-ci TCP proxy) → :10xx2 (docker) �
 Check that `GHCR_USERNAME` and `GHCR_TOKEN` in the ENV_FILE secret are correct. The token needs `read:packages` scope.
 
 ### Port 2222 SSH hangs
-Ensure `ufw allow 2222/tcp` has been run on the VPS. Check with `ufw status`.
+SSH binds the Tailscale IP only. Verify you are connecting to the tailscale IP
+(`tailscale ip -4` on the VPS) and that your pubkey is in
+`/opt/codery/ssh/authorized_keys`. If a stale public `ufw allow 2222/tcp` rule
+exists, delete it — the port is not meant to be publicly reachable.
 
 ### Tailscale not connecting
 Verify the auth key is valid and not expired. Check `supervisorctl status tailscale` on the VPS. If it shows FATAL, try `tailscale down && tailscale up --ssh`.
@@ -183,11 +179,11 @@ Verify the auth key is valid and not expired. Check `supervisorctl status tailsc
 Check container logs:
 
 ```bash
-docker logs codery-sandbox-<color> --tail 50
+docker logs codery-paseo-<color> --tail 50
 ```
 
 Find the failing service with
-`docker exec codery-sandbox-<color> /command/s6-svstat /run/service/<name>`,
+`docker exec codery-apps-<color> /command/s6-svstat /run/service/<name>`,
 then read its output in the container logs above.
 
 ### CoderyCI MCP tools not responding

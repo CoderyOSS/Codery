@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use bollard::Docker;
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use bollard::Docker;
 use futures_util::StreamExt;
 use std::fs;
 
@@ -14,7 +14,8 @@ pub async fn generate_and_reload() -> Result<()> {
     let content = generate_config(&routes, &domain);
 
     let to_write = if content.is_empty() {
-        "server {\n    listen 8080 default_server;\n    return 503 \"No apps configured\";\n}\n".to_string()
+        "server {\n    listen 8080 default_server;\n    return 503 \"No apps configured\";\n}\n"
+            .to_string()
     } else {
         content
     };
@@ -27,7 +28,7 @@ pub async fn generate_and_reload() -> Result<()> {
         .with_context(|| format!("failed to write {}", config::NGINX_CONFIG))?;
 
     let count = routes.iter().filter(|r| r.internal_port.is_some()).count();
-    println!("[nginx] Wrote config with {} server block(s)", count);
+    println!("[nginx] Wrote config with {count} server block(s)");
 
     reload_in_active_container().await
 }
@@ -68,55 +69,57 @@ pub(crate) fn generate_config(routes: &[UnifiedRoute], domain: &str) -> String {
 }
 
 async fn reload_in_active_container() -> Result<()> {
-    let color = match state::read_active("apps") {
-        Ok(c) => c,
-        Err(_) => {
-            println!("[nginx] No active apps state — skipping reload");
-            return Ok(());
-        }
+    let Ok(color) = state::read_active("apps") else {
+        println!("[nginx] No active apps state — skipping reload");
+        return Ok(());
     };
-    let container = config::container_name("apps", &color);
+    let container = config::container_name("apps", color);
 
-    let docker = Docker::connect_with_socket_defaults()
-        .context("failed to connect to Docker")?;
+    let docker = Docker::connect_with_socket_defaults().context("failed to connect to Docker")?;
 
-    let running = docker.inspect_container(&container, None).await
+    let running = docker
+        .inspect_container(&container, None)
+        .await
         .ok()
         .and_then(|i| i.state)
         .and_then(|s| s.running)
         .unwrap_or(false);
 
     if !running {
-        println!("[nginx] Container {} not running — skipping reload", container);
+        println!("[nginx] Container {container} not running — skipping reload");
         return Ok(());
     }
 
-    let exec = docker.create_exec(
-        &container,
-        CreateExecOptions {
-            // -c is load-bearing: without it nginx parses its compiled-default
-            // (nix store) config, whose `nogroup` default group doesn't exist
-            // in the container — `getgrnam("nogroup") failed` kills the reload
-            // before the master is ever signaled.
-            cmd: Some(vec!["nginx", "-c", "/etc/nginx/nginx.conf", "-s", "reload"]),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        },
-    ).await.with_context(|| format!("failed to create exec in {}", container))?;
+    let exec = docker
+        .create_exec(
+            &container,
+            CreateExecOptions {
+                // -c is load-bearing: without it nginx parses its compiled-default
+                // (nix store) config, whose `nogroup` default group doesn't exist
+                // in the container — `getgrnam("nogroup") failed` kills the reload
+                // before the master is ever signaled.
+                cmd: Some(vec!["nginx", "-c", "/etc/nginx/nginx.conf", "-s", "reload"]),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .with_context(|| format!("failed to create exec in {container}"))?;
 
-    if let StartExecResults::Attached { mut output, .. } = docker.start_exec(&exec.id, None).await? {
+    if let StartExecResults::Attached { mut output, .. } = docker.start_exec(&exec.id, None).await?
+    {
         while let Some(msg) = output.next().await {
             if let bollard::container::LogOutput::StdErr { message } = msg? {
                 let text = String::from_utf8_lossy(&message);
                 if !text.trim().is_empty() {
-                    eprint!("[nginx] {}", text);
+                    eprint!("[nginx] {text}");
                 }
             }
         }
     }
 
-    println!("[nginx] Reloaded Nginx in {}", container);
+    println!("[nginx] Reloaded Nginx in {container}");
     Ok(())
 }
 
@@ -164,12 +167,12 @@ mod tests {
     fn route_without_internal_port_is_skipped() {
         let routes = vec![apps_route("myapp", None)];
         let cfg = generate_config(&routes, "example.com");
-        assert!(cfg.is_empty());
+        assert_eq!(cfg, "");
     }
 
     #[test]
     fn empty_routes_returns_empty_string() {
-        assert!(generate_config(&[], "example.com").is_empty());
+        assert_eq!(generate_config(&[], "example.com"), "");
     }
 
     #[test]
@@ -184,7 +187,7 @@ mod tests {
     fn host_routes_excluded_from_nginx() {
         let routes = vec![host_route("mcp", 4040)];
         let cfg = generate_config(&routes, "example.com");
-        assert!(cfg.is_empty());
+        assert_eq!(cfg, "");
     }
 
     #[test]

@@ -1,0 +1,12 @@
+[program:caddy]
+command=/usr/local/bin/caddy-start.sh
+user=root
+autostart=true
+autorestart=true
+priority=35
+stdout_logfile=/var/log/supervisor/caddy.log
+stdout_logfile_maxbytes=10MB
+stdout_logfile_backups=2
+stderr_logfile=/var/log/supervisor/caddy.log
+stderr_logfile_maxbytes=10MB
+environment=CLOUDFLARE_API_TOKEN="%(ENV_CLOUDFLARE_API_TOKEN)s",CLOUDFLARE_ZONE_ID="%(ENV_CLOUDFLARE_ZONE_ID)s"

@@ -3,9 +3,10 @@ use std::net::TcpListener;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use bollard::Docker;
 use bollard::volume::CreateVolumeOptions;
+use bollard::Docker;
 
+use crate::config::Color;
 use crate::service_def::{ServiceDef, VolumeMount};
 use crate::{config, images, state};
 
@@ -24,7 +25,7 @@ use crate::{config, images, state};
 pub async fn check_deploy(
     def: &ServiceDef,
     sha: &str,
-    inactive: &str,
+    inactive: Color,
     docker: &Docker,
 ) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
@@ -59,7 +60,7 @@ pub async fn check_deploy(
     for vol in &def.volumes {
         if let VolumeMount::Named { name, .. } = vol {
             if let Err(e) = ensure_named_volume(docker, name).await {
-                errors.push(format!("named volume '{}': {e}", name));
+                errors.push(format!("named volume '{name}': {e}"));
             }
         }
     }
@@ -76,9 +77,9 @@ pub async fn check_deploy(
     // Ports belonging to the currently active color will be vacated when the
     // old container stops, so skip them. Only flag ports that are bound by
     // something else entirely.
-    let active = state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string());
+    let active = state::read_active(&def.service).unwrap_or(Color::Blue);
     let active_ports: HashSet<u16> = def
-        .port_mappings(&active)
+        .port_mappings(active)
         .into_iter()
         .map(|(host, _)| host)
         .collect();
@@ -92,8 +93,7 @@ pub async fn check_deploy(
             Ok(_) => {} // Port is free.
             Err(_) => {
                 errors.push(format!(
-                    "host port {} is already in use by a foreign process",
-                    host_port
+                    "host port {host_port} is already in use by a foreign process"
                 ));
             }
         }
@@ -118,7 +118,7 @@ pub async fn check_deploy(
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        Err(anyhow::anyhow!("{}", msg))
+        Err(anyhow::anyhow!("{msg}"))
     }
 }
 
@@ -126,9 +126,8 @@ pub async fn check_deploy(
 
 /// Parse /opt/codery/.env into a key→value map. Missing file returns empty map.
 fn load_env_map() -> HashMap<String, String> {
-    let content = match std::fs::read_to_string(config::ENV_FILE) {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
+    let Ok(content) = std::fs::read_to_string(config::ENV_FILE) else {
+        return HashMap::new();
     };
     content
         .lines()
@@ -162,8 +161,10 @@ fn substitute_env(s: &str, env: &HashMap<String, String>) -> Result<String> {
 async fn ensure_named_volume(docker: &Docker, name: &str) -> Result<()> {
     match docker.inspect_volume(name).await {
         Ok(_) => Ok(()),
-        Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => {
-            println!("[validate] Creating missing named volume: {}", name);
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => {
+            println!("[validate] Creating missing named volume: {name}");
             docker
                 .create_volume(CreateVolumeOptions {
                     name,

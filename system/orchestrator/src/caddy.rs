@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
 
-use crate::config;
+use crate::config::{self, Color};
 use crate::db::{self, UnifiedRoute};
 use crate::service_def::ServiceDef;
 use crate::state;
@@ -11,10 +11,10 @@ use crate::state;
 pub fn apply_all() -> Result<()> {
     let defs = ServiceDef::load_all()?;
     let domain = config::load_domain();
-    let colors: HashMap<String, String> = defs
+    let colors: HashMap<String, Color> = defs
         .iter()
         .map(|d| {
-            let color = state::read_active(&d.service).unwrap_or_else(|_| "blue".to_string());
+            let color = state::read_active(&d.service).unwrap_or(Color::Blue);
             (d.service.clone(), color)
         })
         .collect();
@@ -22,7 +22,7 @@ pub fn apply_all() -> Result<()> {
     let conn = db::open()?;
     let routes = db::build_route_map(&conn)?;
 
-    let content = generate_from_routes(&routes, &colors, &domain)?;
+    let content = generate_from_routes(&routes, &colors, &domain);
     fs::write(config::CADDY_CONFIG, &content)
         .with_context(|| format!("failed to write {}", config::CADDY_CONFIG))?;
     reload_caddy()?;
@@ -32,12 +32,10 @@ pub fn apply_all() -> Result<()> {
 
 pub fn generate_from_routes(
     routes: &[UnifiedRoute],
-    colors: &HashMap<String, String>,
+    colors: &HashMap<String, Color>,
     domain: &str,
-) -> Result<String> {
-    let mut caddy = String::from(
-        "{\n    acme_dns cloudflare {$CLOUDFLARE_API_TOKEN}\n}\n",
-    );
+) -> String {
+    let mut caddy = String::from("{\n    acme_dns cloudflare {$CLOUDFLARE_API_TOKEN}\n}\n");
 
     let env_pairs = load_env_pairs();
     for route in routes {
@@ -49,17 +47,20 @@ pub fn generate_from_routes(
 
         let host_port = match route.target.as_str() {
             "host" => route.port,
-            "sandbox" => {
-                let color = colors.get("sandbox").map(|s| s.as_str()).unwrap_or("blue");
-                sandbox_host_port(color, route.port)
+            "paseo" => {
+                let color = colors.get("paseo").copied().unwrap_or(Color::Blue);
+                paseo_host_port(color, route.port)
             }
             "apps" => {
-                let color = colors.get("apps").map(|s| s.as_str()).unwrap_or("blue");
-                let offset: u16 = if color == "blue" { 0 } else { 10000 };
+                let color = colors.get("apps").copied().unwrap_or(Color::Blue);
+                let offset: u16 = match color {
+                    Color::Blue => 0,
+                    Color::Green => 10000,
+                };
                 route.port + offset
             }
             target => {
-                let c = colors.get(target).map(|s| s.as_str()).unwrap_or("blue");
+                let c = colors.get(target).copied().unwrap_or(Color::Blue);
                 let def = ServiceDef::load(target).ok();
                 if let Some(def) = def {
                     def.port_scheme.host_port(c, route.port)
@@ -80,11 +81,14 @@ pub fn generate_from_routes(
         ));
     }
 
-    Ok(caddy)
+    caddy
 }
 
-fn sandbox_host_port(color: &str, container_port: u16) -> u16 {
-    let offset: u16 = if color == "blue" { 10000 } else { 20000 };
+fn paseo_host_port(color: Color, container_port: u16) -> u16 {
+    let offset: u16 = match color {
+        Color::Blue => 10000,
+        Color::Green => 20000,
+    };
     container_port + offset
 }
 
@@ -125,16 +129,12 @@ fn caddy_block(
     };
 
     format!(
-        r#"
+        r"
 {host} {{
     bind {{$TAILSCALE_IP}}
 {auth_directive}    reverse_proxy localhost:{port}{cache_headers}
 }}
-"#,
-        host = host,
-        auth_directive = auth_directive,
-        port = port,
-        cache_headers = cache_headers
+"
     )
 }
 
@@ -142,7 +142,13 @@ fn reload_caddy() -> Result<()> {
     let env_pairs = load_env_pairs();
 
     let out = Command::new("caddy")
-        .args(["reload", "--config", config::CADDY_CONFIG, "--adapter", "caddyfile"])
+        .args([
+            "reload",
+            "--config",
+            config::CADDY_CONFIG,
+            "--adapter",
+            "caddyfile",
+        ])
         .envs(env_pairs)
         .output()
         .context("failed to run caddy reload")?;
@@ -157,9 +163,8 @@ fn reload_caddy() -> Result<()> {
 }
 
 fn load_env_pairs() -> Vec<(String, String)> {
-    let content = match std::fs::read_to_string(config::ENV_FILE) {
-        Ok(c) => c,
-        Err(_) => return vec![],
+    let Ok(content) = std::fs::read_to_string(config::ENV_FILE) else {
+        return vec![];
     };
     let mut pairs: Vec<(String, String)> = content
         .lines()
@@ -199,11 +204,11 @@ fn load_env_pairs() -> Vec<(String, String)> {
 mod tests {
     use super::*;
 
-    fn sandbox_route(subdomain: &str, port: u16) -> UnifiedRoute {
+    fn paseo_route(subdomain: &str, port: u16) -> UnifiedRoute {
         UnifiedRoute {
             subdomain: subdomain.to_string(),
             port,
-            target: "sandbox".to_string(),
+            target: "paseo".to_string(),
             internal_port: None,
             no_cache: false,
             auth_env: None,
@@ -232,57 +237,48 @@ mod tests {
         }
     }
 
-    fn colors(sandbox: &str, apps: &str) -> HashMap<String, String> {
+    fn colors(paseo: Color, apps: Color) -> HashMap<String, Color> {
         let mut m = HashMap::new();
-        m.insert("sandbox".to_string(), sandbox.to_string());
-        m.insert("apps".to_string(), apps.to_string());
+        m.insert("paseo".to_string(), paseo);
+        m.insert("apps".to_string(), apps);
         m
     }
 
     #[test]
-    fn sandbox_blue_uses_10k_offset() {
-        let routes = vec![
-            sandbox_route("opencode", 3000),
-            sandbox_route("cli", 7681),
-        ];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+    fn paseo_blue_uses_10k_offset() {
+        let routes = vec![paseo_route("opencode", 3000), paseo_route("cli", 7681)];
+        let caddy = generate_from_routes(&routes, &colors(Color::Blue, Color::Blue), "example.com");
         assert!(caddy.contains("reverse_proxy localhost:13000"));
         assert!(caddy.contains("reverse_proxy localhost:17681"));
     }
 
     #[test]
-    fn sandbox_green_uses_20k_offset() {
-        let routes = vec![
-            sandbox_route("opencode", 3000),
-        ];
-        let caddy = generate_from_routes(&routes, &colors("green", "blue"), "example.com").unwrap();
+    fn paseo_green_uses_20k_offset() {
+        let routes = vec![paseo_route("opencode", 3000)];
+        let caddy =
+            generate_from_routes(&routes, &colors(Color::Green, Color::Blue), "example.com");
         assert!(caddy.contains("reverse_proxy localhost:23000"));
     }
 
     #[test]
     fn apps_green_uses_10k_offset() {
-        let routes = vec![
-            apps_route("myapp", 3001),
-        ];
-        let caddy = generate_from_routes(&routes, &colors("blue", "green"), "example.com").unwrap();
+        let routes = vec![apps_route("myapp", 3001)];
+        let caddy =
+            generate_from_routes(&routes, &colors(Color::Blue, Color::Green), "example.com");
         assert!(caddy.contains("reverse_proxy localhost:18080"));
     }
 
     #[test]
     fn apps_blue_no_offset() {
-        let routes = vec![
-            apps_route("myapp", 3001),
-        ];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let routes = vec![apps_route("myapp", 3001)];
+        let caddy = generate_from_routes(&routes, &colors(Color::Blue, Color::Blue), "example.com");
         assert!(caddy.contains("reverse_proxy localhost:8080"));
     }
 
     #[test]
     fn host_routes_no_offset() {
-        let routes = vec![
-            host_route("mcp", 4040),
-        ];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let routes = vec![host_route("mcp", 4040)];
+        let caddy = generate_from_routes(&routes, &colors(Color::Blue, Color::Blue), "example.com");
         assert!(caddy.contains("reverse_proxy localhost:4040"));
     }
 
@@ -317,34 +313,30 @@ mod tests {
 
     #[test]
     fn fqdn_subdomain_used_as_is() {
-        let routes = vec![
-            UnifiedRoute {
-                subdomain: "myapp.custom.com".to_string(),
-                port: 8080,
-                target: "apps".to_string(),
-                internal_port: Some(3001),
-                no_cache: false,
-                auth_env: None,
-            },
-        ];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let routes = vec![UnifiedRoute {
+            subdomain: "myapp.custom.com".to_string(),
+            port: 8080,
+            target: "apps".to_string(),
+            internal_port: Some(3001),
+            no_cache: false,
+            auth_env: None,
+        }];
+        let caddy = generate_from_routes(&routes, &colors(Color::Blue, Color::Blue), "example.com");
         assert!(caddy.contains("myapp.custom.com"));
         assert!(!caddy.contains("myapp.custom.com.example.com"));
     }
 
     #[test]
     fn no_cache_route_adds_cache_headers() {
-        let routes = vec![
-            UnifiedRoute {
-                subdomain: "myapp".to_string(),
-                port: 8080,
-                target: "apps".to_string(),
-                internal_port: Some(3001),
-                no_cache: true,
-                auth_env: None,
-            },
-        ];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let routes = vec![UnifiedRoute {
+            subdomain: "myapp".to_string(),
+            port: 8080,
+            target: "apps".to_string(),
+            internal_port: Some(3001),
+            no_cache: true,
+            auth_env: None,
+        }];
+        let caddy = generate_from_routes(&routes, &colors(Color::Blue, Color::Blue), "example.com");
         assert!(caddy.contains("Cache-Control"));
         assert!(caddy.contains("no-store"));
         assert!(caddy.contains("Pragma"));
@@ -353,17 +345,15 @@ mod tests {
 
     #[test]
     fn cache_route_has_no_cache_headers() {
-        let routes = vec![
-            UnifiedRoute {
-                subdomain: "myapp".to_string(),
-                port: 8080,
-                target: "apps".to_string(),
-                internal_port: Some(3001),
-                no_cache: false,
-                auth_env: None,
-            },
-        ];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let routes = vec![UnifiedRoute {
+            subdomain: "myapp".to_string(),
+            port: 8080,
+            target: "apps".to_string(),
+            internal_port: Some(3001),
+            no_cache: false,
+            auth_env: None,
+        }];
+        let caddy = generate_from_routes(&routes, &colors(Color::Blue, Color::Blue), "example.com");
         assert!(!caddy.contains("Cache-Control"));
         assert!(!caddy.contains("Pragma"));
     }
