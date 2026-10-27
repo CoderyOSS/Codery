@@ -142,9 +142,7 @@ async fn spawn_with(
     bin: &str,
 ) -> Result<SpawnResponse, String> {
     if !toggle_enabled_at(toggle_path) {
-        return Err(format!(
-            "MCP exec disabled. Run on host: codery-ci mcp-exec enable"
-        ));
+        return Err("MCP exec disabled. Run on host: codery-ci mcp-exec enable".to_string());
     }
     let subcmd = args
         .first()
@@ -298,10 +296,8 @@ fn read_tail(path: &Path, max_bytes: usize) -> String {
         Err(_) => return String::new(),
     };
     let size = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
-    if size > max_bytes {
-        if file.seek(SeekFrom::End(-(max_bytes as i64))).is_err() {
-            return String::new();
-        }
+    if size > max_bytes && file.seek(SeekFrom::End(-(max_bytes as i64))).is_err() {
+        return String::new();
     }
     let mut buf = Vec::with_capacity(max_bytes.min(size));
     let _ = file.read_to_end(&mut buf);

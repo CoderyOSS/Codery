@@ -23,8 +23,6 @@ pub struct ServiceDef {
     pub ports: Vec<NamedPort>,
     /// Bulk port range for Docker binding (apps-style services).
     pub port_range: Option<PortRange>,
-    /// Path to a JSON file with extra Caddy routes (apps-routes.json pattern).
-    pub routes_file: Option<String>,
     pub volumes: Vec<VolumeMount>,
     /// Keys that must exist in /opt/codery/.env before deploy is attempted.
     #[serde(default)]

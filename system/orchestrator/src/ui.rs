@@ -431,10 +431,7 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
                 // Container process exited — if we were stopping it, clear op.
                 // If we sent kill, clear op. If stop is in flight, clear op too.
                 "die" | "stop" => {
-                    if matches!(
-                        ops.get(cname).map(|s| *s),
-                        Some("stopping") | Some("killing")
-                    ) {
+                    if matches!(ops.get(cname).copied(), Some("stopping") | Some("killing")) {
                         ops.remove(cname);
                     }
                 }

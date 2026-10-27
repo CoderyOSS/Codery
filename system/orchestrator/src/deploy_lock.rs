@@ -25,6 +25,7 @@ impl DeployLock {
     pub(crate) fn try_acquire_path(path: &str) -> Result<Self> {
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(path)
             .map_err(|e| anyhow::anyhow!("failed to open lock file {}: {}", path, e))?;

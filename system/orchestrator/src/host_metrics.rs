@@ -219,7 +219,6 @@ pub fn derive_health(
 #[derive(Debug, Clone)]
 pub struct ProcSample {
     pub pid: i32,
-    pub ppid: i32,
     pub state: String,
     pub comm: String,
     pub utime: u64,
@@ -253,6 +252,7 @@ fn clock_ticks() -> f64 {
 }
 
 /// Parse /proc/[pid]/stat. Returns (pid, ppid, state, utime, stime).
+/// ppid is only used during snapshotting (kernel-thread filter), not stored.
 /// comm (field 2) may contain spaces and parens — parse after the LAST ')'.
 pub fn parse_stat(content: &str) -> Option<(i32, i32, String, u64, u64)> {
     let open = content.find('(')?;
@@ -335,7 +335,6 @@ pub fn scan_processes() -> std::io::Result<ProcSnapshot> {
 
         procs.push(ProcSample {
             pid,
-            ppid,
             state,
             comm,
             utime,
@@ -750,7 +749,6 @@ SwapFree:              0 kB
     fn proc_sample(pid: i32, utime: u64, stime: u64, container_id: &str) -> ProcSample {
         ProcSample {
             pid,
-            ppid: 1,
             state: "S".into(),
             comm: format!("p{pid}"),
             utime,
@@ -849,7 +847,6 @@ SwapFree:              0 kB
         for i in 0..20 {
             procs.push(ProcSample {
                 pid: i,
-                ppid: 1,
                 state: "S".into(),
                 comm: format!("p{i}"),
                 utime: 0,

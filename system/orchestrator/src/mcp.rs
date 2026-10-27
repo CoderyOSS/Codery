@@ -217,7 +217,11 @@ async fn container_exec(service: &str, cmd: &[&str]) -> Result<String, String> {
 /// Read per-service status from an s6-based container. Err if the container
 /// isn't s6-based (no /command/s6-svstat or /run/service).
 async fn svc_stats(service: &str) -> Result<Vec<crate::s6::SvcStat>, String> {
-    let out = container_exec(service, &["bash", "-c", crate::s6::SVSTAT_BATCH_CMD]).await?;
+    let out = container_exec(
+        service,
+        &["bash", "-c", crate::s6::svstat_batch_cmd().as_str()],
+    )
+    .await?;
     if out.starts_with("[exited") {
         return Err(format!("s6 status read failed: {}", out));
     }
@@ -943,7 +947,7 @@ impl OrchestratorMcp {
         let container = config::container_name(&service, &color);
         let output = shell_output("docker", &["port", &container])
             .await
-            .map_err(|e| tool_err(e))?;
+            .map_err(tool_err)?;
         tool_ok(format!(
             "{}\n\n---\nGuidance: These are the Docker port mappings from host to container.",
             output
@@ -974,9 +978,7 @@ impl OrchestratorMcp {
         &self,
         Parameters(PortParam { port }): Parameters<PortParam>,
     ) -> Result<CallToolResult, McpError> {
-        let raw = shell_output("ss", &["-tlnp"])
-            .await
-            .map_err(|e| tool_err(e))?;
+        let raw = shell_output("ss", &["-tlnp"]).await.map_err(tool_err)?;
         let port_str = format!(":{}", port);
         let mut lines: Vec<&str> = raw
             .lines()
@@ -999,7 +1001,7 @@ impl OrchestratorMcp {
     async fn get_host_supervisor_status(&self) -> Result<CallToolResult, McpError> {
         let output = shell_output("supervisorctl", &["-c", config::SUPERVISORD_CONF, "status"])
             .await
-            .map_err(|e| tool_err(e))?;
+            .map_err(tool_err)?;
         tool_ok(format!(
             "{}\n\n---\nGuidance: Host supervisor manages caddy, tailscale, and codery-ci-mcp.",
             output
@@ -1015,7 +1017,7 @@ impl OrchestratorMcp {
     async fn get_tailscale_status(&self) -> Result<CallToolResult, McpError> {
         let output = shell_output("tailscale", &["status"])
             .await
-            .map_err(|e| tool_err(e))?;
+            .map_err(tool_err)?;
         tool_ok(format!("{}\n\n---\nGuidance: All traffic enters through Tailscale VPN. If peers show no connection, check tailscale-up.sh.", output))
     }
 
@@ -1026,7 +1028,7 @@ impl OrchestratorMcp {
     async fn get_disk_usage(&self) -> Result<CallToolResult, McpError> {
         let output = shell_output("df", &["-h", "/opt/codery", "/var/lib/docker"])
             .await
-            .map_err(|e| tool_err(e))?;
+            .map_err(tool_err)?;
         tool_ok(format!("{}\n\n---\nGuidance: Full disk causes silent deploy failures. If >90%, prune old images or docker system prune.", output))
     }
 
@@ -1047,7 +1049,7 @@ impl OrchestratorMcp {
             ],
         )
         .await
-        .map_err(|e| tool_err(e))?;
+        .map_err(tool_err)?;
         tool_ok(format!("{}\n\n---\nGuidance: Shows all containers including stopped ones from previous deploys.", output))
     }
 

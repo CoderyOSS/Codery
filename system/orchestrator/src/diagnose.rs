@@ -267,6 +267,11 @@ pub async fn run() -> Result<DiagnoseReport> {
         Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
 
     // ── Service checks ───────────────────────────────────────────────────────
+    // The db is opened first: pending previews influence service severity below.
+    let conn = db::open().context("failed to open codery.db")?;
+    db::init(&conn).context("failed to init codery.db")?;
+    let previews_db = db::list_previews(&conn).context("failed to list previews")?;
+
     let mut services: Vec<ServiceIssue> = Vec::new();
     let mut state_colors: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -294,7 +299,12 @@ pub async fn run() -> Result<DiagnoseReport> {
             }
         }
 
-        let severity = classify_service(&state_color, &running_colors);
+        let severity = if previews_db.iter().any(|p| p.service == *service) {
+            // A preview deploy is pending cutover for this service.
+            Severity::Stale
+        } else {
+            classify_service(&state_color, &running_colors)
+        };
         let (running_container, image) = match severity {
             Severity::Ok | Severity::Mismatch => {
                 let c = running_colors[0];
@@ -320,8 +330,6 @@ pub async fn run() -> Result<DiagnoseReport> {
     }
 
     // ── Route checks ─────────────────────────────────────────────────────────
-    let conn = db::open().context("failed to open codery.db")?;
-    db::init(&conn).context("failed to init codery.db")?;
     let unified = db::build_route_map(&conn).context("failed to build route map")?;
     let domain = config::load_domain();
 
@@ -352,7 +360,6 @@ pub async fn run() -> Result<DiagnoseReport> {
     }
 
     // ── Preview checks ───────────────────────────────────────────────────────
-    let previews_db = db::list_previews(&conn).context("failed to list previews")?;
     let previews: Vec<PreviewIssue> = previews_db
         .iter()
         .map(|p| PreviewIssue {

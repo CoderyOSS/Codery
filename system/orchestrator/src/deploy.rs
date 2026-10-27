@@ -547,8 +547,10 @@ pub(crate) async fn start_container(
     let networking_config: Option<NetworkingConfig<String>> = if def.network_aliases.is_empty() {
         None
     } else {
-        let mut ep = EndpointSettings::default();
-        ep.aliases = Some(def.network_aliases.clone());
+        let ep = EndpointSettings {
+            aliases: Some(def.network_aliases.clone()),
+            ..Default::default()
+        };
         let mut endpoints = std::collections::HashMap::new();
         endpoints.insert(def.network.clone(), ep);
         Some(NetworkingConfig {
@@ -852,7 +854,7 @@ async fn wait_for_docker_healthy(docker: &Docker, name: &str, timeout_secs: u64)
             .with_context(|| format!("failed to inspect container {}", name))?;
 
         let health = info.state.and_then(|s| s.health);
-        let status = health.as_ref().and_then(|h| h.status.clone());
+        let status = health.as_ref().and_then(|h| h.status);
 
         match status {
             Some(HealthStatusEnum::HEALTHY) => return Ok(true),

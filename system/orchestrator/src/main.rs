@@ -345,8 +345,8 @@ async fn main() -> Result<()> {
 
             let domain = config::load_domain();
             println!(
-                "[deploy-preview] {} inactive={} started. Preview at https://{}:{} (direct) or https://{}.{}",
-                service, inactive, "localhost", host_port, subdomain, domain
+                "[deploy-preview] {} inactive={} started. Preview at https://localhost:{} (direct) or https://{}.{}",
+                service, inactive, host_port, subdomain, domain
             );
             println!("[deploy-preview] promote:    codery-ci cutover {}", service);
             println!(

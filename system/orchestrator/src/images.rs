@@ -120,7 +120,7 @@ pub async fn prune(service: &str) -> Result<()> {
         .context("failed to list images")?;
 
     // Sort by Created descending (newest first)
-    images.sort_by(|a, b| b.created.cmp(&a.created));
+    images.sort_by_key(|a| std::cmp::Reverse(a.created));
 
     // Keep the first 2, remove the rest
     let mut removed = 0;
@@ -195,7 +195,7 @@ pub async fn list_local(service: &str) -> anyhow::Result<Vec<LocalImage>> {
         })
         .collect();
 
-    result.sort_by(|a, b| b.created.cmp(&a.created));
+    result.sort_by_key(|a| std::cmp::Reverse(a.created));
     Ok(result)
 }
 

@@ -64,15 +64,6 @@ pub fn load_domain() -> String {
     DEFAULT_DOMAIN.to_string()
 }
 
-pub fn mcp_host(domain: &str) -> String {
-    format!("mcp.{}", domain)
-}
-
-#[allow(dead_code)]
-pub fn ui_host(domain: &str) -> String {
-    format!("ci.{}", domain)
-}
-
 /// Returns the container name for a service+color pair.
 pub fn container_name(service: &str, color: &str) -> String {
     format!("codery-{}-{}", service, color)

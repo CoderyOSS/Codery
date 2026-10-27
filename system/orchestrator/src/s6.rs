@@ -11,9 +11,16 @@ pub const S6_INTERNAL_SERVICES: [&str; 3] = [
     "s6rc-oneshot-runner",
 ];
 
-/// Bash one-liner printing `name|up pid uptime_secs` per supervised service.
-/// Run as: docker exec <container> bash -c "$SVSTAT_BATCH_CMD".
-pub const SVSTAT_BATCH_CMD: &str = r#"for d in /run/service/*/; do n=$(basename "$d"); case "$n" in s6-linux-init-shutdownd|s6rc-fdholder|s6rc-oneshot-runner) continue;; esac; echo "$n|$(/command/s6-svstat -o up,pid,updownfor "$d")"; done"#;
+/// Bash one-liner printing `name|up pid uptime_secs` per supervised service,
+/// skipping s6's internal plumbing services (kept in sync with
+/// [`S6_INTERNAL_SERVICES`]). Run as:
+/// `docker exec <container> bash -c "$(svstat_batch_cmd())"`.
+pub fn svstat_batch_cmd() -> String {
+    let skip = S6_INTERNAL_SERVICES.join("|");
+    format!(
+        r#"for d in /run/service/*/; do n=$(basename "$d"); case "$n" in {skip}) continue;; esac; echo "$n|$(/command/s6-svstat -o up,pid,updownfor "$d")"; done"#
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SvcStat {
@@ -68,7 +75,7 @@ mod tests {
     fn parses_down_service() {
         let out = "worker|false -1 7\n";
         let stats = parse_svstat_batch(out);
-        assert_eq!(stats[0].up, false);
+        assert!(!stats[0].up);
         assert_eq!(stats[0].pid, -1);
         assert_eq!(stats[0].uptime_secs, 7);
     }
