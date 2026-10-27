@@ -563,7 +563,7 @@ pipelines.** The pipelines are the fallback path, not the default.
 | Release Apps | tag push `apps-v*` | Builds apps image |
 | Repair Host | `workflow_dispatch` + hourly cron | Idempotent host-services repair (supervisor/Caddy/Tailscale self-heal) |
 
-**Pushing to `master` never deploys.** After pushing changes, run the relevant
+**Pushing to `main` never deploys.** After pushing changes, run the relevant
 workflow manually from the Actions tab (or `gh workflow run`).
 
 ---
@@ -585,7 +585,7 @@ All components follow [semantic versioning](https://semver.org). Pre-1.0: minor 
 1. Bump version in `system/orchestrator/Cargo.toml` (`version` field in `[package]`)
 2. Commit: `git commit -m "codery-ci: bump to vX.Y.Z"`
 3. Tag: `git tag codery-ci-vX.Y.Z`
-4. Push: `github-push master && github-push codery-ci-vX.Y.Z`
+4. Push: `github-push main && github-push codery-ci-vX.Y.Z`
 5. CI builds both x86_64 and aarch64 binaries via `cross`, attaches them to a GitHub Release
 
 ### Cutting a Sandbox release
