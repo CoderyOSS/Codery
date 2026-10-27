@@ -686,7 +686,9 @@ mod tests {
 
     /// E2E: start a real Docker container, hit /api/status, verify it appears
     /// with the correct flat shape {name, image, status, state}.
+    /// Integration test — needs a live Docker socket and real containers.
     #[tokio::test]
+    #[ignore = "integration: requires live Docker socket; run on a host"]
     async fn status_lists_running_containers() {
         let Ok(docker) = Docker::connect_with_socket_defaults() else {
             return; // skip if Docker unavailable

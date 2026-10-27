@@ -5,6 +5,12 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # serde_yaml 0.9 -> unsafe-libyaml (RUSTSEC-2024-0449, unmaintained).
+  # serde_yaml is the config-parsing dependency; migrating off it is tracked
+  # as its own change (upstream suggests serde_norway / the config crate).
+  "RUSTSEC-2024-0449",
+]
 
 [licenses]
 version = 2

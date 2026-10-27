@@ -762,7 +762,7 @@ SwapFree:              0 kB
     // ── Process scanner fixtures ─────────────────────────────────────────
 
     const STAT: &str = "1234 (opencode serve) S 1 0 0 0 -1 4194560 0 0 0 0 100 50 0 0 20 0 1 0 12345 1 1 18446744073709551615 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1\n";
-    const STATM: &str = "100000 197_100 50000 1000 0 60000 0\n";
+    const STATM: &str = "100000 197100 50000 1000 0 60000 0\n";
     const CGROUP_IN_CONTAINER: &str = "0::/system.slice/docker-abc123def456abc123def456abc123def456abc123def456abc123def456abc1.scope\n";
     const CGROUP_HOST: &str = "0::/init.scope\n";
 
@@ -913,7 +913,10 @@ SwapFree:              0 kB
             m.health.status.as_str(),
             "green" | "yellow" | "red"
         ));
-        assert_eq!(m.top_processes, [] as [TopProcess; 0]);
+        // top_processes reflects the real host — on any live box it is
+        // non-empty; only assert invariants (sorted by rss desc).
+        let top = &m.top_processes;
+        assert!(top.windows(2).all(|w| w[0].rss_mb >= w[1].rss_mb));
         // Second collect has a prev sample → cpu deltas active, no panic.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let m2 = collect(&mut state, &containers);
