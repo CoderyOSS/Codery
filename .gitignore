@@ -14,4 +14,7 @@ debug/
 auth.json
 skills-lock.json
 *.original.md
-sandbox/bin/
+*.tsbuildinfo
+system/launchy/target/
+system/orchestrator/ui/dist/
+system/orchestrator/ui/node_modules/
