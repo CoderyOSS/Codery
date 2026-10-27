@@ -35,7 +35,7 @@ volumes:
     host: /opt/codery/github-app.pem
     container: /run/secrets/github-app.pem
     readonly: true
-  # Host-managed SSH client keys (Blink etc.) — same file the sandbox mounts.
+  # Host-managed SSH client keys (Blink etc.) — same file the paseo container mounts.
   # Adding a device = append pubkey here, no image rebuild needed.
   - type: bind
     host: /opt/codery/ssh/authorized_keys
@@ -62,7 +62,7 @@ required_env:
 
 network: codery-net
 
-# Docker alias so `ssh gem@apps` resolves from sandbox inside codery-net.
+# Docker alias so `ssh gem@apps` resolves from paseo inside codery-net.
 network_aliases:
   - apps
 

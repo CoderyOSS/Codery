@@ -3,10 +3,8 @@ image: ghcr.io/coderyoss/codery:paseo-{sha}
 
 # Standalone Paseo control plane (paseo.sh): the iPad Paseo app connects to
 # this daemon (WebSocket + password), which spawns opencode agents on the
-# shared projects tree. Deliberately SEPARATE from the sandbox service: the
-# daemon must own the agent processes it spawns, and this way sandbox
-# rebuilds never touch Paseo. If this service proves out, it replaces the
-# sandbox entirely (user directive, 2026-10-19).
+# shared projects tree. Replaced the legacy agent container entirely
+# (user directive, 2026-10-19); this is the only agent environment.
 
 # Port formula: host_port = container_port + offset
 # blue:  6767+10000=16767
@@ -26,6 +24,14 @@ ports:
     # unauthenticated endpoint.
     bind: loopback
 
+  - name: ssh
+    container_port: 2022
+    fixed_port: 2222
+    # Tailnet-only SSH for agents/operators (key-only, no root login).
+    # The stable-port proxy forwards host :2222 -> this container's :2022,
+    # following the active color. Never exposed publicly.
+    bind: tailnet
+
 health_check:
   type: tcp
   port: daemon
@@ -38,13 +44,13 @@ volumes:
   - type: named
     name: codery-paseo-home
     container: /home/paseo
-  # Projects the agents work on — same tree the sandbox serves (uid 1000
-  # owner matches the image's paseo user).
+  # Projects the agents work on (uid 1000 owner matches the image's paseo
+  # user).
   - type: bind
     host: /opt/codery/projects
     container: /workspace
-  # OpenCode provider auth (auth.json) — shared with the sandbox's opencode
-  # (same uid, same trust domain; both write atomically).
+  # OpenCode provider auth (auth.json) — same uid/trust domain as every
+  # Codery agent container; written atomically.
   - type: bind
     host: /opt/codery/data/opencode
     container: /home/paseo/.local/share/opencode
@@ -60,6 +66,20 @@ volumes:
   - type: bind
     host: /opt/codery/github-app.pem
     container: /run/secrets/github-app.pem
+    readonly: true
+  # SSH: host-managed authorized_keys (append a device pubkey here — no
+  # rebuild), persistent host keys (stable fingerprints), and the
+  # agent-to-apps client key for `ssh gem@apps` (nix toolchain).
+  - type: bind
+    host: /opt/codery/ssh/authorized_keys
+    container: /run/secrets/authorized_keys
+    readonly: true
+  - type: named
+    name: codery-paseo-ssh-host-keys
+    container: /etc/ssh/host_keys
+  - type: bind
+    host: /opt/codery/ssh/agent-to-apps
+    container: /home/paseo/.ssh/agent-to-apps
     readonly: true
 
 env_overrides:

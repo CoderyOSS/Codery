@@ -1,8 +1,6 @@
 name: Build Paseo
 
-# Manual-only. Relevant source paths (for operator reference):
-#   containers/paseo/{Dockerfile,service.yml}, containers/sandbox/scripts/…
-#   (github-app-token.sh, git-credential-codery.sh are COPY'd into the image)
+# Manual-only. Source paths: containers/paseo/{Dockerfile,service.yml,scripts/…,sshd_config,entrypoint-with-sshd}.
 on:
   workflow_dispatch:
 
@@ -76,5 +74,8 @@ jobs:
           # Bind-mount sources must exist before deploy validation runs.
           $SSH "sudo mkdir -p /opt/codery/data/opencode-config && \
                 sudo chown 1000:1000 /opt/codery/data/opencode-config"
+          # SSH mounts: host-managed authorized_keys + agent-to-apps client key.
+          $SSH "sudo mkdir -p /opt/codery/ssh && sudo touch /opt/codery/ssh/authorized_keys"
+          $SSH "test -f /opt/codery/ssh/agent-to-apps || (sudo ssh-keygen -t ed25519 -N '' -f /opt/codery/ssh/agent-to-apps -C agent-to-apps && sudo sh -c 'cat /opt/codery/ssh/agent-to-apps.pub >> /opt/codery/ssh/authorized_keys')"
 
           $SSH "sudo /opt/codery/codery-ci deploy paseo ${{ github.sha }} 2>&1"

@@ -1,0 +1,33 @@
+# Hardened sshd for the paseo container.
+# Exposure model: the container port 2022 is never published directly;
+# CoderyCI's stable-port proxy binds host :2222 on the Tailscale IP only
+# (service.yml: bind: tailnet). Key-only auth, root login disabled.
+
+Port 2022
+ListenAddress 0.0.0.0
+AddressFamily any
+
+HostKey /etc/ssh/host_keys/ssh_host_ed25519_key
+
+# Auth: public key only, single allowed user.
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile /run/secrets/authorized_keys
+AllowUsers paseo
+
+# No X11/agent forwarding; TCP forwarding stays available for tunnels
+# (same policy as the apps container).
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding yes
+PermitTunnel no
+
+# Operational niceties.
+UseDNS no
+PrintMotd no
+PrintLastLog no
+ClientAliveInterval 120
+ClientAliveCountMax 3

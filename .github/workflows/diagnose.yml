@@ -5,7 +5,7 @@ on:
 
 jobs:
   diagnose:
-    name: Check system and sandbox logs
+    name: Check system and container logs
     runs-on: ubuntu-latest
     environment: production
 
@@ -33,14 +33,14 @@ jobs:
           echo "=== Caddy status ==="
           $SSH "curl -s http://localhost:2019/config/ 2>&1 | head -20 || echo '(caddy admin not reachable)'"
 
-          echo "=== Sandbox blue container logs (last 50 lines) ==="
-          $SSH "docker logs codery-sandbox-blue --tail 50 2>&1 || echo '(no codery-sandbox-blue)'"
+          echo "=== Paseo green container logs (last 50 lines) ==="
+          $SSH "docker logs codery-paseo-green --tail 50 2>&1 || echo '(no codery-paseo-green)'"
 
-          echo "=== Sandbox green container logs (last 50 lines) ==="
-          $SSH "docker logs codery-sandbox-green --tail 50 2>&1 || echo '(no codery-sandbox-green)'"
+          echo "=== Apps blue container logs (last 50 lines) ==="
+          $SSH "docker logs codery-apps-blue --tail 50 2>&1 || echo '(no codery-apps-blue)'"
 
           echo "=== Sandbox supervisord status (active container) ==="
-          ACTIVE=$($SSH "cat /opt/codery/state/sandbox 2>/dev/null || echo unknown")
-          $SSH "docker exec codery-sandbox-${ACTIVE} supervisorctl status 2>&1 || echo '(container not running)'"
+          ACTIVE=$($SSH "cat /opt/codery/state/apps.color 2>/dev/null || echo blue")
+          $SSH "docker exec codery-apps-${ACTIVE} /command/s6-svstat /run/service/* 2>&1 || echo '(container not running)'"
 
           rm -f /tmp/deploy_key

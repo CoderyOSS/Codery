@@ -64,8 +64,8 @@ else
   echo "[proxy-setup] Systemd drop-in already up to date"
 fi
 
-# --- Ensure SSH authorized_keys for sandbox container ---
-# The sandbox container bind-mounts this file read-only at /run/secrets/authorized_keys.
+# --- Ensure SSH authorized_keys for agent containers ---
+# The paseo and apps containers bind-mount this file read-only at /run/secrets/authorized_keys.
 # sshd inside the container reads it directly. An empty file means SSH pubkey auth
 # will always fail with "authFailed" — there is no other way to add keys.
 #
@@ -82,7 +82,7 @@ if [ ! -f "$SSH_DIR/authorized_keys" ]; then
   echo ""
   echo "  *** ACTION REQUIRED ***"
   echo "  $SSH_DIR/authorized_keys is empty."
-  echo "  SSH into the sandbox will fail until you add your public key:"
+  echo "  SSH into paseo/apps will fail until you add your public key:"
   echo "    echo 'ssh-ed25519 AAAA...' >> $SSH_DIR/authorized_keys"
   echo ""
 else
@@ -90,7 +90,7 @@ else
     echo ""
     echo "  *** WARNING ***"
     echo "  $SSH_DIR/authorized_keys exists but is empty."
-    echo "  SSH into the sandbox will fail until you add your public key:"
+    echo "  SSH into paseo/apps will fail until you add your public key:"
     echo "    echo 'ssh-ed25519 AAAA...' >> $SSH_DIR/authorized_keys"
     echo ""
   else
