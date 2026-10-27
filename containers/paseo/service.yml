@@ -25,10 +25,10 @@ ports:
     bind: loopback
 
   - name: ssh
-    container_port: 2022
+    container_port: 2023
     fixed_port: 2222
     # Tailnet-only SSH for agents/operators (key-only, no root login).
-    # The stable-port proxy forwards host :2222 -> this container's :2022,
+    # The stable-port proxy forwards host :2222 -> this container's :2023,
     # following the active color. Never exposed publicly.
     bind: tailnet
 

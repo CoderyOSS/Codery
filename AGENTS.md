@@ -54,7 +54,7 @@ Child of the official `ghcr.io/getpaseo/paseo` image (pinned), adding OpenCode, 
 tooling with GitHub App auth, and a hardened sshd.
 
 **Runs:** daemon on container port **6767** (subdomain `code.`, loopback publish);
-**sshd on container port 2022**, published as stable host port **2222** — Tailscale-only
+**sshd on container port 2023**, published as stable host port **2222** — Tailscale-only
 (`bind: tailnet`), key-only auth, no root login, `AllowUsers paseo`.
 
 **Key mounts:**
@@ -126,7 +126,7 @@ one evening) produced hard rules; see ARCHITECTURE.md for the measured budget.
 
 | Service | Blue offset | Green offset | Ports |
 |---------|-------------|--------------|-------|
-| paseo   | 10000 | 20000 | daemon 6767 → `code.`; ssh 2022 → stable **:2222** |
+| paseo   | 10000 | 20000 | daemon 6767 → `code.`; ssh 2023 → stable **:2222** |
 | opendesign | 10000 | 20000 | web 7456 → `opendesign.` |
 | apps    | 0 | 10000 | nginx 8080; range 8000-9000; ssh 2022 → stable **:3333** |
 | playwright | 10000 | 20000 | ws 3000 (internal only) |

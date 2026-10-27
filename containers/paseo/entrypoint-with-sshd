@@ -1,5 +1,5 @@
 #!/bin/bash
-# Paseo entrypoint wrapper: starts sshd (root, :2022 inside the container)
+# Paseo entrypoint wrapper: starts sshd (root, :2023 inside the container)
 # before handing off to the base image's entrypoint, which performs first-run
 # mounted-volume setup and drops the daemon + agents to the `paseo` user.
 set -eu
@@ -16,6 +16,6 @@ if [ ! -f "$KEYS_DIR/ssh_host_ed25519_key" ]; then
 fi
 
 /usr/sbin/sshd -f /etc/ssh/sshd_config
-echo "[sshd] listening on :2022 (published as tailnet-only :2222)"
+echo "[sshd] listening on :2023 (published as tailnet-only :2222)"
 
 exec /usr/local/bin/paseo-docker-entrypoint "$@"

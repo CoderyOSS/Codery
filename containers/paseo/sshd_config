@@ -1,9 +1,9 @@
 # Hardened sshd for the paseo container.
-# Exposure model: the container port 2022 is never published directly;
+# Exposure model: the container port 2023 is never published directly;
 # CoderyCI's stable-port proxy binds host :2222 on the Tailscale IP only
 # (service.yml: bind: tailnet). Key-only auth, root login disabled.
 
-Port 2022
+Port 2023
 ListenAddress 0.0.0.0
 AddressFamily any
 
