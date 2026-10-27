@@ -226,13 +226,13 @@ pub fn parse_listening_ports(ss_output: &str) -> HashSet<u16> {
 /// Compute the host port a route targets given the service's recorded color.
 ///
 /// - `target == "host"` → route.port is already a host port.
-/// - `target == "sandbox"` → blue offset 10000, green offset 20000.
+/// - `target == "paseo"` → blue offset 10000, green offset 20000.
 /// - Other services → use their `port_scheme` from the service YAML.
 pub fn route_host_port(target: &str, container_port: u16, state_color: Color) -> u16 {
     if target == "host" {
         return container_port;
     }
-    if target == "sandbox" {
+    if target == "paseo" {
         let offset = match state_color {
             Color::Blue => 10000,
             Color::Green => 20000,
@@ -468,21 +468,21 @@ mod tests {
     #[test]
     fn service_fix_mismatch_suggests_cutover() {
         assert_eq!(
-            service_fix("sandbox", &Severity::Mismatch),
-            vec!["codery-ci cutover sandbox"]
+            service_fix("paseo", &Severity::Mismatch),
+            vec!["codery-ci cutover paseo"]
         );
     }
 
     #[test]
     fn service_fix_dead_lists_recovery_options() {
-        let fixes = service_fix("sandbox", &Severity::Dead);
+        let fixes = service_fix("paseo", &Severity::Dead);
         assert!(fixes.iter().any(|f| f.contains("restart_service")));
         assert!(fixes.iter().any(|f| f.contains("codery-ci deploy")));
     }
 
     #[test]
     fn service_fix_stale_offers_cutover_and_cancel() {
-        let fixes = service_fix("sandbox", &Severity::Stale);
+        let fixes = service_fix("paseo", &Severity::Stale);
         assert!(fixes.iter().any(|f| f.contains("cutover")));
         assert!(fixes.iter().any(|f| f.contains("cancel-preview")));
     }
@@ -490,19 +490,19 @@ mod tests {
     #[test]
     fn service_fix_ok_is_empty() {
         assert_eq!(
-            service_fix("sandbox", &Severity::Ok),
+            service_fix("paseo", &Severity::Ok),
             [] as [std::string::String; 0]
         );
         assert_eq!(
-            service_fix("sandbox", &Severity::Info),
+            service_fix("paseo", &Severity::Info),
             [] as [std::string::String; 0]
         );
     }
 
     #[test]
     fn route_fix_non_host_suggests_cutover() {
-        let fixes = route_fix("opencode.example.com", "sandbox");
-        assert_eq!(fixes, vec!["codery-ci cutover sandbox"]);
+        let fixes = route_fix("opencode.example.com", "paseo");
+        assert_eq!(fixes, vec!["codery-ci cutover paseo"]);
     }
 
     #[test]
@@ -549,52 +549,52 @@ mod tests {
     }
 
     #[test]
-    fn route_host_port_for_sandbox_applies_offset() {
-        assert_eq!(route_host_port("sandbox", 3000, Color::Blue), 13000);
-        assert_eq!(route_host_port("sandbox", 3000, Color::Green), 23000);
-        assert_eq!(route_host_port("sandbox", 22, Color::Blue), 10022);
-        assert_eq!(route_host_port("sandbox", 22, Color::Green), 20022);
+    fn route_host_port_for_named_port_applies_offset() {
+        assert_eq!(route_host_port("paseo", 3000, Color::Blue), 13000);
+        assert_eq!(route_host_port("paseo", 3000, Color::Green), 23000);
+        assert_eq!(route_host_port("paseo", 22, Color::Blue), 10022);
+        assert_eq!(route_host_port("paseo", 22, Color::Green), 20022);
     }
 
     #[test]
     fn diagnose_report_format_human_lists_each_issue() {
         let report = DiagnoseReport {
             services: vec![ServiceIssue {
-                service: "sandbox".to_string(),
+                service: "paseo".to_string(),
                 severity: Severity::Mismatch,
                 state_color: "green".to_string(),
                 running_color: Some("blue".to_string()),
-                running_container: Some("codery-sandbox-blue".to_string()),
-                image: Some("sandbox-nixos-v1".to_string()),
-                fix: vec!["codery-ci cutover sandbox".to_string()],
+                running_container: Some("codery-paseo-blue".to_string()),
+                image: Some("paseo-v1".to_string()),
+                fix: vec!["codery-ci cutover paseo".to_string()],
             }],
             routes: vec![RouteIssue {
                 subdomain: "opencode.example.com".to_string(),
                 host_port: 23000,
                 listening: false,
-                fix: vec!["codery-ci cutover sandbox".to_string()],
+                fix: vec!["codery-ci cutover paseo".to_string()],
             }],
             previews: vec![PreviewIssue {
-                service: "sandbox".to_string(),
-                sha: "sandbox-nixos-v1".to_string(),
+                service: "paseo".to_string(),
+                sha: "paseo-v1".to_string(),
                 color: "blue".to_string(),
                 fix: vec![
-                    "codery-ci cutover sandbox".to_string(),
-                    "codery-ci cancel-preview sandbox".to_string(),
+                    "codery-ci cutover paseo".to_string(),
+                    "codery-ci cancel-preview paseo".to_string(),
                 ],
             }],
             all_healthy: false,
             issue_count: 3,
         };
         let out = report.format_human();
-        assert!(out.contains("[sandbox] MISMATCH"));
+        assert!(out.contains("[paseo] MISMATCH"));
         assert!(out.contains("state=green"));
         assert!(out.contains("running=blue"));
-        assert!(out.contains("image   sandbox-nixos-v1"));
-        assert!(out.contains("fix     codery-ci cutover sandbox"));
+        assert!(out.contains("image   paseo-v1"));
+        assert!(out.contains("fix     codery-ci cutover paseo"));
         assert!(out.contains("[routes] opencode.example.com"));
         assert!(out.contains("NO LISTENER"));
-        assert!(out.contains("[previews] sandbox"));
+        assert!(out.contains("[previews] paseo"));
         assert!(out.contains("3 issue(s) found."));
     }
 
@@ -602,11 +602,11 @@ mod tests {
     fn diagnose_report_format_human_healthy() {
         let report = DiagnoseReport {
             services: vec![ServiceIssue {
-                service: "sandbox".to_string(),
+                service: "paseo".to_string(),
                 severity: Severity::Ok,
                 state_color: "blue".to_string(),
                 running_color: Some("blue".to_string()),
-                running_container: Some("codery-sandbox-blue".to_string()),
+                running_container: Some("codery-paseo-blue".to_string()),
                 image: None,
                 fix: vec![],
             }],
@@ -616,7 +616,7 @@ mod tests {
             issue_count: 0,
         };
         let out = report.format_human();
-        assert!(out.contains("[sandbox] OK"));
+        assert!(out.contains("[paseo] OK"));
         assert!(out.contains("All healthy."));
     }
 }

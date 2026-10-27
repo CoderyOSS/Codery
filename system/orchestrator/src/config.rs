@@ -135,26 +135,23 @@ mod tests {
 
     #[test]
     fn container_names() {
-        assert_eq!(
-            container_name("sandbox", Color::Blue),
-            "codery-sandbox-blue"
-        );
+        assert_eq!(container_name("paseo", Color::Blue), "codery-paseo-blue");
         assert_eq!(container_name("apps", Color::Green), "codery-apps-green");
     }
 
     #[test]
     fn image_refs() {
         assert_eq!(
-            image_ref("sandbox", "abc123"),
-            "ghcr.io/coderyoss/codery:sandbox-abc123"
+            image_ref("paseo", "abc123"),
+            "ghcr.io/coderyoss/codery:paseo-abc123"
         );
     }
 
     #[test]
     fn deploy_lock_path_uses_service_name() {
         assert_eq!(
-            deploy_lock_path("sandbox"),
-            "/run/codery-ci-deploy-sandbox.lock"
+            deploy_lock_path("paseo"),
+            "/run/codery-ci-deploy-paseo.lock"
         );
         assert_eq!(deploy_lock_path("apps"), "/run/codery-ci-deploy-apps.lock");
     }

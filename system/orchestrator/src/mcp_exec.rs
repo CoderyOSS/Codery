@@ -7,7 +7,7 @@
 //! Safety model:
 //! - Gated by a host-side toggle file (`codery-ci mcp-exec enable`).
 //! - Allowlist excludes cutover / deploy / serve / daemon — those can touch
-//!   the active sandbox session and stay human-only via the host shell.
+//!   the active paseo session and stay human-only via the host shell.
 //! - Jobs are spawned from the daemon process (root under supervisord).
 
 use std::collections::HashMap;
@@ -408,7 +408,7 @@ mod tests {
         let log_dir = dir.join("logs");
 
         let result = spawn_with(
-            vec!["build".to_string(), "sandbox".to_string(), "t".to_string()],
+            vec!["build".to_string(), "paseo".to_string(), "t".to_string()],
             30,
             &toggle,
             log_dir,
@@ -432,7 +432,7 @@ mod tests {
         let log_dir = dir.join("logs");
 
         let result = spawn_with(
-            vec!["cutover".to_string(), "sandbox".to_string()],
+            vec!["cutover".to_string(), "paseo".to_string()],
             30,
             &toggle,
             log_dir,
@@ -458,7 +458,7 @@ mod tests {
         // "true" (PATH-resolved) simulates codery-ci succeeding. Bare name on
         // purpose: /bin/true does not exist in the nix-based apps container.
         let resp = spawn_with(
-            vec!["build".to_string(), "sandbox".to_string(), "t".to_string()],
+            vec!["build".to_string(), "paseo".to_string(), "t".to_string()],
             10,
             &toggle,
             log_dir,

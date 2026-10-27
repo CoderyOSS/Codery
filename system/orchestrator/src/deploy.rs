@@ -245,7 +245,7 @@ pub async fn run_cutover(
     let newest_local = images::list_local(&def.service).await?.into_iter().next();
 
     // active_image_tag: full tag of the active container's image, e.g.
-    // "ghcr.io/coderyoss/codery:sandbox-abc123". Compared verbatim against
+    // "ghcr.io/coderyoss/codery:paseo-abc123". Compared verbatim against
     // LocalImage.tag (which is the same full tag).
     let active_image_tag = active_container_image(&docker, &def.service, active)
         .await?
@@ -311,7 +311,7 @@ pub async fn run_cutover(
 }
 
 /// Inspect a container and return its image tag (`Config.image`), e.g.
-/// "ghcr.io/coderyoss/codery:sandbox-abc123". Returns None if the container
+/// "ghcr.io/coderyoss/codery:paseo-abc123". Returns None if the container
 /// does not exist.
 async fn container_image_tag(docker: &Docker, name: &str) -> Result<Option<String>> {
     Ok(docker
@@ -909,11 +909,11 @@ mod tests {
 
     // ── Shared test fixture ───────────────────────────────────────────────────
 
-    fn sandbox_def() -> ServiceDef {
+    fn paseo_def() -> ServiceDef {
         serde_yaml::from_str(
             r"
-service: sandbox
-image: ghcr.io/coderyoss/codery:sandbox-{sha}
+service: paseo
+image: ghcr.io/coderyoss/codery:paseo-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -957,8 +957,8 @@ network: codery-net
                 health_ok: true,
                 validate_ok: true,
                 preflight_ok: true,
-                // Default: the active color container (codery-sandbox-blue) is up.
-                running: RefCell::new(["codery-sandbox-blue".to_string()].into_iter().collect()),
+                // Default: the active color container (codery-paseo-blue) is up.
+                running: RefCell::new(["codery-paseo-blue".to_string()].into_iter().collect()),
             }
         }
 
@@ -1089,7 +1089,7 @@ network: codery-net
 
     #[tokio::test]
     async fn happy_path_deploys_inactive_and_removes_active() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let deps = MockDeps::new(); // active=blue, health passes, validate passes
 
         deploy_service(&def, "abc123", &deps).await.unwrap();
@@ -1100,21 +1100,21 @@ network: codery-net
                 "preflight",
                 "ensure_network:codery-net",
                 "validate",
-                "remove_container:codery-sandbox-green", // clear the inactive slot
-                "start_container:codery-sandbox-green",
-                "health_check:codery-sandbox-green",
-                "write_active:sandbox=green",
-                "write_active_sha:sandbox=abc123",
+                "remove_container:codery-paseo-green", // clear the inactive slot
+                "start_container:codery-paseo-green",
+                "health_check:codery-paseo-green",
+                "write_active:paseo=green",
+                "write_active_sha:paseo=abc123",
                 "apply_caddy",
-                "stop_container:codery-sandbox-blue", // now: stop old active
-                "prune_images:sandbox",
+                "stop_container:codery-paseo-blue", // now: stop old active
+                "prune_images:paseo",
             ]
         );
     }
 
     #[tokio::test]
     async fn state_written_before_caddy_reloaded() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let deps = MockDeps::new();
 
         deploy_service(&def, "abc123", &deps).await.unwrap();
@@ -1150,7 +1150,7 @@ network: codery-net
 
     #[tokio::test]
     async fn health_check_failure_removes_new_container_and_aborts() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let deps = MockDeps {
             health_ok: false,
             ..MockDeps::new()
@@ -1169,7 +1169,7 @@ network: codery-net
         // before bailing, and MockDeps mirrors this by appending the remove event
         // itself. deploy_service does not call remove_container_if_exists on failure.
         assert!(
-            events.contains(&"remove_container:codery-sandbox-green".to_string()),
+            events.contains(&"remove_container:codery-paseo-green".to_string()),
             "new container should be removed on health failure\nevents: {events:?}"
         );
 
@@ -1183,14 +1183,14 @@ network: codery-net
             "apply_caddy must not appear after health failure\nevents: {events:?}"
         );
         assert!(
-            !events.contains(&"prune_images:sandbox".to_string()),
+            !events.contains(&"prune_images:paseo".to_string()),
             "prune_images must not appear after health failure\nevents: {events:?}"
         );
     }
 
     #[tokio::test]
     async fn validate_failure_aborts_before_container_ops() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let deps = MockDeps {
             validate_ok: false,
             ..MockDeps::new()
@@ -1203,11 +1203,11 @@ network: codery-net
 
         // Nothing after validation should appear.
         assert!(
-            !events.contains(&"start_container:codery-sandbox-green".to_string()),
+            !events.contains(&"start_container:codery-paseo-green".to_string()),
             "start_container must not appear after validate failure\nevents: {events:?}"
         );
         assert!(
-            !events.contains(&"remove_container:codery-sandbox-green".to_string()),
+            !events.contains(&"remove_container:codery-paseo-green".to_string()),
             "remove_container must not appear after validate failure\nevents: {events:?}"
         );
         assert!(
@@ -1222,7 +1222,7 @@ network: codery-net
 
     #[tokio::test]
     async fn same_sha_is_a_noop() {
-        let def = sandbox_def();
+        let def = paseo_def();
         // Pre-set active_sha to the SHA we are about to deploy.
         let deps = MockDeps {
             active_sha: RefCell::new(Some("abc123".to_string())),
@@ -1246,7 +1246,7 @@ network: codery-net
 
     #[tokio::test]
     async fn start_inactive_only_does_not_cutover() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let deps = MockDeps::new(); // active=blue
 
         start_inactive(&def, "abc123", Color::Green, &deps)
@@ -1260,19 +1260,19 @@ network: codery-net
             events,
             vec![
                 "validate",
-                "remove_container:codery-sandbox-green",
-                "start_container:codery-sandbox-green",
-                "health_check:codery-sandbox-green",
+                "remove_container:codery-paseo-green",
+                "start_container:codery-paseo-green",
+                "health_check:codery-paseo-green",
             ]
         );
     }
 
     #[tokio::test]
     async fn cutover_only_promotes_inactive() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let deps = MockDeps::new(); // active=blue
                                     // cutover is called AFTER deploy-preview has started the inactive color.
-        deps.revive("codery-sandbox-green");
+        deps.revive("codery-paseo-green");
 
         cutover(&def, "abc123", Color::Blue, Color::Green, &deps)
             .await
@@ -1282,18 +1282,18 @@ network: codery-net
         assert_eq!(
             events,
             vec![
-                "write_active:sandbox=green",
-                "write_active_sha:sandbox=abc123",
+                "write_active:paseo=green",
+                "write_active_sha:paseo=abc123",
                 "apply_caddy",
-                "stop_container:codery-sandbox-blue",
-                "prune_images:sandbox",
+                "stop_container:codery-paseo-blue",
+                "prune_images:paseo",
             ]
         );
     }
 
     #[tokio::test]
     async fn start_inactive_then_cutover_matches_full_deploy() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let deps = MockDeps::new();
 
         // Same SHA, same active color as happy_path_deploys_inactive_and_removes_active.
@@ -1310,21 +1310,21 @@ network: codery-net
             events,
             vec![
                 "validate",
-                "remove_container:codery-sandbox-green",
-                "start_container:codery-sandbox-green",
-                "health_check:codery-sandbox-green",
-                "write_active:sandbox=green",
-                "write_active_sha:sandbox=abc123",
+                "remove_container:codery-paseo-green",
+                "start_container:codery-paseo-green",
+                "health_check:codery-paseo-green",
+                "write_active:paseo=green",
+                "write_active_sha:paseo=abc123",
                 "apply_caddy",
-                "stop_container:codery-sandbox-blue",
-                "prune_images:sandbox",
+                "stop_container:codery-paseo-blue",
+                "prune_images:paseo",
             ]
         );
     }
 
     #[tokio::test]
     async fn start_inactive_health_failure_does_not_cutover() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let deps = MockDeps {
             health_ok: false,
             ..MockDeps::new()
@@ -1352,20 +1352,20 @@ network: codery-net
     /// triggers a real redeploy.
     #[tokio::test]
     async fn deploy_redeploys_when_sha_matches_but_container_dead() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let deps = MockDeps {
             active_sha: RefCell::new(Some("abc123".to_string())),
             ..MockDeps::new()
         };
         // Simulate the outage scenario: active container was removed during
         // debugging but state SHA still records "abc123".
-        deps.kill("codery-sandbox-blue");
+        deps.kill("codery-paseo-blue");
 
         deploy_service(&def, "abc123", &deps).await.unwrap();
 
         let events = deps.events();
         assert!(
-            events.contains(&"start_container:codery-sandbox-green".to_string()),
+            events.contains(&"start_container:codery-paseo-green".to_string()),
             "dead active container with matching SHA must trigger a real redeploy\n\
              events: {events:?}"
         );
@@ -1381,7 +1381,7 @@ network: codery-net
     /// Now: cutover refuses if the inactive color isn't actually running.
     #[tokio::test]
     async fn cutover_refuses_when_inactive_not_running() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let deps = MockDeps::new(); // active=blue; green NOT in running set
 
         let result = cutover(&def, "abc123", Color::Blue, Color::Green, &deps).await;
@@ -1392,7 +1392,7 @@ network: codery-net
 
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("codery-sandbox-green") && err.contains("not running"),
+            err.contains("codery-paseo-green") && err.contains("not running"),
             "error must name the dead container\n got: {err}"
         );
 
@@ -1402,7 +1402,7 @@ network: codery-net
             "no state mutation on refusal\nevents: {events:?}"
         );
         assert!(
-            !events.contains(&"stop_container:codery-sandbox-blue".to_string()),
+            !events.contains(&"stop_container:codery-paseo-blue".to_string()),
             "must NOT stop the active container when inactive is dead\nevents: {events:?}"
         );
         assert!(
@@ -1416,7 +1416,7 @@ network: codery-net
     fn local(sha: &str, created: i64) -> images::LocalImage {
         // tag follows the registry convention `<service>-<sha>`; the service prefix
         // is irrelevant to plan_cutover — only the tag-equality comparison matters.
-        let tag = format!("sandbox-{sha}");
+        let tag = format!("paseo-{sha}");
         images::LocalImage {
             sha: sha.to_string(),
             tag,
@@ -1433,7 +1433,7 @@ network: codery-net
             Some("preview-sha"),
             true,
             Some(&n),
-            "sandbox-old",
+            "paseo-old",
         );
         let _ = &p; // silence unused warning; kept for readability
         assert_eq!(
@@ -1447,7 +1447,7 @@ network: codery-net
 
     #[test]
     fn plan_explicit_sha_wins_when_only_preview_present() {
-        let plan = plan_cutover(Some("x"), Some("preview-sha"), true, None, "sandbox-old");
+        let plan = plan_cutover(Some("x"), Some("preview-sha"), true, None, "paseo-old");
         assert_eq!(
             plan,
             CutoverPlan::Promote {
@@ -1459,7 +1459,7 @@ network: codery-net
 
     #[test]
     fn plan_preview_honored_when_staged() {
-        let plan = plan_cutover(None, Some("preview-sha"), true, None, "sandbox-old");
+        let plan = plan_cutover(None, Some("preview-sha"), true, None, "paseo-old");
         assert_eq!(
             plan,
             CutoverPlan::Promote {
@@ -1474,13 +1474,7 @@ network: codery-net
         // User staged an OLDER preview, then built something newer.
         // plan_cutover must still pick the staged preview (explicit staging wins).
         let newest = local("newer-sha", 999);
-        let plan = plan_cutover(
-            None,
-            Some("preview-sha"),
-            true,
-            Some(&newest),
-            "sandbox-old",
-        );
+        let plan = plan_cutover(None, Some("preview-sha"), true, Some(&newest), "paseo-old");
         assert_eq!(
             plan,
             CutoverPlan::Promote {
@@ -1492,7 +1486,7 @@ network: codery-net
 
     #[test]
     fn plan_stale_preview_when_not_staged() {
-        let plan = plan_cutover(None, Some("preview-sha"), false, None, "sandbox-old");
+        let plan = plan_cutover(None, Some("preview-sha"), false, None, "paseo-old");
         assert_eq!(
             plan,
             CutoverPlan::StalePreview {
@@ -1506,13 +1500,7 @@ network: codery-net
         // Stale preview must NOT silently fall through to auto-newest.
         // Operator should cancel-preview first, then cutover.
         let newest = local("newer-sha", 999);
-        let plan = plan_cutover(
-            None,
-            Some("preview-sha"),
-            false,
-            Some(&newest),
-            "sandbox-old",
-        );
+        let plan = plan_cutover(None, Some("preview-sha"), false, Some(&newest), "paseo-old");
         assert_eq!(
             plan,
             CutoverPlan::StalePreview {
@@ -1524,7 +1512,7 @@ network: codery-net
     #[test]
     fn plan_auto_picks_newest_local() {
         let newest = local("newer-sha", 200);
-        let plan = plan_cutover(None, None, false, Some(&newest), "sandbox-old");
+        let plan = plan_cutover(None, None, false, Some(&newest), "paseo-old");
         assert_eq!(
             plan,
             CutoverPlan::Promote {
@@ -1538,19 +1526,19 @@ network: codery-net
     fn plan_auto_nothing_newer_when_tags_equal() {
         let newest = local("current", 200);
         // Active container's image tag is the same as the newest local tag.
-        let plan = plan_cutover(None, None, false, Some(&newest), "sandbox-current");
+        let plan = plan_cutover(None, None, false, Some(&newest), "paseo-current");
         assert_eq!(
             plan,
             CutoverPlan::NothingNewer {
-                active_tag: "sandbox-current".into(),
-                newest_tag: "sandbox-current".into(),
+                active_tag: "paseo-current".into(),
+                newest_tag: "paseo-current".into(),
             }
         );
     }
 
     #[test]
     fn plan_auto_no_local_images() {
-        let plan = plan_cutover(None, None, false, None, "sandbox-old");
+        let plan = plan_cutover(None, None, false, None, "paseo-old");
         assert_eq!(plan, CutoverPlan::NoLocalImages);
     }
 }

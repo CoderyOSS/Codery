@@ -721,26 +721,26 @@ mod tests {
 
     #[test]
     fn preview_subdomain_format() {
-        assert_eq!(preview_subdomain("sandbox"), "sandbox-preview");
+        assert_eq!(preview_subdomain("paseo"), "paseo-preview");
         assert_eq!(preview_subdomain("apps"), "apps-preview");
     }
 
     #[test]
     fn preview_insert_and_list() {
         let conn = test_conn();
-        upsert_preview(&conn, &sample_preview("sandbox")).unwrap();
+        upsert_preview(&conn, &sample_preview("paseo")).unwrap();
         let previews = list_previews(&conn).unwrap();
         assert_eq!(previews.len(), 1);
-        assert_eq!(previews[0].service, "sandbox");
-        assert_eq!(previews[0].subdomain, "sandbox-preview");
+        assert_eq!(previews[0].service, "paseo");
+        assert_eq!(previews[0].subdomain, "paseo-preview");
         assert_eq!(previews[0].host_port, 23000);
     }
 
     #[test]
     fn preview_upsert_replaces() {
         let conn = test_conn();
-        upsert_preview(&conn, &sample_preview("sandbox")).unwrap();
-        let mut updated = sample_preview("sandbox");
+        upsert_preview(&conn, &sample_preview("paseo")).unwrap();
+        let mut updated = sample_preview("paseo");
         updated.host_port = 13000;
         updated.color = "blue".to_string();
         upsert_preview(&conn, &updated).unwrap();
@@ -754,8 +754,8 @@ mod tests {
     #[test]
     fn preview_delete() {
         let conn = test_conn();
-        upsert_preview(&conn, &sample_preview("sandbox")).unwrap();
-        assert!(delete_preview(&conn, "sandbox").unwrap());
+        upsert_preview(&conn, &sample_preview("paseo")).unwrap();
+        assert!(delete_preview(&conn, "paseo").unwrap());
         assert!(list_previews(&conn).unwrap().is_empty());
     }
 
@@ -768,17 +768,17 @@ mod tests {
     #[test]
     fn preview_find_by_service() {
         let conn = test_conn();
-        upsert_preview(&conn, &sample_preview("sandbox")).unwrap();
-        assert!(find_preview(&conn, "sandbox").unwrap().is_some());
+        upsert_preview(&conn, &sample_preview("paseo")).unwrap();
+        assert!(find_preview(&conn, "paseo").unwrap().is_some());
         assert!(find_preview(&conn, "apps").unwrap().is_none());
     }
 
     #[test]
     fn preview_appears_in_route_map() {
         let conn = test_conn();
-        upsert_preview(&conn, &sample_preview("sandbox")).unwrap();
+        upsert_preview(&conn, &sample_preview("paseo")).unwrap();
         let routes = build_route_map(&conn).unwrap();
-        let p = routes.iter().find(|r| r.subdomain == "sandbox-preview");
+        let p = routes.iter().find(|r| r.subdomain == "paseo-preview");
         assert!(p.is_some(), "preview route should appear in route map");
         let p = p.unwrap();
         assert_eq!(p.port, 23000);

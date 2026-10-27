@@ -82,8 +82,8 @@ mod tests {
 
     #[test]
     fn state_paths_are_correct() {
-        let sandbox_path = state_path("sandbox");
-        assert!(sandbox_path.to_string_lossy().ends_with("sandbox.color"));
+        let paseo_path = state_path("paseo");
+        assert!(paseo_path.to_string_lossy().ends_with("paseo.color"));
 
         let apps_path = state_path("apps");
         assert!(apps_path.to_string_lossy().ends_with("apps.color"));
@@ -100,7 +100,7 @@ mod tests {
     fn round_trip_blue_and_green() {
         let dir = std::env::temp_dir().join("orch-test-state-rt");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sandbox.color");
+        let path = dir.join("paseo.color");
 
         write_to(&path, "green").unwrap();
         assert_eq!(read_from(&path).unwrap(), "green");

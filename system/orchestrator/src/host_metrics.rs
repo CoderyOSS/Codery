@@ -855,9 +855,9 @@ SwapFree:              0 kB
             procs: vec![proc_sample(1, 10, 0, id64), proc_sample(2, 20, 0, "host")],
         };
         let mut containers = HashMap::new();
-        containers.insert(id64.to_string(), "codery-sandbox-blue".to_string());
+        containers.insert(id64.to_string(), "codery-paseo-blue".to_string());
         let top = top_processes(&cur, None, &containers, 12);
-        assert_eq!(top[0].container, "codery-sandbox-blue");
+        assert_eq!(top[0].container, "codery-paseo-blue");
         assert_eq!(top[1].container, "host");
     }
 

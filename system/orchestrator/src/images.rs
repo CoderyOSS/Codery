@@ -156,7 +156,7 @@ pub struct LocalImage {
 }
 
 /// List images available locally for a service, newest first.
-/// Extracts the git SHA from tags like `ghcr.io/coderyoss/codery:sandbox-abc123`.
+/// Extracts the git SHA from tags like `ghcr.io/coderyoss/codery:paseo-abc123`.
 pub async fn list_local(service: &str) -> anyhow::Result<Vec<LocalImage>> {
     let docker =
         Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn registry_of_ghcr() {
         assert_eq!(
-            registry_of("ghcr.io/coderyoss/codery:sandbox-abc123"),
+            registry_of("ghcr.io/coderyoss/codery:paseo-abc123"),
             Some("ghcr.io")
         );
     }
@@ -269,6 +269,6 @@ mod tests {
     fn credentials_for_ghcr_is_some_when_env_configured() {
         // ghcr.io refs get GHCR credentials; on a host without /opt/codery/.env
         // ghcr_credentials() itself falls back to None (anonymous).
-        let _ = credentials_for("ghcr.io/coderyoss/codery:sandbox-abc123");
+        let _ = credentials_for("ghcr.io/coderyoss/codery:paseo-abc123");
     }
 }

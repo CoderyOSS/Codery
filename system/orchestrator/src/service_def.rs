@@ -14,11 +14,11 @@ use crate::config::{self, Color};
 pub struct ServiceDef {
     pub service: String,
     /// Image template. `{sha}` is substituted at deploy time.
-    /// Example: "ghcr.io/coderyoss/codery:sandbox-{sha}"
+    /// Example: "ghcr.io/coderyoss/codery:paseo-{sha}"
     pub image: String,
     /// Port formula: `host_port` = `container_port` + offset(color)
     pub port_scheme: PortScheme,
-    /// Discrete named container ports (sandbox-style services).
+    /// Discrete named container ports (named-port services).
     #[serde(default)]
     pub ports: Vec<NamedPort>,
     /// Bulk port range for Docker binding (apps-style services).
@@ -65,7 +65,7 @@ pub struct ServiceDef {
 }
 
 /// `host_port` = `container_port` + offset
-/// Both sandbox and apps use this; they just have different offset values.
+/// Both paseo and apps use this; they just have different offset values.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PortScheme {
     pub blue_offset: u16,
@@ -251,7 +251,7 @@ impl ServiceDef {
 
     /// Return `(host_port, container_port)` pairs for Docker port bindings.
     ///
-    /// - For named-port services (sandbox): one pair per `ports[]` entry.
+    /// - For named-port services (paseo): one pair per `ports[]` entry.
     /// - For range services (apps): one pair per port in `container_start..=container_end`.
     pub fn port_mappings(&self, color: Color) -> Vec<(u16, u16)> {
         self.port_binding_specs(color)
@@ -402,11 +402,11 @@ fn substitute_env(s: &str, env: &HashMap<String, String>) -> Result<String> {
 mod tests {
     use super::*;
 
-    fn sandbox_def() -> ServiceDef {
+    fn paseo_def() -> ServiceDef {
         serde_yaml::from_str(
             r"
-service: sandbox
-image: ghcr.io/coderyoss/codery:sandbox-{sha}
+service: paseo
+image: ghcr.io/coderyoss/codery:paseo-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -466,10 +466,10 @@ network: codery-net
         .unwrap()
     }
 
-    // Matches the old hardcoded sandbox_host_port() values
+    // Matches the old hardcoded paseo_host_port() values
     #[test]
-    fn sandbox_port_formula_blue() {
-        let def = sandbox_def();
+    fn paseo_port_formula_blue() {
+        let def = paseo_def();
         assert_eq!(def.port_scheme.host_port(Color::Blue, 3000), 13000);
         assert_eq!(def.port_scheme.host_port(Color::Blue, 7000), 17000);
         assert_eq!(def.port_scheme.host_port(Color::Blue, 7681), 17681);
@@ -579,16 +579,16 @@ network: codery-net
     }
 
     #[test]
-    fn sandbox_port_formula_green() {
-        let def = sandbox_def();
+    fn paseo_port_formula_green() {
+        let def = paseo_def();
         assert_eq!(def.port_scheme.host_port(Color::Green, 3000), 23000);
         assert_eq!(def.port_scheme.host_port(Color::Green, 7000), 27000);
         assert_eq!(def.port_scheme.host_port(Color::Green, 7681), 27681);
     }
 
     #[test]
-    fn sandbox_port_mappings_blue() {
-        let def = sandbox_def();
+    fn paseo_port_mappings_blue() {
+        let def = paseo_def();
         let mappings = def.port_mappings(Color::Blue);
         assert!(mappings.contains(&(13000, 3000)));
         assert!(mappings.contains(&(17000, 7000)));
@@ -597,8 +597,8 @@ network: codery-net
     }
 
     #[test]
-    fn sandbox_port_mappings_green() {
-        let def = sandbox_def();
+    fn paseo_port_mappings_green() {
+        let def = paseo_def();
         let mappings = def.port_mappings(Color::Green);
         assert!(mappings.contains(&(23000, 3000)));
         assert!(mappings.contains(&(27000, 7000)));
@@ -606,14 +606,14 @@ network: codery-net
     }
 
     #[test]
-    fn sandbox_health_port_blue() {
-        let def = sandbox_def();
+    fn paseo_health_port_blue() {
+        let def = paseo_def();
         assert_eq!(def.health_port(Color::Blue).unwrap(), 13000);
     }
 
     #[test]
-    fn sandbox_health_port_green() {
-        let def = sandbox_def();
+    fn paseo_health_port_green() {
+        let def = paseo_def();
         assert_eq!(def.health_port(Color::Green).unwrap(), 23000);
     }
 
@@ -638,16 +638,16 @@ network: codery-net
 
     #[test]
     fn image_ref_substitution() {
-        let def = sandbox_def();
+        let def = paseo_def();
         assert_eq!(
             def.image_ref("abc123"),
-            "ghcr.io/coderyoss/codery:sandbox-abc123"
+            "ghcr.io/coderyoss/codery:paseo-abc123"
         );
     }
 
     #[test]
     fn resolved_binds_named_and_bind() {
-        let def = sandbox_def();
+        let def = paseo_def();
         let env = HashMap::new();
         let binds = def.resolved_binds(&env).unwrap();
         assert!(binds.contains(&"/opt/codery/projects:/home/gem/projects".to_string()));
@@ -721,7 +721,7 @@ network: codery-net
 
     #[test]
     fn health_check_bad_port_name_returns_error() {
-        let mut def = sandbox_def();
+        let mut def = paseo_def();
         def.health_check = HealthCheck::Tcp {
             port: "nonexistent".to_string(),
             timeout_secs: 60,
@@ -757,8 +757,8 @@ network_aliases:
     #[test]
     fn parse_network_aliases_default_empty() {
         let yaml = r"
-service: sandbox
-image: ghcr.io/coderyoss/codery:sandbox-{sha}
+service: paseo
+image: ghcr.io/coderyoss/codery:paseo-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -776,8 +776,8 @@ network: codery-net
     fn named_port_fixed_port_deserializes() {
         let def: ServiceDef = serde_yaml::from_str(
             r"
-service: sandbox
-image: ghcr.io/test/x:sandbox-{sha}
+service: paseo
+image: ghcr.io/test/x:paseo-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -864,7 +864,7 @@ ipc: host
 
     #[test]
     fn generic_process_fields_default_empty() {
-        let def = sandbox_def();
+        let def = paseo_def();
         assert_eq!(def.command, None);
         assert_eq!(def.entrypoint, None);
         assert_eq!(def.user, None);

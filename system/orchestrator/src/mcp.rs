@@ -76,19 +76,19 @@ struct ServiceKnownParam {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ServiceParam {
-    #[schemars(description = "Service name (e.g. 'sandbox', 'apps')")]
+    #[schemars(description = "Service name (e.g. 'paseo', 'apps')")]
     service: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ServiceNameParam {
-    #[schemars(description = "Service name without .yml extension (e.g. 'sandbox', 'apps')")]
+    #[schemars(description = "Service name without .yml extension (e.g. 'paseo', 'apps')")]
     name: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct UpsertServiceParams {
-    #[schemars(description = "Service name without .yml extension (e.g. 'sandbox', 'apps')")]
+    #[schemars(description = "Service name without .yml extension (e.g. 'paseo', 'apps')")]
     name: String,
     #[schemars(description = "Complete service definition YAML content")]
     yaml: String,
@@ -96,7 +96,7 @@ struct UpsertServiceParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReadContainerFileParams {
-    #[schemars(description = "Service name (e.g. 'sandbox', 'apps')")]
+    #[schemars(description = "Service name (e.g. 'paseo', 'apps')")]
     service: String,
     #[schemars(
         description = "Absolute path to file inside container, e.g. '/etc/hosts' or '/tmp/opencode.log'"
@@ -158,7 +158,7 @@ struct RestartAppParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CoderyExecParams {
     #[schemars(
-        description = "Arguments to pass to `codery-ci` (e.g. [\"build\", \"sandbox\", \"host-xyz\"]). \
+        description = "Arguments to pass to `codery-ci` (e.g. [\"build\", \"paseo\", \"host-xyz\"]). \
                        First element must be one of: build, validate, deploy-preview, cancel-preview. \
                        Cutover and deploy are NOT exposed via MCP — run those on the host shell."
     )]
@@ -341,7 +341,7 @@ impl OrchestratorMcp {
                 let color = services_map.get(&r.target).copied();
                 let host_port = match r.target.as_str() {
                     "host" => r.port,
-                    "sandbox" => {
+                    "paseo" => {
                         let c = color.unwrap_or(Color::Blue);
                         r.port
                             + match c {
@@ -385,7 +385,7 @@ impl OrchestratorMcp {
             "guidance": {
                 "routing_model": "Traffic: Internet → Tailscale → Caddy → Nginx (8080) → app (internal_port)",
                 "apps_ports": "For apps: container_port is always 8080 (Nginx). internal_port is where app listens.",
-                "sandbox_ports": "For sandbox: container_port is the actual service port (e.g. 3000).",
+                "named_ports": "For named-port services (paseo): container_port is the actual service port (e.g. 6767).",
                 "to_add_route": "Use add_app for instant routing, or edit devcontainer.json for permanent.",
                 "healthy_field": "Each route has `healthy: bool` based on whether host_port has a TCP listener.",
                 "if_unhealthy": format!("{} route(s) have no listener. Run `diagnose` for fix commands.", unhealthy_count)
@@ -397,7 +397,7 @@ impl OrchestratorMcp {
 
     /// List locally available Docker images for a service. Useful before rollback.
     #[tool(
-        description = "List locally cached Docker images for a service (e.g. 'sandbox', 'apps'), newest first"
+        description = "List locally cached Docker images for a service (e.g. 'paseo', 'apps'), newest first"
     )]
     async fn list_images(
         &self,
@@ -1480,7 +1480,7 @@ CoderyCI MCP server — operational guide for agents.
 The Codery infrastructure has three layers:
 
 1. **Host layer** — Caddy (reverse proxy + TLS), Tailscale (VPN), supervisord
-2. **Sandbox container** — AI coding environment (OpenCode on port 3000)
+2. **Paseo container** — AI coding environment (OpenCode on port 3000)
 3. **Apps container** — Project web servers, supervised by s6-overlay (s6-rc bundles)
 
 ### Traffic flow for apps
@@ -1638,15 +1638,15 @@ To add a new container service:
 Build and preview a container image without leaving the agent session:
 
 1. `mcp_exec_enabled` → confirm the toggle is on
-2. `codery_exec args=["build", "sandbox", "mytag"]` → returns job_id immediately
+2. `codery_exec args=["build", "paseo", "mytag"]` → returns job_id immediately
 3. Poll `codery_exec_status job_id=...` every ~30s until status != running
 4. On failure, read `tail` from the status response, fix, rebuild
-5. `codery_exec args=["deploy-preview", "sandbox", "mytag"]` → verify at `sandbox-preview.{DOMAIN}`
-6. Ask the user to run `codery-ci cutover sandbox` on the host (never exposed via MCP)
+5. `codery_exec args=["deploy-preview", "paseo", "mytag"]` → verify at `paseo-preview.{DOMAIN}`
+6. Ask the user to run `codery-ci cutover paseo` on the host (never exposed via MCP)
 
 Note: `build` runs `docker build` on the host — full toolchain available there.
-The sandbox container itself has NO compiler/linker; never try to `cargo build`
-inside the sandbox.
+The paseo container itself has NO compiler/linker; never try to `cargo build`
+inside paseo.
 
 ## Port formula
 
@@ -1654,7 +1654,7 @@ inside the sandbox.
 
 | Service | Blue offset | Green offset |
 |---------|------------|-------------|
-| sandbox | 10000 | 20000 |
+| paseo | 10000 | 20000 |
 | apps | 0 | 10000 |
 
 ## When to use reload_routes vs full redeploy
@@ -1759,7 +1759,7 @@ mod tests {
 
     #[test]
     fn validate_name_accepts_valid_names() {
-        assert!(validate_service_name("sandbox").is_ok());
+        assert!(validate_service_name("paseo").is_ok());
         assert!(validate_service_name("my-service").is_ok());
         assert!(validate_service_name("apps_v2").is_ok());
         assert!(validate_service_name("Service123").is_ok());
@@ -1786,8 +1786,8 @@ mod tests {
 
     #[test]
     fn service_path_builds_correct_path() {
-        let p = service_path("sandbox").unwrap();
-        assert_eq!(p, std::path::Path::new("/opt/codery/services/sandbox.yml"));
+        let p = service_path("paseo").unwrap();
+        assert_eq!(p, std::path::Path::new("/opt/codery/services/paseo.yml"));
     }
 
     #[test]
@@ -1798,8 +1798,8 @@ mod tests {
     #[test]
     fn upsert_rejects_name_service_mismatch() {
         let yaml = r"
-service: sandbox
-image: ghcr.io/coderyoss/codery:sandbox-{sha}
+service: paseo
+image: ghcr.io/coderyoss/codery:paseo-{sha}
 port_scheme:
   blue_offset: 10000
   green_offset: 20000
@@ -1811,7 +1811,7 @@ volumes: []
 required_env: []
 network: codery-net
 ";
-        let name = "apps"; // intentional mismatch: YAML says 'sandbox', name says 'apps'
+        let name = "apps"; // intentional mismatch: YAML says 'paseo', name says 'apps'
         let def: crate::service_def::ServiceDef = serde_yaml::from_str(yaml).unwrap();
         assert_ne!(
             def.service, name,
@@ -1821,7 +1821,7 @@ network: codery-net
             "service field '{}' in YAML does not match name parameter '{}'",
             def.service, name
         );
-        assert!(err_msg.contains("sandbox"));
+        assert!(err_msg.contains("paseo"));
         assert!(err_msg.contains("apps"));
     }
 }

@@ -223,7 +223,7 @@ async fn main() -> Result<()> {
             // Run from the Codery repo root so the default dockerfile paths resolve.
             //
             // Default dockerfile lookup:
-            //   sandbox → examples/Dockerfile.sandbox
+            //   paseo → containers/paseo/Dockerfile
             //   apps    → containers/apps/Dockerfile
             //   <other> → containers/<service>/Dockerfile
             //
@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
             //
             // Preview port auto-resolution:
             //   1. --port flag if given
-            //   2. First named port with a subdomain (e.g. sandbox → opencode:3000)
+            //   2. First named port with a subdomain (e.g. paseo → code:6767)
             //   3. 8080 if the service has a port_range that includes it (apps)
             //
             // Follow up with either:
@@ -551,11 +551,11 @@ health-checks it, cuts over (rewrites Caddyfile + state file), stops the old
 container, prunes stale images. Acquires a per-service deploy lock.
 
 Arguments:
-  <service>  Service name (sandbox, apps, ...)
+  <service>  Service name (paseo, apps, ...)
   <sha>      Image tag suffix (resolved as ghcr.io/coderyoss/codery:<service>-<sha>)
 
 Example:
-  codery-ci deploy sandbox abc123
+  codery-ci deploy paseo abc123
 
 Docs: AGENTS.md → \"Blue/Green Deployment\"
 "
@@ -573,7 +573,7 @@ Arguments:
   <sha>      Image tag suffix
 
 Example:
-  codery-ci validate sandbox host-xyz
+  codery-ci validate paseo host-xyz
 
 Docs: AGENTS.md → \"Pre-deploy validation\" / \"Dry-run validation\"
 "
@@ -620,7 +620,7 @@ result as ghcr.io/coderyoss/codery:<service>-<tag> so deploy-preview / deploy
 can find it locally without a GHCR pull.
 
 Default Dockerfile lookup:
-  sandbox → examples/Dockerfile.sandbox
+  paseo → containers/paseo/Dockerfile
   apps    → containers/apps/Dockerfile
   <other> → containers/<service>/Dockerfile
 
@@ -629,7 +629,7 @@ Flags:
   --context PATH     Override the build context (default: current directory)
 
 Example:
-  codery-ci build sandbox host-xyz
+  codery-ci build paseo host-xyz
 
 Docs: AGENTS.md → \"Preview Deploys\"
 "
@@ -653,7 +653,7 @@ Flags:
             Auto-resolved from service YAML if omitted.
 
 Example:
-  codery-ci deploy-preview sandbox host-xyz
+  codery-ci deploy-preview paseo host-xyz
 
 Docs: AGENTS.md → \"Preview Deploys\"
 "
@@ -687,8 +687,8 @@ Flags:
   --sha <sha>  Promote this SHA explicitly. Default: preview → newest local.
 
 Example:
-  codery-ci cutover sandbox
-  codery-ci cutover sandbox --sha sandbox-nixos-v1
+  codery-ci cutover paseo
+  codery-ci cutover paseo --sha paseo-v1
 
 Docs: AGENTS.md → \"Preview Deploys\"
 "
@@ -704,7 +704,7 @@ Arguments:
   <service>  Service name
 
 Example:
-  codery-ci cancel-preview sandbox
+  codery-ci cancel-preview paseo
 
 Docs: AGENTS.md → \"Preview Deploys\"
 "
@@ -721,10 +721,10 @@ Use to pick up volume, env, or network changes from the service YAML without a
 full deploy, or to recover a wedged container.
 
 Arguments:
-  <service>  Service name (sandbox, apps, ...)
+  <service>  Service name (paseo, apps, ...)
 
 Example:
-  codery-ci recreate sandbox
+  codery-ci recreate paseo
 
 Docs: AGENTS.md → \"Service Declarations\"
 "
@@ -754,7 +754,7 @@ codery-ci serve [--port N]
 
 Start the CoderyCI MCP server (HTTP+SSE on /sse). Default port 4040.
 
-OpenCode in the sandbox connects to this endpoint to call infrastructure tools.
+Agent containers (paseo) connect to this endpoint to call infrastructure tools.
 An iptables ACCEPT rule is added so Docker bridge networks can reach the port.
 
 Flags:
@@ -775,7 +775,7 @@ Flags:
             "\
 codery-ci serve-tcp-proxy
 
-Run the stable-port TCP proxy (e.g. :2222 → active sandbox sshd). Reads the
+Run the stable-port TCP proxy (e.g. :2222 → active paseo sshd). Reads the
 active color from the state file on each inbound connection and forwards to
 the color-specific host port.
 "
@@ -811,7 +811,8 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 /// Default dockerfile path for known services.
 fn default_dockerfile(service: &str) -> Option<PathBuf> {
     match service {
-        "sandbox" => Some(PathBuf::from("examples/Dockerfile.sandbox")),
+        "paseo" => Some(PathBuf::from("containers/paseo/Dockerfile")),
+        "opendesign" => Some(PathBuf::from("containers/opendesign/Dockerfile")),
         "apps" => Some(PathBuf::from("containers/apps/Dockerfile")),
         _ => None,
     }
@@ -820,7 +821,7 @@ fn default_dockerfile(service: &str) -> Option<PathBuf> {
 /// Resolve which container port to expose via the preview subdomain.
 ///
 /// Priority:
-///   1. First named port with a subdomain (e.g. sandbox → opencode:3000)
+///   1. First named port with a subdomain (e.g. paseo → code:6767)
 ///   2. 8080 if the service has a `port_range` that includes it (apps/Nginx)
 ///   3. Error — caller must pass --port explicitly
 fn resolve_preview_port(def: &service_def::ServiceDef) -> Result<u16> {
@@ -848,7 +849,7 @@ mod tests {
     fn flag_value_reads_dash_flag() {
         let args = vec![
             "deploy-preview".to_string(),
-            "sandbox".to_string(),
+            "paseo".to_string(),
             "abc".to_string(),
             "--port".to_string(),
             "7456".to_string(),
@@ -860,8 +861,8 @@ mod tests {
     #[test]
     fn default_dockerfile_known_services() {
         assert_eq!(
-            default_dockerfile("sandbox").unwrap().to_string_lossy(),
-            "examples/Dockerfile.sandbox"
+            default_dockerfile("paseo").unwrap().to_string_lossy(),
+            "containers/paseo/Dockerfile"
         );
         assert_eq!(
             default_dockerfile("apps").unwrap().to_string_lossy(),
@@ -874,8 +875,8 @@ mod tests {
     fn resolve_preview_port_picks_first_subdomain_port() {
         let def: ServiceDef = serde_yaml::from_str(
             r"
-service: sandbox
-image: ghcr.io/coderyoss/codery:sandbox-{sha}
+service: paseo
+image: ghcr.io/coderyoss/codery:paseo-{sha}
 port_scheme: {blue_offset: 10000, green_offset: 20000}
 ports:
   - name: ssh
