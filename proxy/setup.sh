@@ -98,6 +98,25 @@ else
   fi
 fi
 
+# --- Ensure agent-to-apps keypair (paseo → apps SSH) ---
+# The paseo container mounts the private key at /home/paseo/.ssh/agent-to-apps
+# (service.yml) and its ssh config uses it for `ssh gem@apps`. The apps
+# container trusts whatever is in authorized_keys above. Generate the keypair
+# once and self-register the public key — no manual step, idempotent.
+if [ ! -f "$SSH_DIR/agent-to-apps" ]; then
+  echo "[proxy-setup] Generating $SSH_DIR/agent-to-apps keypair (paseo → apps)"
+  mkdir -p "$SSH_DIR"
+  ssh-keygen -t ed25519 -N '' -C 'codery agent-to-apps (paseo to apps)' -f "$SSH_DIR/agent-to-apps"
+  chmod 600 "$SSH_DIR/agent-to-apps"
+  chmod 644 "$SSH_DIR/agent-to-apps.pub"
+else
+  echo "[proxy-setup] $SSH_DIR/agent-to-apps keypair already exists"
+fi
+if [ -f "$SSH_DIR/agent-to-apps.pub" ] && ! grep -qsxF "$(cat "$SSH_DIR/agent-to-apps.pub")" "$SSH_DIR/authorized_keys"; then
+  echo "[proxy-setup] Registering agent-to-apps.pub in authorized_keys"
+  cat "$SSH_DIR/agent-to-apps.pub" >> "$SSH_DIR/authorized_keys"
+fi
+
 # --- Ensure supervisor.service is enabled and running ---
 echo "[proxy-setup] Ensuring supervisor.service is enabled..."
 systemctl enable supervisor 2>/dev/null || true

@@ -92,6 +92,8 @@
         sqlite
         # tmux: persistent shell sessions for SSH logins (s6 bundle starts `main`)
         tmux
+        # ijq: interactive jq TUI for exploring JSON
+        ijq
         # --- Text processing ---
         gawk
         gnused
