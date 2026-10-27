@@ -79,5 +79,8 @@
   # Starship: git-aware colored prompt, single Rust binary, zero config.
   programs.starship.enable = true;
 
+  # tmux config for gem (matches sandbox: mouse on).
+  home.file.".tmux.conf".text = "set -g mouse on";
+
   home.packages = [ ];
 }

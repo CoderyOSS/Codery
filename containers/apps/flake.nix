@@ -90,6 +90,8 @@
         which
         file
         sqlite
+        # tmux: persistent shell sessions for SSH logins (s6 bundle starts `main`)
+        tmux
         # --- Text processing ---
         gawk
         gnused
