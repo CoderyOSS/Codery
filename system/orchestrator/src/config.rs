@@ -3,7 +3,7 @@ pub const STATE_DIR: &str = "/opt/codery/state";
 pub const CADDY_CONFIG: &str = "/etc/caddy/Caddyfile";
 pub const NGINX_CONFIG: &str = "/opt/codery/proxy/apps-nginx.conf";
 /// Host directory bind-mounted into the apps container at /etc/s6-overlay/apps.d/.
-/// MCP add_app/remove_app render s6 service bundles here; a boot-time oneshot
+/// MCP `add_app/remove_app` render s6 service bundles here; a boot-time oneshot
 /// in the apps image links them into supervision.
 pub const APPS_S6_DIR: &str = "/opt/codery/apps-s6.d";
 pub const ENV_FILE: &str = "/opt/codery/.env";
@@ -43,7 +43,7 @@ pub const MCP_EXEC_TOGGLE: &str = "/opt/codery/state/mcp-exec.enabled";
 // Per-job stdout/stderr logs. Created on first use.
 pub const MCP_EXEC_LOG_DIR: &str = "/var/log/codery-ci-mcp";
 
-/// Read DOMAIN_NAME from /opt/codery/.env. Returns DEFAULT_DOMAIN if not set.
+/// Read `DOMAIN_NAME` from /opt/codery/.env. Returns `DEFAULT_DOMAIN` if not set.
 pub fn load_domain() -> String {
     let content = match std::fs::read_to_string(ENV_FILE) {
         Ok(c) => c,
@@ -66,14 +66,14 @@ pub fn load_domain() -> String {
 
 /// Returns the container name for a service+color pair.
 pub fn container_name(service: &str, color: &str) -> String {
-    format!("codery-{}-{}", service, color)
+    format!("codery-{service}-{color}")
 }
 
 /// Returns the local tag for a `codery-ci build` result. Image *pulling* does
 /// NOT use this — the pull path resolves the opaque OCI reference from the
 /// service YAML (`ServiceDef::image_ref`).
 pub fn image_ref(service: &str, sha: &str) -> String {
-    format!("{}:{}-{}", REGISTRY, service, sha)
+    format!("{REGISTRY}:{service}-{sha}")
 }
 
 /// Returns the opposite color.
@@ -87,7 +87,7 @@ pub fn flip(color: &str) -> &'static str {
 
 /// Returns the deploy lock file path for a service.
 pub fn deploy_lock_path(service: &str) -> String {
-    format!("/run/codery-ci-deploy-{}.lock", service)
+    format!("/run/codery-ci-deploy-{service}.lock")
 }
 
 #[cfg(test)]

@@ -24,7 +24,7 @@ pub async fn serve() -> Result<()> {
         r = mcp::serve(config::MCP_PORT)                                        => r?,
         r = ui::serve(config::UI_PORT, Arc::clone(&events_tx), Arc::clone(&ops)) => r?,
         r = tcp_proxy::serve()                                                  => r?,
-        _ = shutdown_signal()                                                   => {
+        () = shutdown_signal()                                                   => {
             println!("[daemon] Received shutdown signal — stopping");
         }
     }
@@ -49,7 +49,7 @@ async fn shutdown_signal() {
     let sigterm = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c  => {}
-        _ = sigterm => {}
+        () = ctrl_c  => {}
+        () = sigterm => {}
     }
 }

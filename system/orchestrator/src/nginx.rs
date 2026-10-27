@@ -28,7 +28,7 @@ pub async fn generate_and_reload() -> Result<()> {
         .with_context(|| format!("failed to write {}", config::NGINX_CONFIG))?;
 
     let count = routes.iter().filter(|r| r.internal_port.is_some()).count();
-    println!("[nginx] Wrote config with {} server block(s)", count);
+    println!("[nginx] Wrote config with {count} server block(s)");
 
     reload_in_active_container().await
 }
@@ -69,12 +69,11 @@ pub(crate) fn generate_config(routes: &[UnifiedRoute], domain: &str) -> String {
 }
 
 async fn reload_in_active_container() -> Result<()> {
-    let color = match state::read_active("apps") {
-        Ok(c) => c,
-        Err(_) => {
-            println!("[nginx] No active apps state — skipping reload");
-            return Ok(());
-        }
+    let color = if let Ok(c) = state::read_active("apps") {
+        c
+    } else {
+        println!("[nginx] No active apps state — skipping reload");
+        return Ok(());
     };
     let container = config::container_name("apps", &color);
 
@@ -89,10 +88,7 @@ async fn reload_in_active_container() -> Result<()> {
         .unwrap_or(false);
 
     if !running {
-        println!(
-            "[nginx] Container {} not running — skipping reload",
-            container
-        );
+        println!("[nginx] Container {container} not running — skipping reload");
         return Ok(());
     }
 
@@ -111,7 +107,7 @@ async fn reload_in_active_container() -> Result<()> {
             },
         )
         .await
-        .with_context(|| format!("failed to create exec in {}", container))?;
+        .with_context(|| format!("failed to create exec in {container}"))?;
 
     if let StartExecResults::Attached { mut output, .. } = docker.start_exec(&exec.id, None).await?
     {
@@ -119,13 +115,13 @@ async fn reload_in_active_container() -> Result<()> {
             if let bollard::container::LogOutput::StdErr { message } = msg? {
                 let text = String::from_utf8_lossy(&message);
                 if !text.trim().is_empty() {
-                    eprint!("[nginx] {}", text);
+                    eprint!("[nginx] {text}");
                 }
             }
         }
     }
 
-    println!("[nginx] Reloaded Nginx in {}", container);
+    println!("[nginx] Reloaded Nginx in {container}");
     Ok(())
 }
 

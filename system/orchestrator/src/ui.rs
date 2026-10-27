@@ -119,7 +119,7 @@ pub async fn serve(port: u16, events_tx: Arc<broadcast::Sender<String>>, ops: Op
         Arc::clone(&metrics),
         std::time::Duration::from_secs(3),
     ));
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("127.0.0.1:{port}");
     println!(
         "[ui {}] Listening on http://{} (metrics every 3s)",
         ts(),
@@ -256,7 +256,7 @@ async fn post_rollback(
         if set.contains(&service) {
             return (
                 StatusCode::CONFLICT,
-                format!("rollback already in progress for {}", service),
+                format!("rollback already in progress for {service}"),
             )
                 .into_response();
         }
@@ -303,7 +303,7 @@ async fn build_status(ops: &HashMap<String, &'static str>) -> Result<Vec<Service
             .trim_start_matches('/')
             .to_string();
 
-        let operation = ops.get(&name).map(|s| s.to_string());
+        let operation = ops.get(&name).map(std::string::ToString::to_string);
 
         let (service, rollback_available, prev_container, serving) =
             if let Some((svc, color)) = parse_service_container(&name) {
@@ -366,7 +366,9 @@ async fn is_container_stopped(docker: &Docker, container: &str) -> bool {
 /// Extract short SHA from image tag `ghcr.io/coderyoss/codery:{service}-{sha}`.
 fn sha_from_image_tag(service: &str, image: &str) -> Option<String> {
     let prefix = format!("{}:{}-", config::REGISTRY, service);
-    image.strip_prefix(&prefix).map(|s| s.to_string())
+    image
+        .strip_prefix(&prefix)
+        .map(std::string::ToString::to_string)
 }
 
 // ── broadcast helper ──────────────────────────────────────────────────────────
@@ -417,8 +419,7 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
             .as_ref()
             .and_then(|a| a.attributes.as_ref())
             .and_then(|attrs| attrs.get("name"))
-            .map(String::as_str)
-            .unwrap_or("?");
+            .map_or("?", String::as_str);
         println!("[ui {}] event action={} name={}", ts(), action, cname);
 
         {
@@ -431,7 +432,7 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
                 // Container process exited — if we were stopping it, clear op.
                 // If we sent kill, clear op. If stop is in flight, clear op too.
                 "die" | "stop" => {
-                    if matches!(ops.get(cname).copied(), Some("stopping") | Some("killing")) {
+                    if matches!(ops.get(cname).copied(), Some("stopping" | "killing")) {
                         ops.remove(cname);
                     }
                 }
@@ -545,10 +546,10 @@ async fn dispatch_container_op(
 
 async fn run_rollback(service: &str, ops: &Ops, tx: &broadcast::Sender<String>) -> Result<()> {
     let _lock = crate::deploy_lock::DeployLock::try_acquire(service)
-        .map_err(|_| anyhow::anyhow!("deploy already in progress for {}", service))?;
+        .map_err(|_| anyhow::anyhow!("deploy already in progress for {service}"))?;
 
     let def =
-        ServiceDef::load(service).map_err(|_| anyhow::anyhow!("unknown service: {}", service))?;
+        ServiceDef::load(service).map_err(|_| anyhow::anyhow!("unknown service: {service}"))?;
 
     let docker = Docker::connect_with_socket_defaults()?;
 
@@ -590,7 +591,7 @@ async fn do_rollback(
     let info = docker
         .inspect_container(prev_container, None)
         .await
-        .map_err(|_| anyhow::anyhow!("no stopped container for {}", service))?;
+        .map_err(|_| anyhow::anyhow!("no stopped container for {service}"))?;
 
     let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
     if running {
@@ -618,12 +619,12 @@ async fn do_rollback(
     docker
         .start_container(prev_container, None::<StartContainerOptions<String>>)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to start {}: {}", prev_container, e))?;
+        .map_err(|e| anyhow::anyhow!("failed to start {prev_container}: {e}"))?;
 
     // Health check — on failure, stop the container we just started
     if let Err(e) = deploy::poll_health(docker, def, prev_color).await {
         let _ = deploy::stop_container(docker, prev_container).await;
-        bail!("health check failed after restart: {}", e);
+        bail!("health check failed after restart: {e}");
     }
 
     // Flip state
@@ -638,7 +639,7 @@ async fn do_rollback(
 
     // Reload Caddy
     caddy::apply_all()
-        .map_err(|e| anyhow::anyhow!("caddy reload failed after state write: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("caddy reload failed after state write: {e}"))?;
 
     // Stop the now-old active container (only reached if Caddy reload succeeded)
     deploy::stop_container(docker, active_container).await?;

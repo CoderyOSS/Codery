@@ -16,7 +16,7 @@ pub struct ServiceDef {
     /// Image template. `{sha}` is substituted at deploy time.
     /// Example: "ghcr.io/coderyoss/codery:sandbox-{sha}"
     pub image: String,
-    /// Port formula: host_port = container_port + offset(color)
+    /// Port formula: `host_port` = `container_port` + offset(color)
     pub port_scheme: PortScheme,
     /// Discrete named container ports (sandbox-style services).
     #[serde(default)]
@@ -64,7 +64,7 @@ pub struct ServiceDef {
     pub ipc: Option<String>,
 }
 
-/// host_port = container_port + offset
+/// `host_port` = `container_port` + offset
 /// Both sandbox and apps use this; they just have different offset values.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PortScheme {
@@ -103,7 +103,7 @@ pub enum PortBind {
 }
 
 impl PortBind {
-    /// The IP string passed to Docker's HostIp / used as a listen address.
+    /// The IP string passed to Docker's `HostIp` / used as a listen address.
     /// Fails closed for [`PortBind::Tailnet`] when the Tailscale IP is
     /// unavailable, rather than silently falling back to `0.0.0.0`.
     pub fn resolve(&self) -> Result<String> {
@@ -232,9 +232,9 @@ impl ServiceDef {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("yml") {
                 let data = std::fs::read_to_string(&path)
-                    .with_context(|| format!("failed to read {:?}", path))?;
+                    .with_context(|| format!("failed to read {path:?}"))?;
                 let def: ServiceDef = serde_yaml::from_str(&data)
-                    .with_context(|| format!("failed to parse {:?}", path))?;
+                    .with_context(|| format!("failed to parse {path:?}"))?;
                 defs.push(def);
             }
         }

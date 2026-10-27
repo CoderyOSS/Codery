@@ -59,7 +59,7 @@ pub async fn check_deploy(
     for vol in &def.volumes {
         if let VolumeMount::Named { name, .. } = vol {
             if let Err(e) = ensure_named_volume(docker, name).await {
-                errors.push(format!("named volume '{}': {e}", name));
+                errors.push(format!("named volume '{name}': {e}"));
             }
         }
     }
@@ -92,8 +92,7 @@ pub async fn check_deploy(
             Ok(_) => {} // Port is free.
             Err(_) => {
                 errors.push(format!(
-                    "host port {} is already in use by a foreign process",
-                    host_port
+                    "host port {host_port} is already in use by a foreign process"
                 ));
             }
         }
@@ -118,7 +117,7 @@ pub async fn check_deploy(
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        Err(anyhow::anyhow!("{}", msg))
+        Err(anyhow::anyhow!("{msg}"))
     }
 }
 
@@ -165,7 +164,7 @@ async fn ensure_named_volume(docker: &Docker, name: &str) -> Result<()> {
         Err(bollard::errors::Error::DockerResponseServerError {
             status_code: 404, ..
         }) => {
-            println!("[validate] Creating missing named volume: {}", name);
+            println!("[validate] Creating missing named volume: {name}");
             docker
                 .create_volume(CreateVolumeOptions {
                     name,

@@ -26,9 +26,9 @@ pub fn open() -> Result<Connection> {
     let path = config::DB_PATH;
     if let Some(parent) = std::path::Path::new(path).parent() {
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent dir for {}", path))?;
+            .with_context(|| format!("failed to create parent dir for {path}"))?;
     }
-    let conn = Connection::open(path).with_context(|| format!("failed to open {}", path))?;
+    let conn = Connection::open(path).with_context(|| format!("failed to open {path}"))?;
     Ok(conn)
 }
 
@@ -76,14 +76,14 @@ pub fn insert_app(conn: &Connection, app: &AppRecord) -> Result<()> {
         (
             &app.name,
             &app.subdomain,
-            app.internal_port as i64,
+            i64::from(app.internal_port),
             &app.command,
             &app.directory,
             &app.env,
             app.priority,
             &app.user,
             &app.restart,
-            app.no_cache as i64,
+            i64::from(app.no_cache),
             &app.source,
         ),
     ).with_context(|| format!("failed to insert app '{}'", app.name))?;
@@ -93,7 +93,7 @@ pub fn insert_app(conn: &Connection, app: &AppRecord) -> Result<()> {
 pub fn delete_app(conn: &Connection, name: &str) -> Result<bool> {
     let rows = conn
         .execute("DELETE FROM apps WHERE name = ?1", [name])
-        .with_context(|| format!("failed to delete app '{}'", name))?;
+        .with_context(|| format!("failed to delete app '{name}'"))?;
     Ok(rows > 0)
 }
 
@@ -103,7 +103,7 @@ pub fn set_app_source(conn: &Connection, name: &str, source: &str) -> Result<boo
             "UPDATE apps SET source = ?1 WHERE name = ?2",
             (source, name),
         )
-        .with_context(|| format!("failed to set source for app '{}'", name))?;
+        .with_context(|| format!("failed to set source for app '{name}'"))?;
     Ok(rows > 0)
 }
 
@@ -146,7 +146,7 @@ pub fn port_claimed(conn: &Connection, port: u16) -> Result<bool> {
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM apps WHERE internal_port = ?1",
-            [port as i64],
+            [i64::from(port)],
             |row| row.get(0),
         )
         .context("failed to check port")?;
@@ -179,7 +179,7 @@ pub fn upsert_preview(conn: &Connection, preview: &PreviewRecord) -> Result<()> 
         (
             &preview.service,
             &preview.subdomain,
-            preview.host_port as i64,
+            i64::from(preview.host_port),
             &preview.sha,
             &preview.color,
         ),
@@ -191,7 +191,7 @@ pub fn upsert_preview(conn: &Connection, preview: &PreviewRecord) -> Result<()> 
 pub fn delete_preview(conn: &Connection, service: &str) -> Result<bool> {
     let rows = conn
         .execute("DELETE FROM previews WHERE service = ?1", [service])
-        .with_context(|| format!("failed to delete preview for '{}'", service))?;
+        .with_context(|| format!("failed to delete preview for '{service}'"))?;
     Ok(rows > 0)
 }
 
@@ -228,7 +228,7 @@ pub fn find_preview(conn: &Connection, service: &str) -> Result<Option<PreviewRe
 
 /// Default preview subdomain for a service: "{service}-preview".
 pub fn preview_subdomain(service: &str) -> String {
-    format!("{}-preview", service)
+    format!("{service}-preview")
 }
 
 // ── Routes.yaml types and loader ──────────────────────────────────────────────
@@ -250,9 +250,9 @@ pub fn load_static_routes() -> Result<Vec<StaticRoute>> {
     if !std::path::Path::new(path).exists() {
         return Ok(vec![]);
     }
-    let data = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path))?;
+    let data = std::fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
     let file: RoutesFile =
-        serde_yaml::from_str(&data).with_context(|| format!("failed to parse {}", path))?;
+        serde_yaml::from_str(&data).with_context(|| format!("failed to parse {path}"))?;
     Ok(file.routes)
 }
 
@@ -281,7 +281,7 @@ pub struct UnifiedRoute {
     pub internal_port: Option<u16>,
     pub no_cache: bool,
     /// If set, Caddy renders a `basic_auth` block for this route whose user
-    /// and bcrypt hash come from this env var (see NamedPort::auth).
+    /// and bcrypt hash come from this env var (see `NamedPort::auth`).
     pub auth_env: Option<String>,
 }
 
@@ -376,7 +376,7 @@ pub fn sync_s6_to_dir(conn: &Connection, dir: &std::path::Path) -> Result<()> {
             let managed = apps.iter().any(|a| a.name == name && a.source == "runtime");
             if !managed {
                 std::fs::remove_dir_all(&path)
-                    .with_context(|| format!("failed to prune {:?}", path))?;
+                    .with_context(|| format!("failed to prune {path:?}"))?;
             }
         }
     }
@@ -407,7 +407,7 @@ fn write_bundle(dir: &std::path::Path, app: &AppRecord) -> Result<()> {
 
 fn write_executable(path: &std::path::Path, content: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, content).with_context(|| format!("failed to write {:?}", path))?;
+    std::fs::write(path, content).with_context(|| format!("failed to write {path:?}"))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }

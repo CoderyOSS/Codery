@@ -48,16 +48,22 @@ pub fn generate_from_routes(
         let host_port = match route.target.as_str() {
             "host" => route.port,
             "sandbox" => {
-                let color = colors.get("sandbox").map(|s| s.as_str()).unwrap_or("blue");
+                let color = colors
+                    .get("sandbox")
+                    .map_or("blue", std::string::String::as_str);
                 sandbox_host_port(color, route.port)
             }
             "apps" => {
-                let color = colors.get("apps").map(|s| s.as_str()).unwrap_or("blue");
+                let color = colors
+                    .get("apps")
+                    .map_or("blue", std::string::String::as_str);
                 let offset: u16 = if color == "blue" { 0 } else { 10000 };
                 route.port + offset
             }
             target => {
-                let c = colors.get(target).map(|s| s.as_str()).unwrap_or("blue");
+                let c = colors
+                    .get(target)
+                    .map_or("blue", std::string::String::as_str);
                 let def = ServiceDef::load(target).ok();
                 if let Some(def) = def {
                     def.port_scheme.host_port(c, route.port)
@@ -123,16 +129,12 @@ fn caddy_block(
     };
 
     format!(
-        r#"
+        r"
 {host} {{
     bind {{$TAILSCALE_IP}}
 {auth_directive}    reverse_proxy localhost:{port}{cache_headers}
 }}
-"#,
-        host = host,
-        auth_directive = auth_directive,
-        port = port,
-        cache_headers = cache_headers
+"
     )
 }
 

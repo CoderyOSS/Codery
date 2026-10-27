@@ -158,9 +158,9 @@ pub fn derive_health(
     if mem.total_mb > 0.0 {
         let avail_pct = mem.available_mb / mem.total_mb * 100.0;
         if avail_pct < RED_AVAIL_PCT {
-            red.push(format!("MemAvailable {:.0}% of total", avail_pct));
+            red.push(format!("MemAvailable {avail_pct:.0}% of total"));
         } else if avail_pct < YELLOW_AVAIL_PCT {
-            yellow.push(format!("MemAvailable {:.0}% of total", avail_pct));
+            yellow.push(format!("MemAvailable {avail_pct:.0}% of total"));
         }
     }
 
@@ -169,7 +169,7 @@ pub fn derive_health(
         if swap_used > RED_SWAP_USED_MB {
             red.push(format!("swap in use {:.1}G", swap_used / 1024.0));
         } else if swap_used > YELLOW_SWAP_USED_MB {
-            yellow.push(format!("swap in use {:.0}M", swap_used));
+            yellow.push(format!("swap in use {swap_used:.0}M"));
         }
     }
 
@@ -190,7 +190,7 @@ pub fn derive_health(
 
     if let Some(prev) = prev_oom {
         if cur_oom > prev {
-            red.push(format!("OOM kill detected ({} since boot)", cur_oom));
+            red.push(format!("OOM kill detected ({cur_oom} since boot)"));
         }
     }
 
@@ -279,8 +279,7 @@ pub fn parse_statm_rss_bytes(content: &str, page_size: f64) -> u64 {
         .split_whitespace()
         .nth(1)
         .and_then(|r| r.parse::<u64>().ok())
-        .map(|pages| (pages as f64 * page_size) as u64)
-        .unwrap_or(0)
+        .map_or(0, |pages| (pages as f64 * page_size) as u64)
 }
 
 /// Extract the 64-hex container id from a cgroup v2 path like
@@ -289,7 +288,7 @@ pub fn parse_cgroup_container(content: &str) -> Option<String> {
     for line in content.lines() {
         if let Some(idx) = line.find("docker-") {
             let rest = &line[idx + "docker-".len()..];
-            let id: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+            let id: String = rest.chars().take_while(char::is_ascii_hexdigit).collect();
             if id.len() == 64 {
                 return Some(id);
             }
@@ -326,9 +325,8 @@ pub fn scan_processes() -> std::io::Result<ProcSnapshot> {
             .unwrap_or_default()
             .trim()
             .to_string();
-        let rss_bytes = read_file(&entry.path().join("statm"))
-            .map(|s| parse_statm_rss_bytes(&s, page))
-            .unwrap_or(0);
+        let rss_bytes =
+            read_file(&entry.path().join("statm")).map_or(0, |s| parse_statm_rss_bytes(&s, page));
         let container_id = read_file(&entry.path().join("cgroup"))
             .ok()
             .and_then(|c| parse_cgroup_container(&c));
@@ -358,7 +356,7 @@ pub fn top_processes(
     n: usize,
 ) -> Vec<TopProcess> {
     let ticks = clock_ticks();
-    let dt = (cur.wall_secs - prev.map(|p| p.wall_secs).unwrap_or(cur.wall_secs)).max(0.001);
+    let dt = (cur.wall_secs - prev.map_or(cur.wall_secs, |p| p.wall_secs)).max(0.001);
     let mut rows: Vec<TopProcess> = cur
         .procs
         .iter()
@@ -369,8 +367,7 @@ pub fn top_processes(
                         .procs
                         .iter()
                         .find(|q| q.pid == p.pid)
-                        .map(|q| q.utime + q.stime)
-                        .unwrap_or(p.utime + p.stime); // unseen pid → zero delta
+                        .map_or(p.utime + p.stime, |q| q.utime + q.stime); // unseen pid → zero delta
                     let delta = (p.utime + p.stime).saturating_sub(prev_cpu);
                     delta as f64 / ticks * 100.0 / dt
                 }
@@ -380,8 +377,7 @@ pub fn top_processes(
                 Some(id) => containers
                     .iter()
                     .find(|(cid, _)| id.starts_with(cid.as_str()) || cid.starts_with(id.as_str()))
-                    .map(|(_, name)| name.clone())
-                    .unwrap_or_else(|| "unknown".to_string()),
+                    .map_or_else(|| "unknown".to_string(), |(_, name)| name.clone()),
                 None => "host".to_string(),
             };
             TopProcess {
@@ -449,13 +445,10 @@ pub async fn container_map(docker: &bollard::Docker) -> HashMap<String, String> 
         let Some(id) = c.id.as_deref().map(str::to_string) else {
             continue;
         };
-        let name = c
-            .names
-            .unwrap_or_default()
-            .into_iter()
-            .next()
-            .map(|n| n.trim_start_matches('/').to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let name = c.names.unwrap_or_default().into_iter().next().map_or_else(
+            || "unknown".to_string(),
+            |n| n.trim_start_matches('/').to_string(),
+        );
         map.insert(id, name);
     }
     map
@@ -467,8 +460,7 @@ pub fn collect(state: &mut MetricsState, containers: &HashMap<String, String>) -
     let memory = parse_meminfo(&meminfo);
     let psi = read_psi();
     let oom_kills = std::fs::read_to_string("/sys/fs/cgroup/memory.events")
-        .map(|t| parse_memory_events(&t))
-        .unwrap_or(0);
+        .map_or(0, |t| parse_memory_events(&t));
 
     let snapshot = scan_processes().ok();
     let top = match (&snapshot, &state.prev) {

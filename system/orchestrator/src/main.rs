@@ -40,10 +40,11 @@ pub(crate) fn open_port_for_docker_bridges(port: u16) {
             "ACCEPT",
         ])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
 
-    if !already_open {
+    if already_open {
+        println!("[mcp] iptables ACCEPT rule already present for port {port}");
+    } else {
         let result = std::process::Command::new("iptables")
             .args([
                 "-I",
@@ -60,21 +61,15 @@ pub(crate) fn open_port_for_docker_bridges(port: u16) {
             ])
             .output();
         match result {
-            Ok(o) if o.status.success() => println!(
-                "[mcp] Added iptables ACCEPT rule: Docker bridges → port {}",
-                port
-            ),
+            Ok(o) if o.status.success() => {
+                println!("[mcp] Added iptables ACCEPT rule: Docker bridges → port {port}");
+            }
             Ok(o) => eprintln!(
                 "[mcp] iptables rule failed: {}",
                 String::from_utf8_lossy(&o.stderr)
             ),
-            Err(e) => eprintln!("[mcp] iptables not available: {}", e),
+            Err(e) => eprintln!("[mcp] iptables not available: {e}"),
         }
-    } else {
-        println!(
-            "[mcp] iptables ACCEPT rule already present for port {}",
-            port
-        );
     }
 }
 
@@ -86,7 +81,7 @@ async fn main() -> Result<()> {
     // discover usage without reading the flat usage string at the bottom.
     // e.g. `codery-ci cutover --help` prints focused cutover usage.
     if args.len() >= 3 {
-        let third = args.get(2).map(|s| s.as_str()).unwrap_or("");
+        let third = args.get(2).map_or("", std::string::String::as_str);
         if third == "--help" || third == "-h" {
             if let Some(sub) = args.get(1) {
                 print_subcommand_help(sub);
@@ -95,8 +90,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    match args.get(1).map(|s| s.as_str()) {
-        Some("--version") | Some("-V") => {
+    match args.get(1).map(std::string::String::as_str) {
+        Some("--version" | "-V") => {
             println!("codery-ci {}", env!("CARGO_PKG_VERSION"));
         }
         Some("preflight") => {
@@ -113,7 +108,7 @@ async fn main() -> Result<()> {
             let _lock = match deploy_lock::DeployLock::try_acquire(service) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("[deploy] ERROR ({}): {}", service, e);
+                    eprintln!("[deploy] ERROR ({service}): {e}");
                     std::process::exit(1);
                 }
             };
@@ -134,7 +129,7 @@ async fn main() -> Result<()> {
             let active = state::read_active(service)?;
             let inactive = config::flip(&active);
             validate::check_deploy(&def, sha, inactive, &docker).await?;
-            println!("[validate] Passed — safe to deploy {} @ {}", service, sha);
+            println!("[validate] Passed — safe to deploy {service} @ {sha}");
         }
         Some("reload-routes") => {
             let conn = db::open()?;
@@ -158,12 +153,9 @@ async fn main() -> Result<()> {
             db::init(&conn)?;
             if db::set_app_source(&conn, &name, &source)? {
                 db::sync_s6(&conn)?;
-                println!(
-                    "[db] app '{}' source set to '{}' (bundles re-rendered)",
-                    name, source
-                );
+                println!("[db] app '{name}' source set to '{source}' (bundles re-rendered)");
             } else {
-                eprintln!("app '{}' not found", name);
+                eprintln!("app '{name}' not found");
                 std::process::exit(1);
             }
         }
@@ -181,7 +173,7 @@ async fn main() -> Result<()> {
             let report = diagnose::run().await?;
             if as_json {
                 let json = serde_json::to_string_pretty(&report)?;
-                println!("{}", json);
+                println!("{json}");
             } else {
                 print!("{}", report.format_human());
             }
@@ -243,13 +235,14 @@ async fn main() -> Result<()> {
                 .get(3)
                 .ok_or_else(|| anyhow!("missing tag argument (e.g. host-XYZ or a sha)"))?;
 
-            let dockerfile = flag_value(&args, "--dockerfile")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
+            let dockerfile = flag_value(&args, "--dockerfile").map_or_else(
+                || {
                     default_dockerfile(service).unwrap_or_else(|| {
-                        PathBuf::from(format!("containers/{}/Dockerfile", service))
+                        PathBuf::from(format!("containers/{service}/Dockerfile"))
                     })
-                });
+                },
+                PathBuf::from,
+            );
             let context = flag_value(&args, "--context").unwrap_or_else(|| ".".to_string());
             let image = config::image_ref(service, tag);
 
@@ -282,8 +275,7 @@ async fn main() -> Result<()> {
                 return Err(anyhow!("docker build failed (exit {:?})", status.code()));
             }
             println!(
-                "[build] Built {} — deploy with: codery-ci deploy-preview {} {}",
-                image, service, tag
+                "[build] Built {image} — deploy with: codery-ci deploy-preview {service} {tag}"
             );
         }
         Some("deploy-preview") => {
@@ -310,7 +302,7 @@ async fn main() -> Result<()> {
             let _lock = match deploy_lock::DeployLock::try_acquire(service) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("[deploy-preview] ERROR ({}): {}", service, e);
+                    eprintln!("[deploy-preview] ERROR ({service}): {e}");
                     std::process::exit(1);
                 }
             };
@@ -332,10 +324,10 @@ async fn main() -> Result<()> {
             db::upsert_preview(
                 &conn,
                 &db::PreviewRecord {
-                    service: service.to_string(),
+                    service: service.clone(),
                     subdomain: subdomain.clone(),
                     host_port,
-                    sha: sha.to_string(),
+                    sha: sha.clone(),
                     color: inactive.clone(),
                     created_at: String::new(),
                 },
@@ -345,14 +337,10 @@ async fn main() -> Result<()> {
 
             let domain = config::load_domain();
             println!(
-                "[deploy-preview] {} inactive={} started. Preview at https://localhost:{} (direct) or https://{}.{}",
-                service, inactive, host_port, subdomain, domain
+                "[deploy-preview] {service} inactive={inactive} started. Preview at https://localhost:{host_port} (direct) or https://{subdomain}.{domain}"
             );
-            println!("[deploy-preview] promote:    codery-ci cutover {}", service);
-            println!(
-                "[deploy-preview] abort:      codery-ci cancel-preview {}",
-                service
-            );
+            println!("[deploy-preview] promote:    codery-ci cutover {service}");
+            println!("[deploy-preview] abort:      codery-ci cancel-preview {service}");
         }
         Some("cutover") => {
             // Usage: codery-ci cutover <service> [--sha <sha>]
@@ -375,7 +363,7 @@ async fn main() -> Result<()> {
             let _lock = match deploy_lock::DeployLock::try_acquire(service) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("[cutover] ERROR ({}): {}", service, e);
+                    eprintln!("[cutover] ERROR ({service}): {e}");
                     std::process::exit(1);
                 }
             };
@@ -385,7 +373,7 @@ async fn main() -> Result<()> {
             let sha_opt = flag_value(&args, "--sha");
             let preview = db::find_preview(&conn, service)?.map(|p| p.sha);
             if let (None, Some(p)) = (sha_opt.as_deref(), preview.as_deref()) {
-                println!("[cutover] Found staged preview sha={}", p);
+                println!("[cutover] Found staged preview sha={p}");
             }
 
             deploy::run_cutover(service, sha_opt.as_deref(), preview.as_deref()).await?;
@@ -394,9 +382,9 @@ async fn main() -> Result<()> {
             if db::delete_preview(&conn, service)? {
                 caddy::apply_all()?;
                 nginx::generate_and_reload().await?;
-                println!("[cutover] Removed preview route for {}", service);
+                println!("[cutover] Removed preview route for {service}");
             }
-            println!("[cutover] {} promoted.", service);
+            println!("[cutover] {service} promoted.");
         }
         Some("cancel-preview") => {
             // Usage: codery-ci cancel-preview <service>
@@ -409,7 +397,7 @@ async fn main() -> Result<()> {
             let _lock = match deploy_lock::DeployLock::try_acquire(service) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("[cancel-preview] ERROR ({}): {}", service, e);
+                    eprintln!("[cancel-preview] ERROR ({service}): {e}");
                     std::process::exit(1);
                 }
             };
@@ -421,12 +409,9 @@ async fn main() -> Result<()> {
             if db::delete_preview(&conn, service)? {
                 caddy::apply_all()?;
                 nginx::generate_and_reload().await?;
-                println!("[cancel-preview] Removed preview route for {}", service);
+                println!("[cancel-preview] Removed preview route for {service}");
             }
-            println!(
-                "[cancel-preview] {} preview cancelled — active untouched.",
-                service
-            );
+            println!("[cancel-preview] {service} preview cancelled — active untouched.");
         }
         Some("recreate") => {
             // Usage: codery-ci recreate <service>
@@ -459,7 +444,7 @@ async fn main() -> Result<()> {
             // disable when not actively iterating to keep the security surface flat.
             let sub = args
                 .get(2)
-                .map(|s| s.as_str())
+                .map(std::string::String::as_str)
                 .ok_or_else(|| anyhow!("missing subcommand: enable|disable|status"))?;
             match sub {
                 "enable" => {
@@ -476,24 +461,23 @@ async fn main() -> Result<()> {
                     } else {
                         "disabled"
                     };
-                    println!("[mcp-exec] {}", state);
+                    println!("[mcp-exec] {state}");
                 }
                 other => {
                     return Err(anyhow!(
-                        "unknown mcp-exec subcommand '{}': expected enable|disable|status",
-                        other
+                        "unknown mcp-exec subcommand '{other}': expected enable|disable|status"
                     ));
                 }
             }
         }
         _ => {
-            match args.get(1).map(|s| s.as_str()) {
+            match args.get(1).map(std::string::String::as_str) {
                 None => {
                     print_main_help();
                     // Bare `codery-ci` is a help request, not an error.
                 }
                 Some(unknown) => {
-                    eprintln!("error: unrecognized command '{}'\n", unknown);
+                    eprintln!("error: unrecognized command '{unknown}'\n");
                     print_main_help();
                     std::process::exit(1);
                 }
@@ -803,15 +787,14 @@ Run the orchestrator daemon (background coordinator mode).
         }
         _ => {
             eprintln!(
-                "No help for '{}'. Known subcommands: preflight, deploy, validate, \
+                "No help for '{sub}'. Known subcommands: preflight, deploy, validate, \
                  recreate, reload-routes, diagnose, build, deploy-preview, cutover, \
-                 cancel-preview, mcp-exec, serve, serve-ui, serve-tcp-proxy, daemon.",
-                sub
+                 cancel-preview, mcp-exec, serve, serve-ui, serve-tcp-proxy, daemon."
             );
             return;
         }
     };
-    print!("{}", text);
+    print!("{text}");
 }
 
 // ── CLI helpers ───────────────────────────────────────────────────────────────
@@ -836,7 +819,7 @@ fn default_dockerfile(service: &str) -> Option<PathBuf> {
 ///
 /// Priority:
 ///   1. First named port with a subdomain (e.g. sandbox → opencode:3000)
-///   2. 8080 if the service has a port_range that includes it (apps/Nginx)
+///   2. 8080 if the service has a `port_range` that includes it (apps/Nginx)
 ///   3. Error — caller must pass --port explicitly
 fn resolve_preview_port(def: &service_def::ServiceDef) -> Result<u16> {
     if let Some(p) = def.ports.iter().find(|p| p.subdomain.is_some()) {

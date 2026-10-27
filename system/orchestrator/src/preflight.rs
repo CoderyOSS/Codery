@@ -24,7 +24,7 @@ pub fn check_supervisord() -> Result<()> {
         println!("[preflight] supervisord: OK");
         Ok(())
     } else {
-        bail!("[preflight] supervisord: no programs RUNNING\n{}", stdout);
+        bail!("[preflight] supervisord: no programs RUNNING\n{stdout}");
     }
 }
 
@@ -40,10 +40,10 @@ pub fn check_tailscale() -> Result<()> {
     let state = json["BackendState"].as_str().unwrap_or("unknown");
 
     if state == "Running" {
-        println!("[preflight] tailscale: OK ({})", state);
+        println!("[preflight] tailscale: OK ({state})");
         Ok(())
     } else {
-        bail!("[preflight] tailscale: BackendState = {}", state);
+        bail!("[preflight] tailscale: BackendState = {state}");
     }
 }
 

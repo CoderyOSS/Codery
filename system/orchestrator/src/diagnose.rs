@@ -94,10 +94,10 @@ impl DiagnoseReport {
                 svc.service, tag, svc.state_color
             ));
             if let Some(c) = &svc.running_color {
-                out.push_str(&format!("  running={}", c));
+                out.push_str(&format!("  running={c}"));
             }
             if let Some(name) = &svc.running_container {
-                out.push_str(&format!("  container={}", name));
+                out.push_str(&format!("  container={name}"));
             }
             if let Some(img) = &svc.image {
                 out.push_str(&format!("\n[{}]   image   {}", svc.service, img));
@@ -114,7 +114,7 @@ impl DiagnoseReport {
                 r.subdomain, r.host_port
             ));
             for fix in &r.fix {
-                out.push_str(&format!("[routes]   fix     {}\n", fix));
+                out.push_str(&format!("[routes]   fix     {fix}\n"));
             }
         }
 
@@ -124,7 +124,7 @@ impl DiagnoseReport {
                 p.service, p.sha, p.color
             ));
             for fix in &p.fix {
-                out.push_str(&format!("[previews]   {}\n", fix));
+                out.push_str(&format!("[previews]   {fix}\n"));
             }
         }
 
@@ -322,7 +322,7 @@ pub async fn run() -> Result<DiagnoseReport> {
             service: service.clone(),
             severity: severity.clone(),
             state_color: state_color.clone(),
-            running_color: running_colors.first().map(|s| s.to_string()),
+            running_color: running_colors.first().map(std::string::ToString::to_string),
             running_container,
             image,
             fix: service_fix(service, &severity),
@@ -340,8 +340,7 @@ pub async fn run() -> Result<DiagnoseReport> {
     for r in &unified {
         let color = state_colors
             .get(&r.target)
-            .map(|s| s.as_str())
-            .unwrap_or("blue");
+            .map_or("blue", std::string::String::as_str);
         let host_port = route_host_port(&r.target, r.port, color);
         if listening.contains(&host_port) {
             continue;

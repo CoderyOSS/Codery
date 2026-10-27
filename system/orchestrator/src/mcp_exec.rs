@@ -61,7 +61,7 @@ fn registry() -> &'static JobRegistry {
     REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-/// Is the MCP exec toggle enabled? Toggle = file presence at config::MCP_EXEC_TOGGLE.
+/// Is the MCP exec toggle enabled? Toggle = file presence at `config::MCP_EXEC_TOGGLE`.
 pub fn toggle_enabled() -> bool {
     toggle_enabled_at(Path::new(config::MCP_EXEC_TOGGLE))
 }
@@ -99,15 +99,13 @@ pub fn allowlist() -> &'static [&'static str] {
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn gen_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     // Lower 48 bits as hex — enough uniqueness within a daemon lifetime.
     format!("{:0>12x}", nanos & 0xFFFF_FFFF_FFFF)
 }
@@ -149,23 +147,22 @@ async fn spawn_with(
         .ok_or_else(|| "no subcommand provided".to_string())?;
     if !is_allowed(subcmd) {
         return Err(format!(
-            "subcommand '{}' not in allowlist (allowed: {:?}). \
-             Cutover and deploy are never exposed via MCP — run on host shell.",
-            subcmd, ALLOWLIST
+            "subcommand '{subcmd}' not in allowlist (allowed: {ALLOWLIST:?}). \
+             Cutover and deploy are never exposed via MCP — run on host shell."
         ));
     }
 
-    std::fs::create_dir_all(&log_dir).map_err(|e| format!("failed to create log dir: {}", e))?;
+    std::fs::create_dir_all(&log_dir).map_err(|e| format!("failed to create log dir: {e}"))?;
 
     let id = gen_id();
     let started_at = now_secs();
-    let log_path = log_dir.join(format!("exec-{}-{}-{}.log", started_at, subcmd, id));
+    let log_path = log_dir.join(format!("exec-{started_at}-{subcmd}-{id}.log"));
 
     let log_file = std::fs::File::create(&log_path)
-        .map_err(|e| format!("failed to create log file {:?}: {}", log_path, e))?;
+        .map_err(|e| format!("failed to create log file {log_path:?}: {e}"))?;
     let log_file_stderr = log_file
         .try_clone()
-        .map_err(|e| format!("failed to clone log file handle: {}", e))?;
+        .map_err(|e| format!("failed to clone log file handle: {e}"))?;
 
     let mut cmd = Command::new(bin);
     cmd.args(&args)
@@ -173,7 +170,7 @@ async fn spawn_with(
         .stderr(std::process::Stdio::from(log_file_stderr));
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("failed to spawn '{}': {}", bin, e))?;
+        .map_err(|e| format!("failed to spawn '{bin}': {e}"))?;
 
     let pid = child.id();
 
@@ -195,27 +192,24 @@ async fn spawn_with(
     tokio::spawn(async move {
         let wait_result = if timeout_secs == 0 {
             child.wait().await
+        } else if let Ok(r) = timeout(Duration::from_secs(timeout_secs), child.wait()).await {
+            r
         } else {
-            match timeout(Duration::from_secs(timeout_secs), child.wait()).await {
-                Ok(r) => r,
-                Err(_) => {
-                    let _ = child.start_kill();
-                    {
-                        let mut jobs = registry().lock().await;
-                        if let Some(job) = jobs.get_mut(&id_for_task) {
-                            job.status = JobStatus::Timeout;
-                            job.finished_at = Some(now_secs());
-                        }
-                    }
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .append(true)
-                        .open(&log_path_for_task)
-                    {
-                        let _ = writeln!(f, "\n[mcp-exec] TIMEOUT after {}s", timeout_secs);
-                    }
-                    return;
+            let _ = child.start_kill();
+            {
+                let mut jobs = registry().lock().await;
+                if let Some(job) = jobs.get_mut(&id_for_task) {
+                    job.status = JobStatus::Timeout;
+                    job.finished_at = Some(now_secs());
                 }
             }
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path_for_task)
+            {
+                let _ = writeln!(f, "\n[mcp-exec] TIMEOUT after {timeout_secs}s");
+            }
+            return;
         };
 
         let (new_status, new_exit_code) = match wait_result {
@@ -235,7 +229,7 @@ async fn spawn_with(
                     .append(true)
                     .open(&log_path_for_task)
                 {
-                    let _ = writeln!(f, "\n[mcp-exec] process wait error: {}", e);
+                    let _ = writeln!(f, "\n[mcp-exec] process wait error: {e}");
                 }
                 (JobStatus::Failed, None)
             }
@@ -273,7 +267,7 @@ pub async fn status(job_id: &str, tail_bytes: usize) -> Result<JobStatusResponse
         let jobs = registry().lock().await;
         jobs.get(job_id)
             .cloned()
-            .ok_or_else(|| format!("unknown job_id: {}", job_id))?
+            .ok_or_else(|| format!("unknown job_id: {job_id}"))?
     };
 
     let elapsed = now_secs().saturating_sub(snapshot.started_at);
@@ -295,7 +289,7 @@ fn read_tail(path: &Path, max_bytes: usize) -> String {
         Ok(f) => f,
         Err(_) => return String::new(),
     };
-    let size = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
+    let size = file.metadata().map_or(0, |m| m.len() as usize);
     if size > max_bytes && file.seek(SeekFrom::End(-(max_bytes as i64))).is_err() {
         return String::new();
     }

@@ -29,7 +29,7 @@ pub async fn image_exists_locally(image: &str) -> Result<bool> {
 /// have never been pushed to a registry.
 pub async fn pull_if_missing(image: &str) -> Result<()> {
     if image_exists_locally(image).await? {
-        println!("[images] Image {} present locally — skipping pull", image);
+        println!("[images] Image {image} present locally — skipping pull");
         return Ok(());
     }
     pull(image).await
@@ -39,7 +39,7 @@ pub async fn pull_if_missing(image: &str) -> Result<()> {
 /// "mcr.microsoft.com/playwright:v1.54.1-noble"). The reference is opaque:
 /// no registry is assumed. Streams progress to stdout.
 pub async fn pull(image: &str) -> Result<()> {
-    println!("[images] Pulling {}...", image);
+    println!("[images] Pulling {image}...");
 
     let docker =
         Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
@@ -62,13 +62,13 @@ pub async fn pull(image: &str) -> Result<()> {
         match result {
             Ok(info) => {
                 if let (Some(status), Some(progress)) = (info.status, info.progress) {
-                    print!("\r[images] {} {}", status, progress);
+                    print!("\r[images] {status} {progress}");
                 }
             }
-            Err(e) => anyhow::bail!("pull failed: {}", e),
+            Err(e) => anyhow::bail!("pull failed: {e}"),
         }
     }
-    println!("\n[images] Pull complete: {}", image);
+    println!("\n[images] Pull complete: {image}");
     Ok(())
 }
 
@@ -143,7 +143,7 @@ pub async fn prune(service: &str) -> Result<()> {
         }
     }
 
-    println!("[images] Pruned {} old image(s) for {}", removed, service);
+    println!("[images] Pruned {removed} old image(s) for {service}");
     Ok(())
 }
 
@@ -212,19 +212,16 @@ fn ghcr_credentials() -> Option<DockerCredentials> {
             password = Some(v.to_string());
         }
     }
-    match (username, password) {
-        (Some(u), Some(p)) => Some(DockerCredentials {
+    if let (Some(u), Some(p)) = (username, password) {
+        Some(DockerCredentials {
             username: Some(u),
             password: Some(p),
             serveraddress: Some(config::GHCR_HOST.to_string()),
             ..Default::default()
-        }),
-        _ => {
-            println!(
-                "[images] Warning: GHCR_USERNAME/GHCR_TOKEN not in .env — pulling anonymously"
-            );
-            None
-        }
+        })
+    } else {
+        println!("[images] Warning: GHCR_USERNAME/GHCR_TOKEN not in .env — pulling anonymously");
+        None
     }
 }
 

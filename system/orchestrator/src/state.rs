@@ -11,7 +11,7 @@ pub fn read_active(service: &str) -> Result<String> {
         return Ok("blue".to_string());
     }
     let color = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read state file {:?}", path))?
+        .with_context(|| format!("failed to read state file {path:?}"))?
         .trim()
         .to_string();
     if color != "blue" && color != "green" {
@@ -24,8 +24,8 @@ pub fn read_active(service: &str) -> Result<String> {
 pub fn write_active(service: &str, color: &str) -> Result<()> {
     let path = state_path(service);
     fs::create_dir_all(path.parent().unwrap()).context("failed to create state directory")?;
-    fs::write(&path, format!("{}\n", color))
-        .with_context(|| format!("failed to write state file {:?}", path))?;
+    fs::write(&path, format!("{color}\n"))
+        .with_context(|| format!("failed to write state file {path:?}"))?;
     Ok(())
 }
 
@@ -38,21 +38,21 @@ pub fn read_active_sha(service: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Write the active SHA for a service (called alongside write_active after cutover).
+/// Write the active SHA for a service (called alongside `write_active` after cutover).
 pub fn write_active_sha(service: &str, sha: &str) -> Result<()> {
     let path = sha_path(service);
     fs::create_dir_all(path.parent().unwrap()).context("failed to create state directory")?;
-    fs::write(&path, format!("{}\n", sha))
-        .with_context(|| format!("failed to write SHA state file {:?}", path))?;
+    fs::write(&path, format!("{sha}\n"))
+        .with_context(|| format!("failed to write SHA state file {path:?}"))?;
     Ok(())
 }
 
 fn state_path(service: &str) -> PathBuf {
-    PathBuf::from(config::STATE_DIR).join(format!("{}.color", service))
+    PathBuf::from(config::STATE_DIR).join(format!("{service}.color"))
 }
 
 fn sha_path(service: &str) -> PathBuf {
-    PathBuf::from(config::STATE_DIR).join(format!("{}.sha", service))
+    PathBuf::from(config::STATE_DIR).join(format!("{service}.sha"))
 }
 
 /// Read the active color from a specific path (for testing).

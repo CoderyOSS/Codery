@@ -16,7 +16,7 @@ impl DeployLock {
                 .chars()
                 .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
         {
-            anyhow::bail!("invalid service name for lock: {:?}", service);
+            anyhow::bail!("invalid service name for lock: {service:?}");
         }
         let path = crate::config::deploy_lock_path(service);
         Self::try_acquire_path(&path)
@@ -28,7 +28,7 @@ impl DeployLock {
             .truncate(false)
             .write(true)
             .open(path)
-            .map_err(|e| anyhow::anyhow!("failed to open lock file {}: {}", path, e))?;
+            .map_err(|e| anyhow::anyhow!("failed to open lock file {path}: {e}"))?;
 
         // LOCK_EX | LOCK_NB: exclusive lock, return immediately if unavailable.
         // The OS releases the lock automatically when `file` is dropped (fd closed).
@@ -40,9 +40,8 @@ impl DeployLock {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::WouldBlock {
                 anyhow::bail!("deploy already in progress")
-            } else {
-                Err(err.into())
             }
+            Err(err.into())
         }
     }
 }

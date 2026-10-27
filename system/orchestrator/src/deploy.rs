@@ -205,10 +205,7 @@ pub async fn run_start_inactive(service: &str, sha: &str) -> Result<String> {
     deps.ensure_network(&def.network).await?;
     let active = deps.read_active(&def.service)?;
     let inactive = config::flip(&active).to_string();
-    println!(
-        "[deploy] Starting preview: active={} inactive={}",
-        active, inactive
-    );
+    println!("[deploy] Starting preview: active={active} inactive={inactive}");
     start_inactive(&def, sha, &inactive, &deps).await?;
     Ok(inactive)
 }
@@ -267,7 +264,7 @@ pub async fn run_cutover(
             already_staged: true,
         } => {
             // Preview path: inactive verified running this image. Cutover directly.
-            println!("[cutover] Promoting staged preview sha={}", sha);
+            println!("[cutover] Promoting staged preview sha={sha}");
             cutover(&def, &sha, &active, inactive, &deps).await
         }
         CutoverPlan::Promote {
@@ -279,12 +276,9 @@ pub async fn run_cutover(
             // that hasn't been deploy-previewed yet).
             let already_up = container_runs_image(&docker, &def, inactive, &sha).await?;
             if already_up {
-                println!(
-                    "[cutover] Inactive already running sha={} — skipping start",
-                    sha
-                );
+                println!("[cutover] Inactive already running sha={sha} — skipping start");
             } else {
-                println!("[cutover] Starting inactive {} with sha={}", inactive, sha);
+                println!("[cutover] Starting inactive {inactive} with sha={sha}");
                 start_inactive(&def, &sha, inactive, &deps).await?;
             }
             cutover(&def, &sha, &active, inactive, &deps).await
@@ -301,17 +295,15 @@ pub async fn run_cutover(
         CutoverPlan::NoLocalImages => {
             bail!(
                 "no local images found for '{service}'. \
-                 Run `codery-ci build {0} <tag>` or `codery-ci deploy {0} <sha>` first.",
-                service
+                 Run `codery-ci build {service} <tag>` or `codery-ci deploy {service} <sha>` first."
             );
         }
         CutoverPlan::StalePreview { expected_sha } => {
             bail!(
                 "stale preview for '{service}': inactive container is not running sha \
-                 {expected_sha}. Run `codery-ci cancel-preview {0}` to discard it, then \
+                 {expected_sha}. Run `codery-ci cancel-preview {service}` to discard it, then \
                  `cutover` again to promote the newest local image — or `deploy-preview \
-                 {0} <sha>` to restage.",
-                service
+                 {service} <sha>` to restage."
             );
         }
     }
@@ -379,7 +371,7 @@ pub async fn run_cancel_inactive(service: &str) -> Result<()> {
     let active = deps.read_active(&def.service)?;
     let inactive = config::flip(&active);
     let container = config::container_name(&def.service, inactive);
-    println!("[deploy] Cancelling preview: stopping {}", container);
+    println!("[deploy] Cancelling preview: stopping {container}");
     deps.stop_container(&container).await?;
     deps.remove_container_if_exists(&container).await?;
     deps.prune_images(&def.service).await?;
@@ -399,7 +391,7 @@ async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) ->
 
     let active = deps.read_active(&def.service)?;
     let inactive = config::flip(&active);
-    println!("[deploy] active={} inactive={}", active, inactive);
+    println!("[deploy] active={active} inactive={inactive}");
 
     // Idempotency: same SHA already running AND the active container is actually
     // up → no-op. If the SHA matches but the container is dead/removed, fall
@@ -407,12 +399,11 @@ async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) ->
     let active_container = config::container_name(&def.service, &active);
     if deps.read_active_sha(&def.service).as_deref() == Some(sha) {
         if deps.container_running(&active_container).await? {
-            println!("[deploy] already running sha={} — no-op", sha);
+            println!("[deploy] already running sha={sha} — no-op");
             return Ok(());
         }
         println!(
-            "[deploy] sha={} matches state but active container {} is dead — redeploying",
-            sha, active_container
+            "[deploy] sha={sha} matches state but active container {active_container} is dead — redeploying"
         );
     }
 
@@ -599,12 +590,12 @@ pub(crate) async fn start_container(
             },
         )
         .await
-        .with_context(|| format!("failed to create container {}", name))?;
+        .with_context(|| format!("failed to create container {name}"))?;
 
     docker
         .start_container(&name, None::<StartContainerOptions<String>>)
         .await
-        .with_context(|| format!("failed to start container {}", name))?;
+        .with_context(|| format!("failed to start container {name}"))?;
 
     Ok(())
 }
@@ -619,8 +610,7 @@ async fn health_check(docker: &Docker, def: &ServiceDef, color: &str) -> Result<
             let container_port = def.health_container_port()?;
             let container = config::container_name(&def.service, color);
             println!(
-                "[deploy] Health checking TCP port {} (inside container {})...",
-                container_port, container
+                "[deploy] Health checking TCP port {container_port} (inside container {container})..."
             );
             if !wait_for_tcp_in_container(&container, container_port, *timeout_secs, *interval_secs)
                 .await
@@ -635,10 +625,7 @@ async fn health_check(docker: &Docker, def: &ServiceDef, color: &str) -> Result<
         }
         HealthCheck::Docker { timeout_secs } => {
             let name = config::container_name(&def.service, color);
-            println!(
-                "[deploy] Waiting for Docker HEALTHCHECK to pass (up to {}s)...",
-                timeout_secs
-            );
+            println!("[deploy] Waiting for Docker HEALTHCHECK to pass (up to {timeout_secs}s)...");
             if !wait_for_docker_healthy(docker, &name, *timeout_secs).await? {
                 remove_container_if_exists(docker, &name).await?;
                 bail!(
@@ -663,8 +650,7 @@ pub(crate) async fn poll_health(docker: &Docker, def: &ServiceDef, color: &str) 
             let container_port = def.health_container_port()?;
             let container = config::container_name(&def.service, color);
             println!(
-                "[ui] Health checking TCP port {} (inside container {})...",
-                container_port, container
+                "[ui] Health checking TCP port {container_port} (inside container {container})..."
             );
             if !wait_for_tcp_in_container(&container, container_port, *timeout_secs, *interval_secs)
                 .await
@@ -678,10 +664,7 @@ pub(crate) async fn poll_health(docker: &Docker, def: &ServiceDef, color: &str) 
         }
         HealthCheck::Docker { timeout_secs } => {
             let name = config::container_name(&def.service, color);
-            println!(
-                "[ui] Waiting for Docker HEALTHCHECK to pass (up to {}s)...",
-                timeout_secs
-            );
+            println!("[ui] Waiting for Docker HEALTHCHECK to pass (up to {timeout_secs}s)...");
             if !wait_for_docker_healthy(docker, &name, *timeout_secs).await? {
                 anyhow::bail!(
                     "{} health check timed out — container did not reach 'healthy' state",
@@ -704,8 +687,8 @@ pub(crate) async fn remove_container_if_exists(docker: &Docker, name: &str) -> R
         )
         .await
     {
-        Ok(_) => {
-            println!("[deploy] Removed container {}", name);
+        Ok(()) => {
+            println!("[deploy] Removed container {name}");
             Ok(())
         }
         Err(bollard::errors::Error::DockerResponseServerError {
@@ -713,7 +696,7 @@ pub(crate) async fn remove_container_if_exists(docker: &Docker, name: &str) -> R
         }) => {
             Ok(()) // Didn't exist — fine
         }
-        Err(e) => Err(e).with_context(|| format!("failed to remove container {}", name)),
+        Err(e) => Err(e).with_context(|| format!("failed to remove container {name}")),
     }
 }
 
@@ -736,10 +719,7 @@ pub(crate) async fn recreate_active_container(service: &str) -> Result<RecreateI
     let color = state::read_active(service).unwrap_or_else(|_| "blue".to_string());
     let container = config::container_name(service, &color);
     let sha = state::read_active_sha(service).with_context(|| {
-        format!(
-            "no active SHA recorded for service '{}' — run a full deploy first",
-            service
-        )
+        format!("no active SHA recorded for service '{service}' — run a full deploy first")
     })?;
 
     let docker = Docker::connect_with_socket_defaults().context("failed to connect to Docker")?;
@@ -770,8 +750,8 @@ pub(crate) async fn stop_container(docker: &Docker, name: &str) -> Result<()> {
         .stop_container(name, None::<StopContainerOptions>)
         .await
     {
-        Ok(_) => {
-            println!("[deploy] Stopped container {}", name);
+        Ok(()) => {
+            println!("[deploy] Stopped container {name}");
             Ok(())
         }
         Err(bollard::errors::Error::DockerResponseServerError {
@@ -784,7 +764,7 @@ pub(crate) async fn stop_container(docker: &Docker, name: &str) -> Result<()> {
         }) => {
             Ok(()) // Already stopped — fine
         }
-        Err(e) => Err(e).with_context(|| format!("failed to stop container {}", name)),
+        Err(e) => Err(e).with_context(|| format!("failed to stop container {name}")),
     }
 }
 
@@ -797,7 +777,7 @@ async fn ensure_network(docker: &Docker, network: &str) -> Result<()> {
         })
         .await
     {
-        Ok(_) => println!("[deploy] Created network {}", network),
+        Ok(_) => println!("[deploy] Created network {network}"),
         Err(bollard::errors::Error::DockerResponseServerError {
             status_code: 409, ..
         }) => {
@@ -825,10 +805,7 @@ async fn wait_for_tcp_in_container(
     let attempts = timeout_secs / interval_secs.max(1);
     // bash /dev/tcp is a built-in that performs a TCP connect without any
     // external tool. Exit 0 means something is listening; non-zero means not.
-    let cmd = format!(
-        "exec 3<>/dev/tcp/127.0.0.1/{port} 2>/dev/null && exec 3>&-",
-        port = container_port
-    );
+    let cmd = format!("exec 3<>/dev/tcp/127.0.0.1/{container_port} 2>/dev/null && exec 3>&-");
     for _ in 0..attempts {
         let result = tokio::process::Command::new("docker")
             .args(["exec", container, "bash", "-c", &cmd])
@@ -851,7 +828,7 @@ async fn wait_for_docker_healthy(docker: &Docker, name: &str, timeout_secs: u64)
         let info = docker
             .inspect_container(name, None)
             .await
-            .with_context(|| format!("failed to inspect container {}", name))?;
+            .with_context(|| format!("failed to inspect container {name}"))?;
 
         let health = info.state.and_then(|s| s.health);
         let status = health.as_ref().and_then(|h| h.status);
@@ -859,7 +836,7 @@ async fn wait_for_docker_healthy(docker: &Docker, name: &str, timeout_secs: u64)
         match status {
             Some(HealthStatusEnum::HEALTHY) => return Ok(true),
             Some(HealthStatusEnum::UNHEALTHY) => {
-                println!("[deploy] Container {} is Unhealthy after {}s", name, i);
+                println!("[deploy] Container {name} is Unhealthy after {i}s");
                 if let Some(log_entries) = health.and_then(|h| h.log) {
                     if let Some(last) = log_entries.last() {
                         println!("[deploy] Healthcheck output: {:?}", last.output);
@@ -871,10 +848,7 @@ async fn wait_for_docker_healthy(docker: &Docker, name: &str, timeout_secs: u64)
         }
 
         if i % 10 == 0 {
-            println!(
-                "[deploy] Waiting for {} to become healthy... ({}s)",
-                name, i
-            );
+            println!("[deploy] Waiting for {name} to become healthy... ({i}s)");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -908,7 +882,7 @@ fn build_port_bindings(
 fn build_exposed_ports(ports: &[(u16, u16)]) -> HashMap<String, HashMap<(), ()>> {
     ports
         .iter()
-        .map(|(_, container)| (format!("{}/tcp", container), HashMap::new()))
+        .map(|(_, container)| (format!("{container}/tcp"), HashMap::new()))
         .collect()
 }
 
@@ -922,7 +896,7 @@ pub fn load_env_file() -> Result<Vec<String>> {
     Ok(content
         .lines()
         .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .map(|l| l.to_string())
+        .map(std::string::ToString::to_string)
         .collect())
 }
 
