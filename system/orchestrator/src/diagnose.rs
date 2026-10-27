@@ -18,6 +18,7 @@ use bollard::Docker;
 use serde::Serialize;
 
 use crate::{config, db, service_def::ServiceDef, state};
+use std::fmt::Write as _;
 
 // ── Report types ─────────────────────────────────────────────────────────────
 
@@ -89,49 +90,52 @@ impl DiagnoseReport {
                 Severity::Stale => "STALE",
                 Severity::Info => "INFO",
             };
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "[{}] {:<8} state={}",
                 svc.service, tag, svc.state_color
-            ));
+            );
             if let Some(c) = &svc.running_color {
-                out.push_str(&format!("  running={c}"));
+                let _ = write!(out, "  running={c}");
             }
             if let Some(name) = &svc.running_container {
-                out.push_str(&format!("  container={name}"));
+                let _ = write!(out, "  container={name}");
             }
             if let Some(img) = &svc.image {
-                out.push_str(&format!("\n[{}]   image   {}", svc.service, img));
+                let _ = write!(out, "\n[{}]   image   {}", svc.service, img);
             }
             for fix in &svc.fix {
-                out.push_str(&format!("\n[{}]   fix     {}", svc.service, fix));
+                let _ = write!(out, "\n[{}]   fix     {}", svc.service, fix);
             }
             out.push('\n');
         }
 
         for r in &self.routes {
-            out.push_str(&format!(
+            let _ = writeln!(
+                out,
                 "[routes] {:<40} → :{}  NO LISTENER\n",
                 r.subdomain, r.host_port
-            ));
+            );
             for fix in &r.fix {
-                out.push_str(&format!("[routes]   fix     {fix}\n"));
+                let _ = writeln!(out, "[routes]   fix     {fix}\n");
             }
         }
 
         for p in &self.previews {
-            out.push_str(&format!(
+            let _ = writeln!(
+                out,
                 "[previews] {:<12} sha={} color={}\n",
                 p.service, p.sha, p.color
-            ));
+            );
             for fix in &p.fix {
-                out.push_str(&format!("[previews]   {fix}\n"));
+                let _ = writeln!(out, "[previews]   {fix}\n");
             }
         }
 
         if self.all_healthy {
             out.push_str("\nAll healthy. No issues found.\n");
         } else {
-            out.push_str(&format!("\n{} issue(s) found.\n", self.issue_count));
+            let _ = writeln!(out, "\n{} issue(s) found.\n", self.issue_count);
             out.push_str("Run with --json for machine-readable output.\n");
         }
 
@@ -261,6 +265,7 @@ async fn inspect_container(docker: &Docker, name: &str) -> Option<ContainerState
 
 /// Run the full diagnostic. Connects to Docker, reads the state file,
 /// queries the previews table, and shells out to `ss -tlnp` once.
+#[allow(clippy::too_many_lines)] // linear check pipeline (services/routes/previews/render)
 pub async fn run() -> Result<DiagnoseReport> {
     let defs = ServiceDef::load_all().context("failed to load service definitions")?;
     let docker =
@@ -470,8 +475,14 @@ mod tests {
 
     #[test]
     fn service_fix_ok_is_empty() {
-        assert!(service_fix("sandbox", &Severity::Ok).is_empty());
-        assert!(service_fix("sandbox", &Severity::Info).is_empty());
+        assert_eq!(
+            service_fix("sandbox", &Severity::Ok),
+            [] as [std::string::String; 0]
+        );
+        assert_eq!(
+            service_fix("sandbox", &Severity::Info),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]

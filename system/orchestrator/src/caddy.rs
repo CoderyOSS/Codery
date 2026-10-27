@@ -22,7 +22,7 @@ pub fn apply_all() -> Result<()> {
     let conn = db::open()?;
     let routes = db::build_route_map(&conn)?;
 
-    let content = generate_from_routes(&routes, &colors, &domain)?;
+    let content = generate_from_routes(&routes, &colors, &domain);
     fs::write(config::CADDY_CONFIG, &content)
         .with_context(|| format!("failed to write {}", config::CADDY_CONFIG))?;
     reload_caddy()?;
@@ -34,7 +34,7 @@ pub fn generate_from_routes(
     routes: &[UnifiedRoute],
     colors: &HashMap<String, String>,
     domain: &str,
-) -> Result<String> {
+) -> String {
     let mut caddy = String::from("{\n    acme_dns cloudflare {$CLOUDFLARE_API_TOKEN}\n}\n");
 
     let env_pairs = load_env_pairs();
@@ -84,7 +84,7 @@ pub fn generate_from_routes(
         ));
     }
 
-    Ok(caddy)
+    caddy
 }
 
 fn sandbox_host_port(color: &str, container_port: u16) -> u16 {
@@ -163,9 +163,8 @@ fn reload_caddy() -> Result<()> {
 }
 
 fn load_env_pairs() -> Vec<(String, String)> {
-    let content = match std::fs::read_to_string(config::ENV_FILE) {
-        Ok(c) => c,
-        Err(_) => return vec![],
+    let Ok(content) = std::fs::read_to_string(config::ENV_FILE) else {
+        return vec![];
     };
     let mut pairs: Vec<(String, String)> = content
         .lines()
@@ -248,7 +247,7 @@ mod tests {
     #[test]
     fn sandbox_blue_uses_10k_offset() {
         let routes = vec![sandbox_route("opencode", 3000), sandbox_route("cli", 7681)];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com");
         assert!(caddy.contains("reverse_proxy localhost:13000"));
         assert!(caddy.contains("reverse_proxy localhost:17681"));
     }
@@ -256,28 +255,28 @@ mod tests {
     #[test]
     fn sandbox_green_uses_20k_offset() {
         let routes = vec![sandbox_route("opencode", 3000)];
-        let caddy = generate_from_routes(&routes, &colors("green", "blue"), "example.com").unwrap();
+        let caddy = generate_from_routes(&routes, &colors("green", "blue"), "example.com");
         assert!(caddy.contains("reverse_proxy localhost:23000"));
     }
 
     #[test]
     fn apps_green_uses_10k_offset() {
         let routes = vec![apps_route("myapp", 3001)];
-        let caddy = generate_from_routes(&routes, &colors("blue", "green"), "example.com").unwrap();
+        let caddy = generate_from_routes(&routes, &colors("blue", "green"), "example.com");
         assert!(caddy.contains("reverse_proxy localhost:18080"));
     }
 
     #[test]
     fn apps_blue_no_offset() {
         let routes = vec![apps_route("myapp", 3001)];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com");
         assert!(caddy.contains("reverse_proxy localhost:8080"));
     }
 
     #[test]
     fn host_routes_no_offset() {
         let routes = vec![host_route("mcp", 4040)];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com");
         assert!(caddy.contains("reverse_proxy localhost:4040"));
     }
 
@@ -320,7 +319,7 @@ mod tests {
             no_cache: false,
             auth_env: None,
         }];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com");
         assert!(caddy.contains("myapp.custom.com"));
         assert!(!caddy.contains("myapp.custom.com.example.com"));
     }
@@ -335,7 +334,7 @@ mod tests {
             no_cache: true,
             auth_env: None,
         }];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com");
         assert!(caddy.contains("Cache-Control"));
         assert!(caddy.contains("no-store"));
         assert!(caddy.contains("Pragma"));
@@ -352,7 +351,7 @@ mod tests {
             no_cache: false,
             auth_env: None,
         }];
-        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com").unwrap();
+        let caddy = generate_from_routes(&routes, &colors("blue", "blue"), "example.com");
         assert!(!caddy.contains("Cache-Control"));
         assert!(!caddy.contains("Pragma"));
     }

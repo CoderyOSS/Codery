@@ -115,7 +115,7 @@ mod tests {
 
     fn def_with_fixed_port(service: &str, container_port: u16, fixed_port: u16) -> ServiceDef {
         serde_yaml::from_str(&format!(
-            r#"
+            r"
 service: {service}
 image: ghcr.io/test/test:{service}-{{sha}}
 port_scheme:
@@ -131,14 +131,14 @@ health_check:
 volumes: []
 required_env: []
 network: test-net
-"#
+"
         ))
         .unwrap()
     }
 
     fn def_without_fixed_port(service: &str) -> ServiceDef {
         serde_yaml::from_str(&format!(
-            r#"
+            r"
 service: {service}
 image: ghcr.io/test/test:{service}-{{sha}}
 port_scheme:
@@ -154,7 +154,7 @@ health_check:
 volumes: []
 required_env: []
 network: test-net
-"#
+"
         ))
         .unwrap()
     }

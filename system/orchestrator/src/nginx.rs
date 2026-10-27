@@ -69,9 +69,7 @@ pub(crate) fn generate_config(routes: &[UnifiedRoute], domain: &str) -> String {
 }
 
 async fn reload_in_active_container() -> Result<()> {
-    let color = if let Ok(c) = state::read_active("apps") {
-        c
-    } else {
+    let Ok(color) = state::read_active("apps") else {
         println!("[nginx] No active apps state — skipping reload");
         return Ok(());
     };
@@ -169,12 +167,12 @@ mod tests {
     fn route_without_internal_port_is_skipped() {
         let routes = vec![apps_route("myapp", None)];
         let cfg = generate_config(&routes, "example.com");
-        assert!(cfg.is_empty());
+        assert_eq!(cfg, "");
     }
 
     #[test]
     fn empty_routes_returns_empty_string() {
-        assert!(generate_config(&[], "example.com").is_empty());
+        assert_eq!(generate_config(&[], "example.com"), "");
     }
 
     #[test]
@@ -189,7 +187,7 @@ mod tests {
     fn host_routes_excluded_from_nginx() {
         let routes = vec![host_route("mcp", 4040)];
         let cfg = generate_config(&routes, "example.com");
-        assert!(cfg.is_empty());
+        assert_eq!(cfg, "");
     }
 
     #[test]

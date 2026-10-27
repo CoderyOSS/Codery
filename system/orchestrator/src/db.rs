@@ -5,6 +5,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::config;
+use std::fmt::Write as _;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppRecord {
@@ -117,6 +118,8 @@ pub fn list_apps(conn: &Connection) -> Result<Vec<AppRecord>> {
             Ok(AppRecord {
                 name: row.get(0)?,
                 subdomain: row.get(1)?,
+                // Ports are validated into 0..=65535 before they ever reach the db.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 internal_port: row.get::<_, i64>(2)? as u16,
                 command: row.get(3)?,
                 directory: row.get(4)?,
@@ -207,6 +210,8 @@ pub fn list_previews(conn: &Connection) -> Result<Vec<PreviewRecord>> {
             Ok(PreviewRecord {
                 service: row.get(0)?,
                 subdomain: row.get(1)?,
+                // Ports are validated into 0..=65535 before they ever reach the db.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 host_port: row.get::<_, i64>(2)? as u16,
                 sha: row.get(3)?,
                 color: row.get(4)?,
@@ -376,7 +381,7 @@ pub fn sync_s6_to_dir(conn: &Connection, dir: &std::path::Path) -> Result<()> {
             let managed = apps.iter().any(|a| a.name == name && a.source == "runtime");
             if !managed {
                 std::fs::remove_dir_all(&path)
-                    .with_context(|| format!("failed to prune {path:?}"))?;
+                    .with_context(|| format!("failed to prune {}", path.display()))?;
             }
         }
     }
@@ -407,7 +412,7 @@ fn write_bundle(dir: &std::path::Path, app: &AppRecord) -> Result<()> {
 
 fn write_executable(path: &std::path::Path, content: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, content).with_context(|| format!("failed to write {path:?}"))?;
+    std::fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
@@ -427,16 +432,17 @@ fn render_run(app: &AppRecord) -> String {
             let mut pairs: Vec<_> = env_map.into_iter().collect();
             pairs.sort_by(|a, b| a.0.cmp(&b.0)); // deterministic output
             for (k, v) in pairs {
-                s.push_str(&format!("export {}={}\n", k, shell_quote(&v)));
+                let _ = writeln!(s, "export {}={}\n", k, shell_quote(&v));
             }
         }
     }
-    s.push_str(&format!("cd {}\n", shell_quote(&app.directory)));
-    s.push_str(&format!(
+    let _ = writeln!(s, "cd {}\n", shell_quote(&app.directory));
+    let _ = writeln!(
+        s,
         "exec /command/s6-setuidgid {} bash -c {}\n",
         shell_quote(&app.user),
         shell_quote(&app.command)
-    ));
+    );
     s
 }
 
@@ -455,6 +461,7 @@ fn render_finish(policy: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
@@ -482,7 +489,7 @@ mod tests {
             subdomain: name.to_string(),
             internal_port: 3001,
             command: "bun run start".to_string(),
-            directory: format!("/home/gem/projects/{}", name),
+            directory: format!("/home/gem/projects/{name}"),
             env: None,
             priority: 100,
             user: "gem".to_string(),
@@ -613,8 +620,6 @@ mod tests {
         assert!(run.contains("export HOME=/home/gem\n"));
         assert!(run.contains("cd '/home/gem/projects/myapp'\n"));
         assert!(run.contains("exec /command/s6-setuidgid 'gem' bash -c 'bun run start'\n"));
-
-        use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(b.join("run"))
             .unwrap()
             .permissions()
@@ -636,14 +641,12 @@ mod tests {
         let run = std::fs::read_to_string(dir.join("quotey").join("run")).unwrap();
         assert!(
             run.contains("export GREETING='va'\\''l ue'\n"),
-            "run was:\n{}",
-            run
+            "run was:\n{run}",
         );
-        assert!(run.contains("export PLAIN='simple'\n"), "run was:\n{}", run);
+        assert!(run.contains("export PLAIN='simple'\n"), "run was:\n{run}");
         assert!(
             run.contains("bash -c 'echo it'\\''s done'\n"),
-            "run was:\n{}",
-            run
+            "run was:\n{run}",
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -682,16 +685,14 @@ mod tests {
         let f1 = std::fs::read_to_string(dir.join("onfail").join("finish")).unwrap();
         assert!(
             f1.contains("[ \"$1\" = \"0\" ]"),
-            "on_failure finish was:\n{}",
-            f1
+            "on_failure finish was:\n{f1}",
         );
-        assert!(f1.contains("s6-svc -d ."), "on_failure finish was:\n{}", f1);
+        assert!(f1.contains("s6-svc -d ."), "on_failure finish was:\n{f1}");
 
         let f2 = std::fs::read_to_string(dir.join("never").join("finish")).unwrap();
         assert!(
             f2.contains("exec /command/s6-svc -d ."),
-            "never finish was:\n{}",
-            f2
+            "never finish was:\n{f2}",
         );
 
         // Flip back to always: finish must be removed on re-render.

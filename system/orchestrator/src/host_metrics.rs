@@ -17,6 +17,8 @@ const YELLOW_PSI_MEM_AVG60: f64 = 25.0;
 // ── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
+// `_mb` suffixes are the serialized field names the dashboard consumes.
+#[allow(clippy::struct_field_names)]
 pub struct MemoryInfo {
     pub total_mb: f64,
     pub available_mb: f64,
@@ -244,11 +246,23 @@ pub struct TopProcess {
 }
 
 fn page_size() -> f64 {
-    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as f64 }
+    // SAFETY: sysconf(_SC_PAGESIZE) reads a constant kernel value; it cannot
+    // fail on Linux and writes no memory.
+    #[allow(unsafe_code)]
+    #[allow(clippy::cast_precision_loss)] // page size fits f64 exactly
+    unsafe {
+        libc::sysconf(libc::_SC_PAGESIZE) as f64
+    }
 }
 
 fn clock_ticks() -> f64 {
-    unsafe { libc::sysconf(libc::_SC_CLK_TCK) as f64 }
+    // SAFETY: sysconf(_SC_CLK_TCK) reads a constant kernel value; it cannot
+    // fail on Linux and writes no memory.
+    #[allow(unsafe_code)]
+    #[allow(clippy::cast_precision_loss)] // clock tick constant fits f64 exactly
+    unsafe {
+        libc::sysconf(libc::_SC_CLK_TCK) as f64
+    }
 }
 
 /// Parse /proc/[pid]/stat. Returns (pid, ppid, state, utime, stime).
@@ -266,11 +280,11 @@ pub fn parse_stat(content: &str) -> Option<(i32, i32, String, u64, u64)> {
         return None;
     }
     let state = rest[0].to_string();
-    let ppid: i32 = rest[1].parse().ok()?;
+    let parent_pid: i32 = rest[1].parse().ok()?;
     let utime: u64 = rest[11].parse().ok()?;
     let stime: u64 = rest[12].parse().ok()?;
     let _ = comm; // comm kept for debugging; TopProcess uses /proc/pid/comm
-    Some((pid, ppid, state, utime, stime))
+    Some((pid, parent_pid, state, utime, stime))
 }
 
 /// /proc/[pid]/statm field 2 (resident) × page size = RSS bytes.
@@ -279,7 +293,16 @@ pub fn parse_statm_rss_bytes(content: &str, page_size: f64) -> u64 {
         .split_whitespace()
         .nth(1)
         .and_then(|r| r.parse::<u64>().ok())
-        .map_or(0, |pages| (pages as f64 * page_size) as u64)
+        .map_or(0, |pages| {
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )] // byte totals, f64 mantissa far exceeds RAM sizes
+            {
+                (pages as f64 * page_size) as u64
+            }
+        })
 }
 
 /// Extract the 64-hex container id from a cgroup v2 path like
@@ -315,10 +338,10 @@ pub fn scan_processes() -> std::io::Result<ProcSnapshot> {
 
         let stat = read_file(&entry.path().join("stat")).ok();
         let Some(stat) = stat else { continue };
-        let Some((pid, ppid, state, utime, stime)) = parse_stat(&stat) else {
+        let Some((pid, parent_pid, state, utime, stime)) = parse_stat(&stat) else {
             continue;
         };
-        if ppid == 2 {
+        if parent_pid == 2 {
             continue; // kernel thread (child of kthreadd)
         }
         let comm = read_file(&entry.path().join("comm"))
@@ -369,7 +392,11 @@ pub fn top_processes(
                         .find(|q| q.pid == p.pid)
                         .map_or(p.utime + p.stime, |q| q.utime + q.stime); // unseen pid → zero delta
                     let delta = (p.utime + p.stime).saturating_sub(prev_cpu);
-                    delta as f64 / ticks * 100.0 / dt
+                    {
+                        #[allow(clippy::cast_precision_loss)] // jiffy counters fit f64 exactly
+                        let delta = delta as f64;
+                        delta / ticks * 100.0 / dt
+                    }
                 }
                 None => 0.0,
             };
@@ -383,6 +410,7 @@ pub fn top_processes(
             TopProcess {
                 pid: p.pid,
                 comm: p.comm.clone(),
+                #[allow(clippy::cast_precision_loss)] // byte counts far below f64 mantissa
                 rss_mb: p.rss_bytes as f64 / 1024.0 / 1024.0,
                 cpu_pct,
                 container,
@@ -504,7 +532,7 @@ pub async fn metrics_task(
         };
         let containers = container_map(&docker).await;
         let json = {
-            let mut st = state.lock().unwrap();
+            let mut st = state.lock().expect("metrics state mutex poisoned");
             let m = collect(&mut st, &containers);
             serde_json::to_string(&m)
         };
@@ -549,12 +577,12 @@ SwapFree:              0 kB
     #[test]
     fn meminfo_parses_mb() {
         let m = parse_meminfo(MEMINFO);
-        assert_eq!(m.total_mb, 8055024.0 / 1024.0);
-        assert_eq!(m.available_mb, 3120004.0 / 1024.0);
-        assert_eq!(m.cached_mb, 1830220.0 / 1024.0);
-        assert_eq!(m.buffers_mb, 120332.0 / 1024.0);
-        assert_eq!(m.swap_total_mb, 4194300.0 / 1024.0);
-        assert_eq!(m.swap_free_mb, 2994188.0 / 1024.0);
+        assert_eq!(m.total_mb, 8_055_024.0 / 1024.0);
+        assert_eq!(m.available_mb, 3_120_004.0 / 1024.0);
+        assert_eq!(m.cached_mb, 1_830_220.0 / 1024.0);
+        assert_eq!(m.buffers_mb, 120_332.0 / 1024.0);
+        assert_eq!(m.swap_total_mb, 4_194_300.0 / 1024.0);
+        assert_eq!(m.swap_free_mb, 2_994_188.0 / 1024.0);
     }
 
     #[test]
@@ -568,7 +596,7 @@ SwapFree:              0 kB
     #[test]
     fn meminfo_without_swap_parses_zero_swap() {
         let m = parse_meminfo(MEMINFO_NOSWAP);
-        assert_eq!(m.total_mb, 8055024.0 / 1024.0);
+        assert_eq!(m.total_mb, 8_055_024.0 / 1024.0);
         assert_eq!(m.swap_total_mb, 0.0);
         assert_eq!(m.swap_free_mb, 0.0);
     }
@@ -649,7 +677,7 @@ SwapFree:              0 kB
     fn healthy_host_is_green() {
         let h = derive_health(&mem(50.0, 0.0), Some(&psi_mem(0.0, 0.0)), Some(13), 13);
         assert_eq!(h.status, "green");
-        assert!(h.reasons.is_empty());
+        assert_eq!(h.reasons, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -734,7 +762,7 @@ SwapFree:              0 kB
     // ── Process scanner fixtures ─────────────────────────────────────────
 
     const STAT: &str = "1234 (opencode serve) S 1 0 0 0 -1 4194560 0 0 0 0 100 50 0 0 20 0 1 0 12345 1 1 18446744073709551615 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1\n";
-    const STATM: &str = "100000 197100 50000 1000 0 60000 0\n";
+    const STATM: &str = "100000 197_100 50000 1000 0 60000 0\n";
     const CGROUP_IN_CONTAINER: &str = "0::/system.slice/docker-abc123def456abc123def456abc123def456abc123def456abc123def456abc1.scope\n";
     const CGROUP_HOST: &str = "0::/init.scope\n";
 
@@ -756,9 +784,9 @@ SwapFree:              0 kB
 
     #[test]
     fn stat_parses_with_spaces_in_comm() {
-        let (pid, ppid, state, utime, stime) = parse_stat(STAT).expect("parse");
+        let (pid, parent_pid, state, utime, stime) = parse_stat(STAT).expect("parse");
         assert_eq!(pid, 1234);
-        assert_eq!(ppid, 1);
+        assert_eq!(parent_pid, 1);
         assert_eq!(state, "S");
         assert_eq!(utime, 100);
         assert_eq!(stime, 50);
@@ -772,8 +800,8 @@ SwapFree:              0 kB
 
     #[test]
     fn statm_rss_multiplies_page_size() {
-        // resident = 2nd field = 197100 pages × 4096
-        assert_eq!(parse_statm_rss_bytes(STATM, 4096.0), 197100u64 * 4096);
+        // resident = 2nd field = 197_100 pages × 4096
+        assert_eq!(parse_statm_rss_bytes(STATM, 4096.0), 197_100u64 * 4096);
         assert_eq!(parse_statm_rss_bytes("", 4096.0), 0);
     }
 
@@ -843,6 +871,7 @@ SwapFree:              0 kB
                 comm: format!("p{i}"),
                 utime: 0,
                 stime: 0,
+                #[allow(clippy::cast_sign_loss)] // test index, always non-negative
                 rss_bytes: (i as u64) * 1_000_000,
                 container_id: None,
             });
@@ -867,7 +896,7 @@ SwapFree:              0 kB
             .iter()
             .find(|p| p.pid == 1)
             .expect("pid 1 exists");
-        assert!(!init.comm.is_empty());
+        assert_ne!(init.comm, "");
     }
 
     #[test]
@@ -884,7 +913,7 @@ SwapFree:              0 kB
             m.health.status.as_str(),
             "green" | "yellow" | "red"
         ));
-        assert!(!m.top_processes.is_empty());
+        assert_eq!(m.top_processes, [] as [TopProcess; 0]);
         // Second collect has a prev sample → cpu deltas active, no panic.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let m2 = collect(&mut state, &containers);

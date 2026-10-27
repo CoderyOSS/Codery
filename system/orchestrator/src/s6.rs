@@ -90,6 +90,6 @@ mod tests {
 
     #[test]
     fn handles_empty_output() {
-        assert!(parse_svstat_batch("").is_empty());
+        assert_eq!(parse_svstat_batch(""), [] as [SvcStat; 0]);
     }
 }

@@ -125,9 +125,8 @@ pub async fn check_deploy(
 
 /// Parse /opt/codery/.env into a key→value map. Missing file returns empty map.
 fn load_env_map() -> HashMap<String, String> {
-    let content = match std::fs::read_to_string(config::ENV_FILE) {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
+    let Ok(content) = std::fs::read_to_string(config::ENV_FILE) else {
+        return HashMap::new();
     };
     content
         .lines()

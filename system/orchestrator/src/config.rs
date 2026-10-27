@@ -45,9 +45,8 @@ pub const MCP_EXEC_LOG_DIR: &str = "/var/log/codery-ci-mcp";
 
 /// Read `DOMAIN_NAME` from /opt/codery/.env. Returns `DEFAULT_DOMAIN` if not set.
 pub fn load_domain() -> String {
-    let content = match std::fs::read_to_string(ENV_FILE) {
-        Ok(c) => c,
-        Err(_) => return DEFAULT_DOMAIN.to_string(),
+    let Ok(content) = std::fs::read_to_string(ENV_FILE) else {
+        return DEFAULT_DOMAIN.to_string();
     };
     for line in content.lines() {
         let line = line.trim();

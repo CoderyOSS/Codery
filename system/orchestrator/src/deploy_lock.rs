@@ -32,6 +32,10 @@ impl DeployLock {
 
         // LOCK_EX | LOCK_NB: exclusive lock, return immediately if unavailable.
         // The OS releases the lock automatically when `file` is dropped (fd closed).
+        // SAFETY: `file.as_raw_fd()` is a valid open fd for the lifetime of this
+        // call; flock(2) only touches kernel lock state, writes no memory, and
+        // every libc::LOCK_* constant is valid input.
+        #[allow(unsafe_code)]
         let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
 
         if ret == 0 {

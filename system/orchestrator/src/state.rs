@@ -11,7 +11,7 @@ pub fn read_active(service: &str) -> Result<String> {
         return Ok("blue".to_string());
     }
     let color = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read state file {path:?}"))?
+        .with_context(|| format!("failed to read state file {}", path.display()))?
         .trim()
         .to_string();
     if color != "blue" && color != "green" {
@@ -23,9 +23,10 @@ pub fn read_active(service: &str) -> Result<String> {
 /// Write the active color for a service.
 pub fn write_active(service: &str, color: &str) -> Result<()> {
     let path = state_path(service);
-    fs::create_dir_all(path.parent().unwrap()).context("failed to create state directory")?;
+    let parent = path.parent().expect("state path has a parent directory");
+    fs::create_dir_all(parent).context("failed to create state directory")?;
     fs::write(&path, format!("{color}\n"))
-        .with_context(|| format!("failed to write state file {path:?}"))?;
+        .with_context(|| format!("failed to write state file {}", path.display()))?;
     Ok(())
 }
 
@@ -41,9 +42,10 @@ pub fn read_active_sha(service: &str) -> Option<String> {
 /// Write the active SHA for a service (called alongside `write_active` after cutover).
 pub fn write_active_sha(service: &str, sha: &str) -> Result<()> {
     let path = sha_path(service);
-    fs::create_dir_all(path.parent().unwrap()).context("failed to create state directory")?;
+    let parent = path.parent().expect("sha path has a parent directory");
+    fs::create_dir_all(parent).context("failed to create state directory")?;
     fs::write(&path, format!("{sha}\n"))
-        .with_context(|| format!("failed to write SHA state file {path:?}"))?;
+        .with_context(|| format!("failed to write SHA state file {}", path.display()))?;
     Ok(())
 }
 
@@ -74,7 +76,7 @@ fn write_to(path: &std::path::Path, color: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, format!("{}\n", color))?;
+    std::fs::write(path, format!("{color}\n"))?;
     Ok(())
 }
 

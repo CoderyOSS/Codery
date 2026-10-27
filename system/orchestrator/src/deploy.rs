@@ -754,16 +754,11 @@ pub(crate) async fn stop_container(docker: &Docker, name: &str) -> Result<()> {
             println!("[deploy] Stopped container {name}");
             Ok(())
         }
+        // 404: didn't exist — fine. 304: already stopped — fine.
         Err(bollard::errors::Error::DockerResponseServerError {
-            status_code: 404, ..
-        }) => {
-            Ok(()) // Didn't exist — fine
-        }
-        Err(bollard::errors::Error::DockerResponseServerError {
-            status_code: 304, ..
-        }) => {
-            Ok(()) // Already stopped — fine
-        }
+            status_code: 404 | 304,
+            ..
+        }) => Ok(()),
         Err(e) => Err(e).with_context(|| format!("failed to stop container {name}")),
     }
 }
@@ -879,6 +874,10 @@ fn build_port_bindings(
     Ok(map)
 }
 
+// bollard's `Config.exposed_ports` is typed `HashMap<String, HashMap<(), ()>>`
+// (Docker API encodes maps of empty structs) — the zero-sized value is the API
+// contract, not a modeling mistake.
+#[allow(clippy::zero_sized_map_values)]
 fn build_exposed_ports(ports: &[(u16, u16)]) -> HashMap<String, HashMap<(), ()>> {
     ports
         .iter()
@@ -911,7 +910,7 @@ mod tests {
 
     fn sandbox_def() -> ServiceDef {
         serde_yaml::from_str(
-            r#"
+            r"
 service: sandbox
 image: ghcr.io/coderyoss/codery:sandbox-{sha}
 port_scheme:
@@ -929,7 +928,7 @@ health_check:
 volumes: []
 required_env: []
 network: codery-net
-"#,
+",
         )
         .unwrap()
     }
@@ -996,14 +995,14 @@ network: codery-net
         fn write_active(&self, service: &str, color: &str) -> Result<()> {
             self.events
                 .borrow_mut()
-                .push(format!("write_active:{}={}", service, color));
+                .push(format!("write_active:{service}={color}"));
             *self.active_color.borrow_mut() = color.to_string();
             Ok(())
         }
         fn write_active_sha(&self, service: &str, sha: &str) -> Result<()> {
             self.events
                 .borrow_mut()
-                .push(format!("write_active_sha:{}={}", service, sha));
+                .push(format!("write_active_sha:{service}={sha}"));
             *self.active_sha.borrow_mut() = Some(sha.to_string());
             Ok(())
         }
@@ -1011,12 +1010,14 @@ network: codery-net
             self.events.borrow_mut().push("apply_caddy".into());
             Ok(())
         }
+        #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
         async fn ensure_network(&self, network: &str) -> Result<()> {
             self.events
                 .borrow_mut()
-                .push(format!("ensure_network:{}", network));
+                .push(format!("ensure_network:{network}"));
             Ok(())
         }
+        #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
         async fn validate(&self, _def: &ServiceDef, _sha: &str, _inactive: &str) -> Result<()> {
             self.events.borrow_mut().push("validate".into());
             if self.validate_ok {
@@ -1025,53 +1026,59 @@ network: codery-net
                 anyhow::bail!("mock validate failed")
             }
         }
+        #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
         async fn start_container(&self, def: &ServiceDef, _sha: &str, color: &str) -> Result<()> {
             let name = format!("codery-{}-{}", def.service, color);
             self.events
                 .borrow_mut()
-                .push(format!("start_container:{}", name));
+                .push(format!("start_container:{name}"));
             self.running.borrow_mut().insert(name);
             Ok(())
         }
+        #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
         async fn remove_container_if_exists(&self, name: &str) -> Result<()> {
             self.events
                 .borrow_mut()
-                .push(format!("remove_container:{}", name));
+                .push(format!("remove_container:{name}"));
             self.running.borrow_mut().remove(name);
             Ok(())
         }
+        #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
         async fn stop_container(&self, name: &str) -> Result<()> {
             self.events
                 .borrow_mut()
-                .push(format!("stop_container:{}", name));
+                .push(format!("stop_container:{name}"));
             self.running.borrow_mut().remove(name);
             Ok(())
         }
+        #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
         async fn health_check(&self, def: &ServiceDef, color: &str) -> Result<()> {
             let container = format!("codery-{}-{}", def.service, color);
             self.events
                 .borrow_mut()
-                .push(format!("health_check:{}", container));
+                .push(format!("health_check:{container}"));
             if self.health_ok {
                 Ok(())
             } else {
                 // Mirror real behavior: remove the new container before bailing.
                 self.events
                     .borrow_mut()
-                    .push(format!("remove_container:{}", container));
+                    .push(format!("remove_container:{container}"));
                 self.running.borrow_mut().remove(&container);
                 anyhow::bail!("mock health check timed out on container port 3000")
             }
         }
+        #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
         async fn prune_images(&self, service: &str) -> Result<()> {
             self.events
                 .borrow_mut()
-                .push(format!("prune_images:{}", service));
+                .push(format!("prune_images:{service}"));
             Ok(())
         }
         fn ensure_nginx_config(&self) -> Result<()> {
             Ok(())
         }
+        #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
         async fn container_running(&self, name: &str) -> Result<bool> {
             Ok(self.running.borrow().contains(name))
         }
@@ -1408,7 +1415,7 @@ network: codery-net
     fn local(sha: &str, created: i64) -> images::LocalImage {
         // tag follows the registry convention `<service>-<sha>`; the service prefix
         // is irrelevant to plan_cutover — only the tag-equality comparison matters.
-        let tag = format!("sandbox-{}", sha);
+        let tag = format!("sandbox-{sha}");
         images::LocalImage {
             sha: sha.to_string(),
             tag,

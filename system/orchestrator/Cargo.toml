@@ -40,4 +40,4 @@ warnings = "deny"
 [lints.clippy]
 all = "deny"
 unwrap_used = "deny"
-pedantic = "warn"
+pedantic = { level = "warn", priority = -1 }

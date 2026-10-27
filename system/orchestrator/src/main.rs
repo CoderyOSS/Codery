@@ -74,6 +74,7 @@ pub(crate) fn open_port_for_docker_bridges(port: u16) {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // CLI dispatch; splitting obscures the command table
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -528,6 +529,7 @@ Run `codery-ci <command> --help` for detailed usage of any subcommand.",
 
 // ── Per-subcommand --help ────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)] // help text is naturally long; data-driven help tracked for later
 fn print_subcommand_help(sub: &str) {
     let text = match sub {
         "preflight" => {
@@ -871,7 +873,7 @@ mod tests {
     #[test]
     fn resolve_preview_port_picks_first_subdomain_port() {
         let def: ServiceDef = serde_yaml::from_str(
-            r#"
+            r"
 service: sandbox
 image: ghcr.io/coderyoss/codery:sandbox-{sha}
 port_scheme: {blue_offset: 10000, green_offset: 20000}
@@ -887,7 +889,7 @@ ports:
 health_check: {type: docker, timeout_secs: 30}
 volumes: []
 network: codery-net
-"#,
+",
         )
         .unwrap();
         assert_eq!(resolve_preview_port(&def).unwrap(), 3000);
@@ -896,7 +898,7 @@ network: codery-net
     #[test]
     fn resolve_preview_port_apps_falls_back_to_8080() {
         let def: ServiceDef = serde_yaml::from_str(
-            r#"
+            r"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme: {blue_offset: 0, green_offset: 10000}
@@ -904,7 +906,7 @@ port_range: {container_start: 8000, container_end: 9000}
 health_check: {type: docker, timeout_secs: 90}
 volumes: []
 network: codery-net
-"#,
+",
         )
         .unwrap();
         assert_eq!(resolve_preview_port(&def).unwrap(), 8080);
@@ -913,7 +915,7 @@ network: codery-net
     #[test]
     fn resolve_preview_port_no_subdomain_no_8080_errors() {
         let def: ServiceDef = serde_yaml::from_str(
-            r#"
+            r"
 service: weird
 image: ghcr.io/coderyoss/codery:weird-{sha}
 port_scheme: {blue_offset: 0, green_offset: 10000}
@@ -923,7 +925,7 @@ ports:
 health_check: {type: docker, timeout_secs: 30}
 volumes: []
 network: codery-net
-"#,
+",
         )
         .unwrap();
         assert!(resolve_preview_port(&def).is_err());

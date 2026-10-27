@@ -11,6 +11,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use bollard::container::{DownloadFromContainerOptions, LogsOptions};
+use futures_util::StreamExt;
+use std::io::Read;
+
 use crate::{
     caddy, config, db, deploy, images, mcp_exec, nginx, preflight, service_def::ServiceDef, state,
 };
@@ -228,6 +232,9 @@ async fn svc_stats(service: &str) -> Result<Vec<crate::s6::SvcStat>, String> {
     Ok(crate::s6::parse_svstat_batch(&out))
 }
 
+// Kept Result-returning so every MCP handler body has the same shape
+// (`tool_ok(..)` / `Err(tool_err(..))`) regardless of fallibility.
+#[allow(clippy::unnecessary_wraps)]
 fn tool_ok(s: impl Into<String>) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![Content::text(s.into())]))
 }
@@ -551,8 +558,6 @@ impl OrchestratorMcp {
             .unwrap_or("")
             .to_string();
 
-        use bollard::container::LogsOptions;
-        use futures_util::StreamExt;
         let log_opts = LogsOptions::<String> {
             stdout: true,
             stderr: true,
@@ -568,10 +573,8 @@ impl OrchestratorMcp {
                     let line = match output {
                         LogOutput::StdOut { message }
                         | LogOutput::StdErr { message }
-                        | LogOutput::Console { message } => {
-                            String::from_utf8_lossy(&message).trim_end().to_string()
-                        }
-                        LogOutput::StdIn { message } => {
+                        | LogOutput::Console { message }
+                        | LogOutput::StdIn { message } => {
                             String::from_utf8_lossy(&message).trim_end().to_string()
                         }
                     };
@@ -709,7 +712,7 @@ impl OrchestratorMcp {
     ) -> Result<CallToolResult, McpError> {
         let path = service_path(&name).map_err(tool_err)?;
         let content = std::fs::read_to_string(&path)
-            .map_err(|_| tool_err(format!("service '{name}' not found at {path:?}")))?;
+            .map_err(|_| tool_err(format!("service '{name}' not found at {}", path.display())))?;
         tool_ok(format!("{content}\n\n---\nGuidance: Edit with upsert_service, then reload_routes to apply routing changes."))
     }
 
@@ -745,14 +748,19 @@ impl OrchestratorMcp {
         let path = service_path(&name).map_err(tool_err)?;
         let tmp = path.with_extension("yml.tmp");
         std::fs::write(&tmp, &yaml)
-            .map_err(|e| tool_err(format!("failed to write {tmp:?}: {e}")))?;
-        std::fs::rename(&tmp, &path)
-            .map_err(|e| tool_err(format!("failed to rename {tmp:?} to {path:?}: {e}")))?;
+            .map_err(|e| tool_err(format!("failed to write {}: {e}", tmp.display())))?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            tool_err(format!(
+                "failed to rename {} to {}: {e}",
+                tmp.display(),
+                path.display()
+            ))
+        })?;
 
         tool_ok(format!(
             "service '{}' written to {:?} ({} bytes)",
             name,
-            path,
+            path.display(),
             yaml.len()
         ))
     }
@@ -773,11 +781,14 @@ impl OrchestratorMcp {
     ) -> Result<CallToolResult, McpError> {
         let path = service_path(&name).map_err(tool_err)?;
         if !path.exists() {
-            return Err(tool_err(format!("service '{name}' not found at {path:?}")));
+            return Err(tool_err(format!(
+                "service '{name}' not found at {}",
+                path.display()
+            )));
         }
         std::fs::remove_file(&path)
-            .map_err(|e| tool_err(format!("failed to delete {path:?}: {e}")))?;
-        tool_ok(format!("service '{name}' deleted from {path:?}"))
+            .map_err(|e| tool_err(format!("failed to delete {}: {e}", path.display())))?;
+        tool_ok(format!("service '{name}' deleted from {}", path.display()))
     }
 
     /// Return the JSON Schema for the service definition YAML format.
@@ -824,9 +835,6 @@ impl OrchestratorMcp {
         let docker = bollard::Docker::connect_with_socket_defaults()
             .map_err(|e| tool_err(format!("failed to connect to Docker: {e}")))?;
 
-        use bollard::container::DownloadFromContainerOptions;
-        use futures_util::StreamExt;
-
         let mut stream = docker.download_from_container(
             &container,
             Some(DownloadFromContainerOptions {
@@ -861,7 +869,6 @@ impl OrchestratorMcp {
         {
             let mut entry =
                 entry.map_err(|e| tool_err(format!("failed to read tar entry: {e}")))?;
-            use std::io::Read;
             entry
                 .read_to_string(&mut content)
                 .map_err(|e| tool_err(format!("failed to read file content: {e}")))?;
@@ -1084,7 +1091,7 @@ impl OrchestratorMcp {
             if e.is_empty() {
                 None
             } else {
-                Some(serde_json::to_string(e).unwrap())
+                Some(serde_json::to_string(e).expect("error value serializes"))
             }
         });
 
@@ -1447,6 +1454,9 @@ fn run_check(name: &'static str, f: fn() -> anyhow::Result<()>) -> PreflightChec
     }
 }
 
+// rmcp's tool_handler macro generates the async-trait shape; whether each
+// handler awaits is up to the tool. The async signature is not ours to remove.
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler]
 impl ServerHandler for OrchestratorMcp {
     fn get_info(&self) -> ServerInfo {
@@ -1780,7 +1790,7 @@ mod tests {
 
     #[test]
     fn upsert_rejects_name_service_mismatch() {
-        let yaml = r#"
+        let yaml = r"
 service: sandbox
 image: ghcr.io/coderyoss/codery:sandbox-{sha}
 port_scheme:
@@ -1793,7 +1803,7 @@ health_check:
 volumes: []
 required_env: []
 network: codery-net
-"#;
+";
         let name = "apps"; // intentional mismatch: YAML says 'sandbox', name says 'apps'
         let def: crate::service_def::ServiceDef = serde_yaml::from_str(yaml).unwrap();
         assert_ne!(

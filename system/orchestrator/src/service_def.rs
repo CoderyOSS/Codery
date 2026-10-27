@@ -36,14 +36,14 @@ pub struct ServiceDef {
     #[serde(default)]
     pub extra_hosts: Vec<String>,
     /// Optional Docker network aliases for this container.
-    /// E.g. ["apps"] makes `ssh gem@apps` resolvable from other containers on the same network.
+    /// E.g. `["apps"]` makes `ssh gem@apps` resolvable from other containers on the same network.
     #[serde(default)]
     pub network_aliases: Vec<String>,
     /// If true, do NOT set "no-new-privileges" — allows sudo inside the container.
     #[serde(default)]
     pub allow_privilege_escalation: bool,
     /// Process command as an argv array (never a shell string). Overrides the
-    /// image CMD. E.g. ["npx", "playwright", "run-server", "--port", "3000"].
+    /// image CMD. E.g. `["npx", "playwright", "run-server", "--port", "3000"]`.
     #[serde(default)]
     pub command: Option<Vec<String>>,
     /// Override the image ENTRYPOINT.
@@ -106,7 +106,7 @@ impl PortBind {
     /// The IP string passed to Docker's `HostIp` / used as a listen address.
     /// Fails closed for [`PortBind::Tailnet`] when the Tailscale IP is
     /// unavailable, rather than silently falling back to `0.0.0.0`.
-    pub fn resolve(&self) -> Result<String> {
+    pub fn resolve(self) -> Result<String> {
         match self {
             PortBind::Any => Ok("0.0.0.0".to_string()),
             PortBind::Loopback => Ok("127.0.0.1".to_string()),
@@ -232,9 +232,9 @@ impl ServiceDef {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("yml") {
                 let data = std::fs::read_to_string(&path)
-                    .with_context(|| format!("failed to read {path:?}"))?;
+                    .with_context(|| format!("failed to read {}", path.display()))?;
                 let def: ServiceDef = serde_yaml::from_str(&data)
-                    .with_context(|| format!("failed to parse {path:?}"))?;
+                    .with_context(|| format!("failed to parse {}", path.display()))?;
                 defs.push(def);
             }
         }
@@ -405,7 +405,7 @@ mod tests {
 
     fn sandbox_def() -> ServiceDef {
         serde_yaml::from_str(
-            r#"
+            r"
 service: sandbox
 image: ghcr.io/coderyoss/codery:sandbox-{sha}
 port_scheme:
@@ -435,14 +435,14 @@ volumes:
     container: /home/gem/.local/share/opencode
 required_env: []
 network: codery-net
-"#,
+",
         )
         .unwrap()
     }
 
     fn apps_def() -> ServiceDef {
         serde_yaml::from_str(
-            r#"
+            r"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
@@ -462,7 +462,7 @@ volumes:
     readonly: true
 required_env: []
 network: codery-net
-"#,
+",
         )
         .unwrap()
     }
@@ -479,7 +479,7 @@ network: codery-net
     #[test]
     fn port_bind_defaults_to_any_and_parses() {
         let def: ServiceDef = serde_yaml::from_str(
-            r#"
+            r"
 service: t
 image: ghcr.io/test/t:{sha}
 port_scheme:
@@ -501,7 +501,7 @@ health_check:
   type: docker
   timeout_secs: 30
 network: codery-net
-"#,
+",
         )
         .unwrap();
         assert_eq!(def.ports[0].bind, PortBind::Loopback);
@@ -553,7 +553,7 @@ network: codery-net
     #[test]
     fn basic_auth_field_parses() {
         let def: ServiceDef = serde_yaml::from_str(
-            r#"
+            r"
 service: t
 image: ghcr.io/test/t:{sha}
 port_scheme:
@@ -570,7 +570,7 @@ health_check:
   type: docker
   timeout_secs: 30
 network: codery-net
-"#,
+",
         )
         .unwrap();
         assert_eq!(
@@ -689,7 +689,7 @@ network: codery-net
     #[test]
     fn resolved_env_applies_overrides() {
         let def: ServiceDef = serde_yaml::from_str(
-            r#"
+            r"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
@@ -706,7 +706,7 @@ required_env: []
 env_overrides:
   GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
 network: codery-net
-"#,
+",
         )
         .unwrap();
         let raw = vec![
@@ -733,7 +733,7 @@ network: codery-net
 
     #[test]
     fn parse_network_aliases() {
-        let yaml = r#"
+        let yaml = r"
 service: apps
 image: ghcr.io/coderyoss/codery:apps-{sha}
 port_scheme:
@@ -750,14 +750,14 @@ network: codery-net
 network_aliases:
   - apps
   - myalias
-"#;
+";
         let def: ServiceDef = serde_yaml::from_str(yaml).expect("parse failed");
         assert_eq!(def.network_aliases, vec!["apps", "myalias"]);
     }
 
     #[test]
     fn parse_network_aliases_default_empty() {
-        let yaml = r#"
+        let yaml = r"
 service: sandbox
 image: ghcr.io/coderyoss/codery:sandbox-{sha}
 port_scheme:
@@ -768,15 +768,15 @@ health_check:
   timeout_secs: 60
 volumes: []
 network: codery-net
-"#;
+";
         let def: ServiceDef = serde_yaml::from_str(yaml).expect("parse failed");
-        assert!(def.network_aliases.is_empty());
+        assert_eq!(def.network_aliases, [] as [std::string::String; 0]);
     }
 
     #[test]
     fn named_port_fixed_port_deserializes() {
         let def: ServiceDef = serde_yaml::from_str(
-            r#"
+            r"
 service: sandbox
 image: ghcr.io/test/x:sandbox-{sha}
 port_scheme:
@@ -794,7 +794,7 @@ health_check:
 volumes: []
 required_env: []
 network: test-net
-"#,
+",
         )
         .unwrap();
         let ssh = def.ports.iter().find(|p| p.name == "ssh").unwrap();

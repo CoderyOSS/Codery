@@ -18,6 +18,7 @@ use tokio::sync::broadcast;
 use crate::service_def::ServiceDef;
 use crate::{caddy, config, deploy, state};
 use bollard::container::ListContainersOptions;
+use bollard::container::StartContainerOptions;
 
 fn ts() -> String {
     let secs = std::time::SystemTime::now()
@@ -154,7 +155,7 @@ async fn get_events(
     State(state): State<AppState>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.events_tx.subscribe();
-    let ops_snap = state.ops.lock().unwrap().clone();
+    let ops_snap = state.ops.lock().expect("state mutex poisoned").clone();
     let initial = build_status_json(&ops_snap)
         .await
         .unwrap_or_else(|_| "[]".to_string());
@@ -169,7 +170,7 @@ async fn get_events(
                     Ok(json) => {
                         return Some((Ok(Event::default().data(json)), (rx, None)));
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
             }
@@ -187,7 +188,7 @@ async fn metrics_snapshot(state: &AppState) -> String {
             Err(_) => HashMap::new(),
         }
     };
-    let mut m = state.metrics.lock().unwrap();
+    let mut m = state.metrics.lock().expect("state mutex poisoned");
     let snap = crate::host_metrics::collect(&mut m, &containers);
     serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string())
 }
@@ -219,7 +220,7 @@ async fn get_metrics_stream(
             loop {
                 match rx.recv().await {
                     Ok(json) => return Some((Ok(Event::default().data(json)), (rx, None))),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
             }
@@ -229,7 +230,7 @@ async fn get_metrics_stream(
 }
 
 async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
-    let ops_snap = state.ops.lock().unwrap().clone();
+    let ops_snap = state.ops.lock().expect("state mutex poisoned").clone();
     match build_status(&ops_snap).await {
         Ok(statuses) => {
             let json = serde_json::to_string(&statuses).unwrap_or_else(|_| "[]".to_string());
@@ -252,7 +253,7 @@ async fn post_rollback(
     Path(service): Path<String>,
 ) -> impl IntoResponse {
     {
-        let mut set = state.rollback_lock.lock().unwrap();
+        let mut set = state.rollback_lock.lock().expect("state mutex poisoned");
         if set.contains(&service) {
             return (
                 StatusCode::CONFLICT,
@@ -266,7 +267,7 @@ async fn post_rollback(
     let result = run_rollback(&service, &state.ops, &state.events_tx).await;
 
     {
-        let mut set = state.rollback_lock.lock().unwrap();
+        let mut set = state.rollback_lock.lock().expect("state mutex poisoned");
         set.remove(&service);
     }
 
@@ -374,7 +375,7 @@ fn sha_from_image_tag(service: &str, image: &str) -> Option<String> {
 // ── broadcast helper ──────────────────────────────────────────────────────────
 
 async fn broadcast_status(tx: &broadcast::Sender<String>, ops: &Ops) {
-    let ops_snap = ops.lock().unwrap().clone();
+    let ops_snap = ops.lock().expect("state mutex poisoned").clone();
     let json = build_status_json(&ops_snap)
         .await
         .unwrap_or_else(|_| "[]".to_string());
@@ -423,7 +424,7 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
         println!("[ui {}] event action={} name={}", ts(), action, cname);
 
         {
-            let mut ops = ops.lock().unwrap();
+            let mut ops = ops.lock().expect("state mutex poisoned");
             match action {
                 // Container came up — always clear op.
                 "start" => {
@@ -440,7 +441,7 @@ async fn run_event_watcher(tx: &broadcast::Sender<String>, ops: &Ops) -> Result<
             }
         }
 
-        let ops_snap = ops.lock().unwrap().clone();
+        let ops_snap = ops.lock().expect("state mutex poisoned").clone();
         let tx2 = tx.clone();
         tokio::spawn(async move {
             let t0 = std::time::Instant::now();
@@ -516,7 +517,11 @@ async fn dispatch_container_op(
     docker_args: &'static [&'static str],
     state: AppState,
 ) -> impl IntoResponse {
-    state.ops.lock().unwrap().insert(container.clone(), op);
+    state
+        .ops
+        .lock()
+        .expect("state mutex poisoned")
+        .insert(container.clone(), op);
     broadcast_status(&state.events_tx, &state.ops).await;
 
     let ops = Arc::clone(&state.ops);
@@ -528,14 +533,14 @@ async fn dispatch_container_op(
             Ok(_) => println!("[ui {}] {} dispatched: {}", ts(), op, container),
             Err(e) => {
                 eprintln!("[ui {}] {} failed to spawn: {}", ts(), op, e);
-                ops.lock().unwrap().remove(&container);
+                ops.lock().expect("state mutex poisoned").remove(&container);
                 broadcast_status(&tx, &ops).await;
                 return;
             }
         }
         // Safety net: clear op after 5 minutes if Docker events never arrive.
         tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
-        ops.lock().unwrap().remove(&container);
+        ops.lock().expect("state mutex poisoned").remove(&container);
         broadcast_status(&tx, &ops).await;
     });
 
@@ -559,7 +564,7 @@ async fn run_rollback(service: &str, ops: &Ops, tx: &broadcast::Sender<String>) 
     let active_container = config::container_name(service, &active_color);
 
     ops.lock()
-        .unwrap()
+        .expect("state mutex poisoned")
         .insert(active_container.clone(), "rolling_back");
     broadcast_status(tx, ops).await;
 
@@ -573,7 +578,9 @@ async fn run_rollback(service: &str, ops: &Ops, tx: &broadcast::Sender<String>) 
     )
     .await;
 
-    ops.lock().unwrap().remove(&active_container);
+    ops.lock()
+        .expect("state mutex poisoned")
+        .remove(&active_container);
     broadcast_status(tx, ops).await;
 
     result
@@ -615,7 +622,6 @@ async fn do_rollback(
     );
 
     // Start the previous container
-    use bollard::container::StartContainerOptions;
     docker
         .start_container(prev_container, None::<StartContainerOptions<String>>)
         .await
@@ -662,6 +668,7 @@ mod tests {
         Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
         StopContainerOptions,
     };
+    use futures_util::StreamExt;
 
     async fn start_test_server() -> u16 {
         let (tx, _) = tokio::sync::broadcast::channel::<String>(16);
@@ -671,7 +678,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, make_router(Arc::new(tx), ops))
                 .await
-                .unwrap()
+                .expect("test server starts");
         });
         port
     }
@@ -680,9 +687,8 @@ mod tests {
     /// with the correct flat shape {name, image, status, state}.
     #[tokio::test]
     async fn status_lists_running_containers() {
-        let docker = match Docker::connect_with_socket_defaults() {
-            Ok(d) => d,
-            Err(_) => return, // skip if Docker unavailable
+        let Ok(docker) = Docker::connect_with_socket_defaults() else {
+            return; // skip if Docker unavailable
         };
         if docker.ping().await.is_err() {
             return;
@@ -724,7 +730,7 @@ mod tests {
         let port = start_test_server().await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        let resp = reqwest::get(format!("http://127.0.0.1:{}/api/status", port))
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/api/status"))
             .await
             .expect("GET /api/status");
 
@@ -739,25 +745,18 @@ mod tests {
 
         // Every element must carry the four fields the JS renders
         for item in arr {
-            assert!(
-                item["name"].as_str().is_some(),
-                "missing 'name' in {}",
-                item
-            );
+            assert!(item["name"].as_str().is_some(), "missing 'name' in {item}");
             assert!(
                 item["image"].as_str().is_some(),
-                "missing 'image' in {}",
-                item
+                "missing 'image' in {item}",
             );
             assert!(
                 item["status"].as_str().is_some(),
-                "missing 'status' in {}",
-                item
+                "missing 'status' in {item}",
             );
             assert!(
                 item["state"].as_str().is_some(),
-                "missing 'state' in {}",
-                item
+                "missing 'state' in {item}",
             );
         }
 
@@ -772,11 +771,7 @@ mod tests {
             .await;
         let _ = docker.remove_container(cname, None).await;
 
-        assert!(
-            found,
-            "container '{}' not in /api/status\ngot: {}",
-            cname, body
-        );
+        assert!(found, "container '{cname}' not in /api/status\ngot: {body}");
     }
 
     #[tokio::test]
@@ -800,7 +795,7 @@ mod tests {
                 ),
             )
             .await
-            .unwrap()
+            .expect("test server starts");
         });
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -817,7 +812,6 @@ mod tests {
         // psi may be null (kernel-dependent) — that is valid.
 
         // SSE endpoint: first delivered event is a metrics snapshot.
-        use futures_util::StreamExt;
         let mut es = reqwest::Client::new()
             .get(format!("http://127.0.0.1:{port}/api/metrics/stream"))
             .send()

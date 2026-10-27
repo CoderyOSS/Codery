@@ -51,7 +51,7 @@ pub fn check_caddy() -> Result<()> {
     TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", config::CADDY_ADMIN_PORT)
             .parse()
-            .unwrap(),
+            .expect("hardcoded caddy admin addr parses"),
         Duration::from_secs(3),
     )
     .context(format!(
