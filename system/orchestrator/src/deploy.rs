@@ -10,6 +10,7 @@ use bollard::Docker;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::config::Color;
 use crate::service_def::{HealthCheck, ServiceDef};
 use crate::{caddy, config, images, preflight, state, validate};
 
@@ -94,17 +95,17 @@ pub(crate) fn plan_cutover(
 
 trait DeployDeps {
     fn preflight(&self) -> Result<()>;
-    fn read_active(&self, service: &str) -> Result<String>;
+    fn read_active(&self, service: &str) -> Result<Color>;
     fn read_active_sha(&self, service: &str) -> Option<String>;
-    fn write_active(&self, service: &str, color: &str) -> Result<()>;
+    fn write_active(&self, service: &str, color: Color) -> Result<()>;
     fn write_active_sha(&self, service: &str, sha: &str) -> Result<()>;
     fn apply_caddy(&self) -> Result<()>;
     async fn ensure_network(&self, network: &str) -> Result<()>;
-    async fn validate(&self, def: &ServiceDef, sha: &str, inactive: &str) -> Result<()>;
-    async fn start_container(&self, def: &ServiceDef, sha: &str, color: &str) -> Result<()>;
+    async fn validate(&self, def: &ServiceDef, sha: &str, inactive: Color) -> Result<()>;
+    async fn start_container(&self, def: &ServiceDef, sha: &str, color: Color) -> Result<()>;
     async fn remove_container_if_exists(&self, name: &str) -> Result<()>;
     async fn stop_container(&self, name: &str) -> Result<()>;
-    async fn health_check(&self, def: &ServiceDef, color: &str) -> Result<()>;
+    async fn health_check(&self, def: &ServiceDef, color: Color) -> Result<()>;
     async fn prune_images(&self, service: &str) -> Result<()>;
     fn ensure_nginx_config(&self) -> Result<()>;
     /// Whether the named container exists AND is in running state.
@@ -122,13 +123,13 @@ impl DeployDeps for RealDeps {
     fn preflight(&self) -> Result<()> {
         preflight::run()
     }
-    fn read_active(&self, service: &str) -> Result<String> {
+    fn read_active(&self, service: &str) -> Result<Color> {
         state::read_active(service)
     }
     fn read_active_sha(&self, service: &str) -> Option<String> {
         state::read_active_sha(service)
     }
-    fn write_active(&self, service: &str, color: &str) -> Result<()> {
+    fn write_active(&self, service: &str, color: Color) -> Result<()> {
         state::write_active(service, color)
     }
     fn write_active_sha(&self, service: &str, sha: &str) -> Result<()> {
@@ -140,10 +141,10 @@ impl DeployDeps for RealDeps {
     async fn ensure_network(&self, network: &str) -> Result<()> {
         ensure_network(&self.docker, network).await
     }
-    async fn validate(&self, def: &ServiceDef, sha: &str, inactive: &str) -> Result<()> {
+    async fn validate(&self, def: &ServiceDef, sha: &str, inactive: Color) -> Result<()> {
         validate::check_deploy(def, sha, inactive, &self.docker).await
     }
-    async fn start_container(&self, def: &ServiceDef, sha: &str, color: &str) -> Result<()> {
+    async fn start_container(&self, def: &ServiceDef, sha: &str, color: Color) -> Result<()> {
         start_container(&self.docker, def, sha, color).await
     }
     async fn remove_container_if_exists(&self, name: &str) -> Result<()> {
@@ -152,7 +153,7 @@ impl DeployDeps for RealDeps {
     async fn stop_container(&self, name: &str) -> Result<()> {
         stop_container(&self.docker, name).await
     }
-    async fn health_check(&self, def: &ServiceDef, color: &str) -> Result<()> {
+    async fn health_check(&self, def: &ServiceDef, color: Color) -> Result<()> {
         health_check(&self.docker, def, color).await
     }
     async fn prune_images(&self, service: &str) -> Result<()> {
@@ -195,7 +196,7 @@ pub async fn run(service: &str, sha: &str) -> Result<()> {
 /// Load service def and start the inactive color without cutting over.
 /// Returns the inactive color that was started, so callers can register a
 /// preview route pointing at its host port.
-pub async fn run_start_inactive(service: &str, sha: &str) -> Result<String> {
+pub async fn run_start_inactive(service: &str, sha: &str) -> Result<Color> {
     let def = ServiceDef::load(service)
         .with_context(|| format!("failed to load service definition for '{service}'"))?;
     let docker =
@@ -204,9 +205,9 @@ pub async fn run_start_inactive(service: &str, sha: &str) -> Result<String> {
     deps.preflight()?;
     deps.ensure_network(&def.network).await?;
     let active = deps.read_active(&def.service)?;
-    let inactive = config::flip(&active).to_string();
+    let inactive = config::flip(active);
     println!("[deploy] Starting preview: active={active} inactive={inactive}");
-    start_inactive(&def, sha, &inactive, &deps).await?;
+    start_inactive(&def, sha, inactive, &deps).await?;
     Ok(inactive)
 }
 
@@ -231,7 +232,7 @@ pub async fn run_cutover(
         docker: docker.clone(),
     };
     let active = deps.read_active(&def.service)?;
-    let inactive = config::flip(&active);
+    let inactive = config::flip(active);
 
     // ── Gather plan_cutover inputs ────────────────────────────────────────────
     // preview_staged: is the inactive container actually running the preview's image?
@@ -246,7 +247,7 @@ pub async fn run_cutover(
     // active_image_tag: full tag of the active container's image, e.g.
     // "ghcr.io/coderyoss/codery:sandbox-abc123". Compared verbatim against
     // LocalImage.tag (which is the same full tag).
-    let active_image_tag = active_container_image(&docker, &def.service, &active)
+    let active_image_tag = active_container_image(&docker, &def.service, active)
         .await?
         .unwrap_or_default();
 
@@ -265,7 +266,7 @@ pub async fn run_cutover(
         } => {
             // Preview path: inactive verified running this image. Cutover directly.
             println!("[cutover] Promoting staged preview sha={sha}");
-            cutover(&def, &sha, &active, inactive, &deps).await
+            cutover(&def, &sha, active, inactive, &deps).await
         }
         CutoverPlan::Promote {
             sha,
@@ -281,7 +282,7 @@ pub async fn run_cutover(
                 println!("[cutover] Starting inactive {inactive} with sha={sha}");
                 start_inactive(&def, &sha, inactive, &deps).await?;
             }
-            cutover(&def, &sha, &active, inactive, &deps).await
+            cutover(&def, &sha, active, inactive, &deps).await
         }
         CutoverPlan::NothingNewer {
             active_tag,
@@ -326,7 +327,7 @@ async fn container_image_tag(docker: &Docker, name: &str) -> Result<Option<Strin
 async fn container_runs_image(
     docker: &Docker,
     def: &ServiceDef,
-    color: &str,
+    color: Color,
     sha: &str,
 ) -> Result<bool> {
     let name = config::container_name(&def.service, color);
@@ -354,7 +355,7 @@ async fn container_runs_image(
 async fn active_container_image(
     docker: &Docker,
     service: &str,
-    active: &str,
+    active: Color,
 ) -> Result<Option<String>> {
     let name = config::container_name(service, active);
     container_image_tag(docker, &name).await
@@ -369,7 +370,7 @@ pub async fn run_cancel_inactive(service: &str) -> Result<()> {
         Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
     let deps = RealDeps { docker };
     let active = deps.read_active(&def.service)?;
-    let inactive = config::flip(&active);
+    let inactive = config::flip(active);
     let container = config::container_name(&def.service, inactive);
     println!("[deploy] Cancelling preview: stopping {container}");
     deps.stop_container(&container).await?;
@@ -390,13 +391,13 @@ async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) ->
     deps.ensure_network(&def.network).await?;
 
     let active = deps.read_active(&def.service)?;
-    let inactive = config::flip(&active);
+    let inactive = config::flip(active);
     println!("[deploy] active={active} inactive={inactive}");
 
     // Idempotency: same SHA already running AND the active container is actually
     // up → no-op. If the SHA matches but the container is dead/removed, fall
     // through and redeploy (Bug A fix — see deploy_redeploys_when_sha_matches_but_container_dead).
-    let active_container = config::container_name(&def.service, &active);
+    let active_container = config::container_name(&def.service, active);
     if deps.read_active_sha(&def.service).as_deref() == Some(sha) {
         if deps.container_running(&active_container).await? {
             println!("[deploy] already running sha={sha} — no-op");
@@ -408,7 +409,7 @@ async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) ->
     }
 
     start_inactive(def, sha, inactive, deps).await?;
-    cutover(def, sha, &active, inactive, deps).await?;
+    cutover(def, sha, active, inactive, deps).await?;
     Ok(())
 }
 
@@ -418,7 +419,7 @@ async fn deploy_service<D: DeployDeps>(def: &ServiceDef, sha: &str, deps: &D) ->
 async fn start_inactive<D: DeployDeps>(
     def: &ServiceDef,
     sha: &str,
-    inactive: &str,
+    inactive: Color,
     deps: &D,
 ) -> Result<()> {
     // ── Validate everything before touching Docker ────────────────────────────
@@ -446,8 +447,8 @@ async fn start_inactive<D: DeployDeps>(
 async fn cutover<D: DeployDeps>(
     def: &ServiceDef,
     sha: &str,
-    active: &str,
-    inactive: &str,
+    active: Color,
+    inactive: Color,
     deps: &D,
 ) -> Result<()> {
     // ── Dead-container guard (Bug B fix) ─────────────────────────────────────
@@ -507,7 +508,7 @@ pub(crate) async fn start_container(
     docker: &Docker,
     def: &ServiceDef,
     sha: &str,
-    color: &str,
+    color: Color,
 ) -> Result<()> {
     let name = config::container_name(&def.service, color);
     let image = def.image_ref(sha);
@@ -600,7 +601,7 @@ pub(crate) async fn start_container(
     Ok(())
 }
 
-async fn health_check(docker: &Docker, def: &ServiceDef, color: &str) -> Result<()> {
+async fn health_check(docker: &Docker, def: &ServiceDef, color: Color) -> Result<()> {
     match &def.health_check {
         HealthCheck::Tcp {
             timeout_secs,
@@ -640,7 +641,7 @@ async fn health_check(docker: &Docker, def: &ServiceDef, color: &str) -> Result<
 
 /// Poll health without cleanup on failure. The caller decides what to do on error.
 /// Used by the rollback handler where cleanup logic differs from the deploy path.
-pub(crate) async fn poll_health(docker: &Docker, def: &ServiceDef, color: &str) -> Result<()> {
+pub(crate) async fn poll_health(docker: &Docker, def: &ServiceDef, color: Color) -> Result<()> {
     match &def.health_check {
         HealthCheck::Tcp {
             timeout_secs,
@@ -716,8 +717,8 @@ pub(crate) struct RecreateInfo {
 /// the `restart_service` MCP tool.
 pub(crate) async fn recreate_active_container(service: &str) -> Result<RecreateInfo> {
     let def = ServiceDef::load(service)?;
-    let color = state::read_active(service).unwrap_or_else(|_| "blue".to_string());
-    let container = config::container_name(service, &color);
+    let color = state::read_active(service).unwrap_or(Color::Blue);
+    let container = config::container_name(service, color);
     let sha = state::read_active_sha(service).with_context(|| {
         format!("no active SHA recorded for service '{service}' — run a full deploy first")
     })?;
@@ -730,13 +731,13 @@ pub(crate) async fn recreate_active_container(service: &str) -> Result<RecreateI
         config::image_ref(service, &sha)
     );
     remove_container_if_exists(&docker, &container).await?;
-    start_container(&docker, &def, &sha, &color).await?;
+    start_container(&docker, &def, &sha, color).await?;
 
     caddy::apply_all().context("container started but Caddy reload failed")?;
 
     Ok(RecreateInfo {
         service: service.to_string(),
-        color,
+        color: color.as_str().to_string(),
         container,
         sha,
     })
@@ -937,7 +938,7 @@ network: codery-net
 
     struct MockDeps {
         events: RefCell<Vec<String>>,
-        active_color: RefCell<String>,
+        active_color: RefCell<Color>,
         active_sha: RefCell<Option<String>>,
         health_ok: bool,
         validate_ok: bool,
@@ -951,7 +952,7 @@ network: codery-net
         fn new() -> Self {
             Self {
                 events: RefCell::new(Vec::new()),
-                active_color: RefCell::new("blue".to_string()),
+                active_color: RefCell::new(Color::Blue),
                 active_sha: RefCell::new(None),
                 health_ok: true,
                 validate_ok: true,
@@ -986,17 +987,17 @@ network: codery-net
                 anyhow::bail!("mock preflight failed")
             }
         }
-        fn read_active(&self, _service: &str) -> Result<String> {
-            Ok(self.active_color.borrow().clone())
+        fn read_active(&self, _service: &str) -> Result<Color> {
+            Ok(*self.active_color.borrow())
         }
         fn read_active_sha(&self, _service: &str) -> Option<String> {
             self.active_sha.borrow().clone()
         }
-        fn write_active(&self, service: &str, color: &str) -> Result<()> {
+        fn write_active(&self, service: &str, color: Color) -> Result<()> {
             self.events
                 .borrow_mut()
                 .push(format!("write_active:{service}={color}"));
-            *self.active_color.borrow_mut() = color.to_string();
+            *self.active_color.borrow_mut() = color;
             Ok(())
         }
         fn write_active_sha(&self, service: &str, sha: &str) -> Result<()> {
@@ -1018,7 +1019,7 @@ network: codery-net
             Ok(())
         }
         #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
-        async fn validate(&self, _def: &ServiceDef, _sha: &str, _inactive: &str) -> Result<()> {
+        async fn validate(&self, _def: &ServiceDef, _sha: &str, _inactive: Color) -> Result<()> {
             self.events.borrow_mut().push("validate".into());
             if self.validate_ok {
                 Ok(())
@@ -1027,7 +1028,7 @@ network: codery-net
             }
         }
         #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
-        async fn start_container(&self, def: &ServiceDef, _sha: &str, color: &str) -> Result<()> {
+        async fn start_container(&self, def: &ServiceDef, _sha: &str, color: Color) -> Result<()> {
             let name = format!("codery-{}-{}", def.service, color);
             self.events
                 .borrow_mut()
@@ -1052,7 +1053,7 @@ network: codery-net
             Ok(())
         }
         #[allow(clippy::unused_async_trait_impl)] // trait signature; mock never awaits
-        async fn health_check(&self, def: &ServiceDef, color: &str) -> Result<()> {
+        async fn health_check(&self, def: &ServiceDef, color: Color) -> Result<()> {
             let container = format!("codery-{}-{}", def.service, color);
             self.events
                 .borrow_mut()
@@ -1248,7 +1249,7 @@ network: codery-net
         let def = sandbox_def();
         let deps = MockDeps::new(); // active=blue
 
-        start_inactive(&def, "abc123", "green", &deps)
+        start_inactive(&def, "abc123", Color::Green, &deps)
             .await
             .unwrap();
 
@@ -1273,7 +1274,7 @@ network: codery-net
                                     // cutover is called AFTER deploy-preview has started the inactive color.
         deps.revive("codery-sandbox-green");
 
-        cutover(&def, "abc123", "blue", "green", &deps)
+        cutover(&def, "abc123", Color::Blue, Color::Green, &deps)
             .await
             .unwrap();
 
@@ -1297,8 +1298,8 @@ network: codery-net
 
         // Same SHA, same active color as happy_path_deploys_inactive_and_removes_active.
         let combined = async {
-            start_inactive(&def, "abc123", "green", &deps).await?;
-            cutover(&def, "abc123", "blue", "green", &deps).await
+            start_inactive(&def, "abc123", Color::Green, &deps).await?;
+            cutover(&def, "abc123", Color::Blue, Color::Green, &deps).await
         };
         combined.await.unwrap();
 
@@ -1329,7 +1330,7 @@ network: codery-net
             ..MockDeps::new()
         };
 
-        let result = start_inactive(&def, "abc123", "green", &deps).await;
+        let result = start_inactive(&def, "abc123", Color::Green, &deps).await;
         assert!(result.is_err());
 
         let events = deps.events();
@@ -1383,7 +1384,7 @@ network: codery-net
         let def = sandbox_def();
         let deps = MockDeps::new(); // active=blue; green NOT in running set
 
-        let result = cutover(&def, "abc123", "blue", "green", &deps).await;
+        let result = cutover(&def, "abc123", Color::Blue, Color::Green, &deps).await;
         assert!(
             result.is_err(),
             "cutover must refuse when inactive is not running"

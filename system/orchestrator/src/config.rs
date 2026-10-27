@@ -63,9 +63,44 @@ pub fn load_domain() -> String {
     DEFAULT_DOMAIN.to_string()
 }
 
+/// Deployment color — one half of a blue/green pair.
+///
+/// Parsed once at IO boundaries (state files, CLI args, MCP params); logic
+/// downstream matches on the enum instead of comparing strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Color {
+    Blue,
+    Green,
+}
+
+impl Color {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Color::Blue => "blue",
+            Color::Green => "green",
+        }
+    }
+
+    /// Parse a color string; `None` for anything but "blue"/"green".
+    pub fn parse(s: &str) -> Option<Color> {
+        match s {
+            "blue" => Some(Color::Blue),
+            "green" => Some(Color::Green),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Color {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Returns the container name for a service+color pair.
-pub fn container_name(service: &str, color: &str) -> String {
-    format!("codery-{service}-{color}")
+pub fn container_name(service: &str, color: Color) -> String {
+    format!("codery-{service}-{}", color.as_str())
 }
 
 /// Returns the local tag for a `codery-ci build` result. Image *pulling* does
@@ -76,11 +111,10 @@ pub fn image_ref(service: &str, sha: &str) -> String {
 }
 
 /// Returns the opposite color.
-pub fn flip(color: &str) -> &'static str {
-    if color == "blue" {
-        "green"
-    } else {
-        "blue"
+pub fn flip(color: Color) -> Color {
+    match color {
+        Color::Blue => Color::Green,
+        Color::Green => Color::Blue,
     }
 }
 
@@ -95,14 +129,17 @@ mod tests {
 
     #[test]
     fn flip_colors() {
-        assert_eq!(flip("blue"), "green");
-        assert_eq!(flip("green"), "blue");
+        assert_eq!(flip(Color::Blue), Color::Green);
+        assert_eq!(flip(Color::Green), Color::Blue);
     }
 
     #[test]
     fn container_names() {
-        assert_eq!(container_name("sandbox", "blue"), "codery-sandbox-blue");
-        assert_eq!(container_name("apps", "green"), "codery-apps-green");
+        assert_eq!(
+            container_name("sandbox", Color::Blue),
+            "codery-sandbox-blue"
+        );
+        assert_eq!(container_name("apps", Color::Green), "codery-apps-green");
     }
 
     #[test]

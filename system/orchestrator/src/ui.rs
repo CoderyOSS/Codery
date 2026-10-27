@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
+use crate::config::Color;
 use crate::service_def::ServiceDef;
 use crate::{caddy, config, deploy, state};
 use bollard::container::ListContainersOptions;
@@ -309,7 +310,7 @@ async fn build_status(ops: &HashMap<String, &'static str>) -> Result<Vec<Service
         let (service, rollback_available, prev_container, serving) =
             if let Some((svc, color)) = parse_service_container(&name) {
                 let active = state::read_active(&svc).ok();
-                let is_serving = active.as_deref() == Some(color);
+                let is_serving = active == Some(color);
                 let peer_color = config::flip(color);
                 let peer = peer_container_name(&name, &svc, peer_color);
                 let stopped = is_container_stopped(&docker, &peer).await;
@@ -341,19 +342,19 @@ async fn build_status(ops: &HashMap<String, &'static str>) -> Result<Vec<Service
 }
 
 /// Parse `codery-{service}-{color}` container names.
-fn parse_service_container(name: &str) -> Option<(String, &'static str)> {
+fn parse_service_container(name: &str) -> Option<(String, Color)> {
     if let Some(rest) = name.strip_prefix("codery-") {
         if let Some(svc) = rest.strip_suffix("-blue") {
-            return Some((svc.to_string(), "blue"));
+            return Some((svc.to_string(), Color::Blue));
         }
         if let Some(svc) = rest.strip_suffix("-green") {
-            return Some((svc.to_string(), "green"));
+            return Some((svc.to_string(), Color::Green));
         }
     }
     None
 }
 
-fn peer_container_name(_name: &str, service: &str, peer_color: &str) -> String {
+fn peer_container_name(_name: &str, service: &str, peer_color: Color) -> String {
     config::container_name(service, peer_color)
 }
 
@@ -559,9 +560,9 @@ async fn run_rollback(service: &str, ops: &Ops, tx: &broadcast::Sender<String>) 
     let docker = Docker::connect_with_socket_defaults()?;
 
     let active_color = state::read_active(service)?;
-    let prev_color = config::flip(&active_color);
+    let prev_color = config::flip(active_color);
     let prev_container = config::container_name(service, prev_color);
-    let active_container = config::container_name(service, &active_color);
+    let active_container = config::container_name(service, active_color);
 
     ops.lock()
         .expect("state mutex poisoned")
@@ -590,7 +591,7 @@ async fn do_rollback(
     docker: &Docker,
     def: &ServiceDef,
     service: &str,
-    prev_color: &str,
+    prev_color: Color,
     prev_container: &str,
     active_container: &str,
 ) -> Result<()> {

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::config::Color;
 use crate::service_def::{PortBind, PortScheme, ServiceDef};
 use crate::state;
 
@@ -99,8 +100,8 @@ async fn proxy_connection(
     scheme: &PortScheme,
     bind_ip: &str,
 ) -> Result<()> {
-    let color = state::read_active(service)?;
-    let target_port = scheme.host_port(&color, container_port);
+    let color: Color = state::read_active(service)?;
+    let target_port = scheme.host_port(color, container_port);
     let mut outbound = TcpStream::connect((bind_ip, target_port))
         .await
         .with_context(|| format!("tcp-proxy: failed to connect to {bind_ip}:{target_port}"))?;
@@ -201,11 +202,11 @@ network: test-net
         let target = &targets[0];
         // Verify the scheme computes correct target ports for both colors
         assert_eq!(
-            target.scheme.host_port("blue", target.container_port),
+            target.scheme.host_port(Color::Blue, target.container_port),
             10022
         );
         assert_eq!(
-            target.scheme.host_port("green", target.container_port),
+            target.scheme.host_port(Color::Green, target.container_port),
             20022
         );
     }

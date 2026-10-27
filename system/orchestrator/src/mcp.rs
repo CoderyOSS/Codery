@@ -15,6 +15,7 @@ use bollard::container::{DownloadFromContainerOptions, LogsOptions};
 use futures_util::StreamExt;
 use std::io::Read;
 
+use crate::config::Color;
 use crate::{
     caddy, config, db, deploy, images, mcp_exec, nginx, preflight, service_def::ServiceDef, state,
 };
@@ -212,7 +213,7 @@ async fn shell_output(program: &str, args: &[&str]) -> Result<String, String> {
 /// Run a command inside the active container for a service via `docker exec`.
 async fn container_exec(service: &str, cmd: &[&str]) -> Result<String, String> {
     let color = state::read_active(service).map_err(|e| e.to_string())?;
-    let container = config::container_name(service, &color);
+    let container = config::container_name(service, color);
     let mut args = vec!["exec", container.as_str()];
     args.extend_from_slice(cmd);
     shell_output("docker", &args).await
@@ -265,27 +266,26 @@ impl OrchestratorMcp {
 
         let mut statuses = Vec::new();
         for def in &defs {
-            let blue = config::container_name(&def.service, "blue");
-            let green = config::container_name(&def.service, "green");
+            let blue = config::container_name(&def.service, Color::Blue);
+            let green = config::container_name(&def.service, Color::Green);
             let blue_running = is_running(docker.inspect_container(&blue, None).await.ok());
             let green_running = is_running(docker.inspect_container(&green, None).await.ok());
 
             let color = if blue_running && !green_running {
-                "blue".to_string()
+                Color::Blue
             } else if green_running && !blue_running {
-                "green".to_string()
+                Color::Green
             } else {
-                state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string())
+                state::read_active(&def.service).unwrap_or(Color::Blue)
             };
             let running = blue_running || green_running;
-            let state_file_color =
-                state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string());
+            let state_file_color = state::read_active(&def.service).unwrap_or(Color::Blue);
 
             statuses.push(ServiceStatus {
-                container: config::container_name(&def.service, &color),
+                container: config::container_name(&def.service, color),
                 active_sha: state::read_active_sha(&def.service),
-                active_color: color,
-                state_file_color,
+                active_color: color.as_str().to_string(),
+                state_file_color: state_file_color.as_str().to_string(),
                 service: def.service.clone(),
                 running,
             });
@@ -316,7 +316,7 @@ impl OrchestratorMcp {
 
         let mut services_map = HashMap::new();
         for def in &defs {
-            let color = state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string());
+            let color = state::read_active(&def.service).unwrap_or(Color::Blue);
             services_map.insert(def.service.clone(), color);
         }
 
@@ -338,18 +338,22 @@ impl OrchestratorMcp {
                 } else {
                     format!("{}.{}", r.subdomain, domain)
                 };
-                let color = services_map.get(&r.target).map(std::string::String::as_str);
+                let color = services_map.get(&r.target).copied();
                 let host_port = match r.target.as_str() {
                     "host" => r.port,
                     "sandbox" => {
-                        let c = color.unwrap_or("blue");
-                        r.port + if c == "blue" { 10000 } else { 20000 }
+                        let c = color.unwrap_or(Color::Blue);
+                        r.port
+                            + match c {
+                                Color::Blue => 10000,
+                                Color::Green => 20000,
+                            }
                     }
                     _ => {
-                        let c = color.unwrap_or("blue");
                         let def = ServiceDef::load(&r.target).ok();
                         if let Some(def) = def {
-                            def.port_scheme.host_port(c, r.port)
+                            def.port_scheme
+                                .host_port(color.unwrap_or(Color::Blue), r.port)
                         } else {
                             r.port
                         }
@@ -361,7 +365,7 @@ impl OrchestratorMcp {
                     container_port: Some(r.port),
                     internal_port: r.internal_port,
                     service: r.target.clone(),
-                    color: color.map(std::string::ToString::to_string),
+                    color: color.map(|c| c.as_str().to_string()),
                     note: None,
                     healthy: listening_ports.contains(&host_port),
                 }
@@ -370,7 +374,10 @@ impl OrchestratorMcp {
 
         let unhealthy_count = route_entries.iter().filter(|r| !r.healthy).count();
         let table = RoutingTable {
-            services: services_map,
+            services: services_map
+                .into_iter()
+                .map(|(k, v)| (k, v.as_str().to_string()))
+                .collect(),
             routes: route_entries,
         };
         let response = json!({
@@ -527,8 +534,8 @@ impl OrchestratorMcp {
             )));
         }
 
-        let color = state::read_active(&service).unwrap_or_else(|_| "blue".to_string());
-        let container = config::container_name(&service, &color);
+        let color = state::read_active(&service).unwrap_or(Color::Blue);
+        let container = config::container_name(&service, color);
 
         let docker = bollard::Docker::connect_with_socket_defaults()
             .map_err(|e| tool_err(format!("failed to connect to Docker: {e}")))?;
@@ -829,8 +836,8 @@ impl OrchestratorMcp {
             return Err(tool_err(format!("path must be absolute, got: {path}")));
         }
 
-        let color = state::read_active(&service).unwrap_or_else(|_| "blue".to_string());
-        let container = config::container_name(&service, &color);
+        let color = state::read_active(&service).unwrap_or(Color::Blue);
+        let container = config::container_name(&service, color);
 
         let docker = bollard::Docker::connect_with_socket_defaults()
             .map_err(|e| tool_err(format!("failed to connect to Docker: {e}")))?;
@@ -933,8 +940,8 @@ impl OrchestratorMcp {
         &self,
         Parameters(ServiceParam { service }): Parameters<ServiceParam>,
     ) -> Result<CallToolResult, McpError> {
-        let color = state::read_active(&service).unwrap_or_else(|_| "blue".to_string());
-        let container = config::container_name(&service, &color);
+        let color = state::read_active(&service).unwrap_or(Color::Blue);
+        let container = config::container_name(&service, color);
         let output = shell_output("docker", &["port", &container])
             .await
             .map_err(tool_err)?;

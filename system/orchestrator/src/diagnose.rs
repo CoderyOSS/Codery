@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use bollard::Docker;
 use serde::Serialize;
 
+use crate::config::Color;
 use crate::{config, db, service_def::ServiceDef, state};
 use std::fmt::Write as _;
 
@@ -152,7 +153,7 @@ impl DiagnoseReport {
 /// - Both colors present → Info.
 /// - Exactly one running and it matches `state_color` → Ok.
 /// - Exactly one running and it does NOT match `state_color` → Mismatch.
-pub fn classify_service(state_color: &str, running: &[&str]) -> Severity {
+pub fn classify_service(state_color: Color, running: &[Color]) -> Severity {
     match running.len() {
         0 => Severity::Dead,
         1 => {
@@ -227,12 +228,15 @@ pub fn parse_listening_ports(ss_output: &str) -> HashSet<u16> {
 /// - `target == "host"` → route.port is already a host port.
 /// - `target == "sandbox"` → blue offset 10000, green offset 20000.
 /// - Other services → use their `port_scheme` from the service YAML.
-pub fn route_host_port(target: &str, container_port: u16, state_color: &str) -> u16 {
+pub fn route_host_port(target: &str, container_port: u16, state_color: Color) -> u16 {
     if target == "host" {
         return container_port;
     }
     if target == "sandbox" {
-        let offset = if state_color == "blue" { 10000 } else { 20000 };
+        let offset = match state_color {
+            Color::Blue => 10000,
+            Color::Green => 20000,
+        };
         return container_port + offset;
     }
     if let Ok(def) = ServiceDef::load(target) {
@@ -278,29 +282,29 @@ pub async fn run() -> Result<DiagnoseReport> {
     let previews_db = db::list_previews(&conn).context("failed to list previews")?;
 
     let mut services: Vec<ServiceIssue> = Vec::new();
-    let mut state_colors: std::collections::HashMap<String, String> =
+    let mut state_colors: std::collections::HashMap<String, Color> =
         std::collections::HashMap::new();
 
     for def in &defs {
         let service = &def.service;
-        let state_color = state::read_active(service).unwrap_or_else(|_| "blue".to_string());
-        state_colors.insert(service.clone(), state_color.clone());
+        let state_color = state::read_active(service).unwrap_or(Color::Blue);
+        state_colors.insert(service.clone(), state_color);
 
-        let blue = config::container_name(service, "blue");
-        let green = config::container_name(service, "green");
+        let blue = config::container_name(service, Color::Blue);
+        let green = config::container_name(service, Color::Green);
 
         let blue_state = inspect_container(&docker, &blue).await;
         let green_state = inspect_container(&docker, &green).await;
 
-        let mut running_colors: Vec<&str> = Vec::new();
+        let mut running_colors: Vec<Color> = Vec::new();
         if let Some(s) = &blue_state {
             if s.running {
-                running_colors.push("blue");
+                running_colors.push(Color::Blue);
             }
         }
         if let Some(s) = &green_state {
             if s.running {
-                running_colors.push("green");
+                running_colors.push(Color::Green);
             }
         }
 
@@ -308,12 +312,12 @@ pub async fn run() -> Result<DiagnoseReport> {
             // A preview deploy is pending cutover for this service.
             Severity::Stale
         } else {
-            classify_service(&state_color, &running_colors)
+            classify_service(state_color, &running_colors)
         };
         let (running_container, image) = match severity {
             Severity::Ok | Severity::Mismatch => {
                 let c = running_colors[0];
-                let img = if c == "blue" {
+                let img = if c == Color::Blue {
                     blue_state.as_ref().and_then(|s| s.image.clone())
                 } else {
                     green_state.as_ref().and_then(|s| s.image.clone())
@@ -326,8 +330,8 @@ pub async fn run() -> Result<DiagnoseReport> {
         services.push(ServiceIssue {
             service: service.clone(),
             severity: severity.clone(),
-            state_color: state_color.clone(),
-            running_color: running_colors.first().map(std::string::ToString::to_string),
+            state_color: state_color.as_str().to_string(),
+            running_color: running_colors.first().map(|c| c.as_str().to_string()),
             running_container,
             image,
             fix: service_fix(service, &severity),
@@ -343,9 +347,7 @@ pub async fn run() -> Result<DiagnoseReport> {
 
     let mut routes: Vec<RouteIssue> = Vec::new();
     for r in &unified {
-        let color = state_colors
-            .get(&r.target)
-            .map_or("blue", std::string::String::as_str);
+        let color = state_colors.get(&r.target).copied().unwrap_or(Color::Blue);
         let host_port = route_host_port(&r.target, r.port, color);
         if listening.contains(&host_port) {
             continue;
@@ -426,27 +428,39 @@ mod tests {
 
     #[test]
     fn classify_ok_when_state_matches_running() {
-        assert_eq!(classify_service("blue", &["blue"]), Severity::Ok);
-        assert_eq!(classify_service("green", &["green"]), Severity::Ok);
+        assert_eq!(classify_service(Color::Blue, &[Color::Blue]), Severity::Ok);
+        assert_eq!(
+            classify_service(Color::Green, &[Color::Green]),
+            Severity::Ok
+        );
     }
 
     #[test]
     fn classify_mismatch_when_state_disagrees_with_running() {
-        assert_eq!(classify_service("green", &["blue"]), Severity::Mismatch);
-        assert_eq!(classify_service("blue", &["green"]), Severity::Mismatch);
+        assert_eq!(
+            classify_service(Color::Green, &[Color::Blue]),
+            Severity::Mismatch
+        );
+        assert_eq!(
+            classify_service(Color::Blue, &[Color::Green]),
+            Severity::Mismatch
+        );
     }
 
     #[test]
     fn classify_dead_when_nothing_running() {
-        assert_eq!(classify_service("blue", &[]), Severity::Dead);
-        assert_eq!(classify_service("green", &[]), Severity::Dead);
+        assert_eq!(classify_service(Color::Blue, &[]), Severity::Dead);
+        assert_eq!(classify_service(Color::Green, &[]), Severity::Dead);
     }
 
     #[test]
     fn classify_info_when_both_running() {
-        assert_eq!(classify_service("blue", &["blue", "green"]), Severity::Info);
         assert_eq!(
-            classify_service("green", &["blue", "green"]),
+            classify_service(Color::Blue, &[Color::Blue, Color::Green]),
+            Severity::Info
+        );
+        assert_eq!(
+            classify_service(Color::Green, &[Color::Blue, Color::Green]),
             Severity::Info
         );
     }
@@ -530,16 +544,16 @@ mod tests {
 
     #[test]
     fn route_host_port_for_host_target_is_passthrough() {
-        assert_eq!(route_host_port("host", 4040, "blue"), 4040);
-        assert_eq!(route_host_port("host", 4040, "green"), 4040);
+        assert_eq!(route_host_port("host", 4040, Color::Blue), 4040);
+        assert_eq!(route_host_port("host", 4040, Color::Green), 4040);
     }
 
     #[test]
     fn route_host_port_for_sandbox_applies_offset() {
-        assert_eq!(route_host_port("sandbox", 3000, "blue"), 13000);
-        assert_eq!(route_host_port("sandbox", 3000, "green"), 23000);
-        assert_eq!(route_host_port("sandbox", 22, "blue"), 10022);
-        assert_eq!(route_host_port("sandbox", 22, "green"), 20022);
+        assert_eq!(route_host_port("sandbox", 3000, Color::Blue), 13000);
+        assert_eq!(route_host_port("sandbox", 3000, Color::Green), 23000);
+        assert_eq!(route_host_port("sandbox", 22, Color::Blue), 10022);
+        assert_eq!(route_host_port("sandbox", 22, Color::Green), 20022);
     }
 
     #[test]

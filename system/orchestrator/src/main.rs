@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
             let def = service_def::ServiceDef::load(service)?;
             let docker = bollard::Docker::connect_with_socket_defaults()?;
             let active = state::read_active(service)?;
-            let inactive = config::flip(&active);
+            let inactive = config::flip(active);
             validate::check_deploy(&def, sha, inactive, &docker).await?;
             println!("[validate] Passed — safe to deploy {service} @ {sha}");
         }
@@ -318,7 +318,7 @@ async fn main() -> Result<()> {
             let inactive = deploy::run_start_inactive(service, sha).await?;
 
             // Compute host port for the inactive color and register the preview route.
-            let host_port = def.port_scheme.host_port(&inactive, preview_container_port);
+            let host_port = def.port_scheme.host_port(inactive, preview_container_port);
             let subdomain = db::preview_subdomain(service);
             let conn = db::open()?;
             db::init(&conn)?;
@@ -329,7 +329,7 @@ async fn main() -> Result<()> {
                     subdomain: subdomain.clone(),
                     host_port,
                     sha: sha.clone(),
-                    color: inactive.clone(),
+                    color: inactive.as_str().to_string(),
                     created_at: String::new(),
                 },
             )?;

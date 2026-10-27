@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::config;
+use crate::config::{self, Color};
 
 // ── YAML schema types ─────────────────────────────────────────────────────────
 
@@ -73,11 +73,10 @@ pub struct PortScheme {
 }
 
 impl PortScheme {
-    pub fn host_port(&self, color: &str, container_port: u16) -> u16 {
-        let offset = if color == "blue" {
-            self.blue_offset
-        } else {
-            self.green_offset
+    pub fn host_port(&self, color: Color, container_port: u16) -> u16 {
+        let offset = match color {
+            Color::Blue => self.blue_offset,
+            Color::Green => self.green_offset,
         };
         container_port + offset
     }
@@ -254,7 +253,7 @@ impl ServiceDef {
     ///
     /// - For named-port services (sandbox): one pair per `ports[]` entry.
     /// - For range services (apps): one pair per port in `container_start..=container_end`.
-    pub fn port_mappings(&self, color: &str) -> Vec<(u16, u16)> {
+    pub fn port_mappings(&self, color: Color) -> Vec<(u16, u16)> {
         self.port_binding_specs(color)
             .into_iter()
             .map(|s| (s.host, s.container))
@@ -263,7 +262,7 @@ impl ServiceDef {
 
     /// Like [`Self::port_mappings`], but carries the bind interface so the
     /// deployer can restrict which host address each published port listens on.
-    pub fn port_binding_specs(&self, color: &str) -> Vec<PortBindingSpec> {
+    pub fn port_binding_specs(&self, color: Color) -> Vec<PortBindingSpec> {
         let mut specs = Vec::new();
 
         // Named ports
@@ -297,7 +296,7 @@ impl ServiceDef {
     /// For `HealthCheck::Docker`, returns 0 (unused).
     /// Used in tests to verify port calculation logic.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn health_port(&self, color: &str) -> Result<u16> {
+    pub fn health_port(&self, color: Color) -> Result<u16> {
         match &self.health_check {
             HealthCheck::Tcp { port: name, .. } => {
                 let p = self
@@ -471,9 +470,9 @@ network: codery-net
     #[test]
     fn sandbox_port_formula_blue() {
         let def = sandbox_def();
-        assert_eq!(def.port_scheme.host_port("blue", 3000), 13000);
-        assert_eq!(def.port_scheme.host_port("blue", 7000), 17000);
-        assert_eq!(def.port_scheme.host_port("blue", 7681), 17681);
+        assert_eq!(def.port_scheme.host_port(Color::Blue, 3000), 13000);
+        assert_eq!(def.port_scheme.host_port(Color::Blue, 7000), 17000);
+        assert_eq!(def.port_scheme.host_port(Color::Blue, 7681), 17681);
     }
 
     #[test]
@@ -508,7 +507,7 @@ network: codery-net
         assert_eq!(def.ports[1].bind, PortBind::Any); // serde default
         assert_eq!(def.port_range.as_ref().unwrap().bind, PortBind::Tailnet);
 
-        let specs = def.port_binding_specs("blue");
+        let specs = def.port_binding_specs(Color::Blue);
         assert_eq!(specs.len(), 4);
         assert_eq!(
             specs[0],
@@ -582,15 +581,15 @@ network: codery-net
     #[test]
     fn sandbox_port_formula_green() {
         let def = sandbox_def();
-        assert_eq!(def.port_scheme.host_port("green", 3000), 23000);
-        assert_eq!(def.port_scheme.host_port("green", 7000), 27000);
-        assert_eq!(def.port_scheme.host_port("green", 7681), 27681);
+        assert_eq!(def.port_scheme.host_port(Color::Green, 3000), 23000);
+        assert_eq!(def.port_scheme.host_port(Color::Green, 7000), 27000);
+        assert_eq!(def.port_scheme.host_port(Color::Green, 7681), 27681);
     }
 
     #[test]
     fn sandbox_port_mappings_blue() {
         let def = sandbox_def();
-        let mappings = def.port_mappings("blue");
+        let mappings = def.port_mappings(Color::Blue);
         assert!(mappings.contains(&(13000, 3000)));
         assert!(mappings.contains(&(17000, 7000)));
         assert!(mappings.contains(&(17681, 7681)));
@@ -600,7 +599,7 @@ network: codery-net
     #[test]
     fn sandbox_port_mappings_green() {
         let def = sandbox_def();
-        let mappings = def.port_mappings("green");
+        let mappings = def.port_mappings(Color::Green);
         assert!(mappings.contains(&(23000, 3000)));
         assert!(mappings.contains(&(27000, 7000)));
         assert!(mappings.contains(&(27681, 7681)));
@@ -609,20 +608,20 @@ network: codery-net
     #[test]
     fn sandbox_health_port_blue() {
         let def = sandbox_def();
-        assert_eq!(def.health_port("blue").unwrap(), 13000);
+        assert_eq!(def.health_port(Color::Blue).unwrap(), 13000);
     }
 
     #[test]
     fn sandbox_health_port_green() {
         let def = sandbox_def();
-        assert_eq!(def.health_port("green").unwrap(), 23000);
+        assert_eq!(def.health_port(Color::Green).unwrap(), 23000);
     }
 
     // Matches the old hardcoded apps_ports() values
     #[test]
     fn apps_blue_port_range() {
         let def = apps_def();
-        let mappings = def.port_mappings("blue");
+        let mappings = def.port_mappings(Color::Blue);
         assert_eq!(mappings.len(), 1001);
         assert!(mappings.contains(&(8000, 8000)));
         assert!(mappings.contains(&(9000, 9000)));
@@ -631,7 +630,7 @@ network: codery-net
     #[test]
     fn apps_green_port_range() {
         let def = apps_def();
-        let mappings = def.port_mappings("green");
+        let mappings = def.port_mappings(Color::Green);
         assert_eq!(mappings.len(), 1001);
         assert!(mappings.contains(&(18000, 8000)));
         assert!(mappings.contains(&(19000, 9000)));
@@ -728,7 +727,7 @@ network: codery-net
             timeout_secs: 60,
             interval_secs: 2,
         };
-        assert!(def.health_port("blue").is_err());
+        assert!(def.health_port(Color::Blue).is_err());
     }
 
     #[test]

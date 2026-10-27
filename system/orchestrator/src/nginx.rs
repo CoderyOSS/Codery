@@ -73,7 +73,7 @@ async fn reload_in_active_container() -> Result<()> {
         println!("[nginx] No active apps state — skipping reload");
         return Ok(());
     };
-    let container = config::container_name("apps", &color);
+    let container = config::container_name("apps", color);
 
     let docker = Docker::connect_with_socket_defaults().context("failed to connect to Docker")?;
 

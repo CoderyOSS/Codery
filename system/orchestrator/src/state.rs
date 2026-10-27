@@ -2,30 +2,26 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::config;
+use crate::config::{self, Color};
 
-/// Read the active color for a service. Returns "blue" if state file missing or invalid.
-pub fn read_active(service: &str) -> Result<String> {
+/// Read the active color for a service. Returns [`Color::Blue`] if the state
+/// file is missing or holds an unrecognized value.
+pub fn read_active(service: &str) -> Result<Color> {
     let path = state_path(service);
     if !path.exists() {
-        return Ok("blue".to_string());
+        return Ok(Color::Blue);
     }
     let color = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read state file {}", path.display()))?
-        .trim()
-        .to_string();
-    if color != "blue" && color != "green" {
-        return Ok("blue".to_string());
-    }
-    Ok(color)
+        .with_context(|| format!("failed to read state file {}", path.display()))?;
+    Ok(Color::parse(color.trim()).unwrap_or(Color::Blue))
 }
 
 /// Write the active color for a service.
-pub fn write_active(service: &str, color: &str) -> Result<()> {
+pub fn write_active(service: &str, color: Color) -> Result<()> {
     let path = state_path(service);
     let parent = path.parent().expect("state path has a parent directory");
     fs::create_dir_all(parent).context("failed to create state directory")?;
-    fs::write(&path, format!("{color}\n"))
+    fs::write(&path, format!("{}\n", color.as_str()))
         .with_context(|| format!("failed to write state file {}", path.display()))?;
     Ok(())
 }

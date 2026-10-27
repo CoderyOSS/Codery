@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use bollard::volume::CreateVolumeOptions;
 use bollard::Docker;
 
+use crate::config::Color;
 use crate::service_def::{ServiceDef, VolumeMount};
 use crate::{config, images, state};
 
@@ -24,7 +25,7 @@ use crate::{config, images, state};
 pub async fn check_deploy(
     def: &ServiceDef,
     sha: &str,
-    inactive: &str,
+    inactive: Color,
     docker: &Docker,
 ) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
@@ -76,9 +77,9 @@ pub async fn check_deploy(
     // Ports belonging to the currently active color will be vacated when the
     // old container stops, so skip them. Only flag ports that are bound by
     // something else entirely.
-    let active = state::read_active(&def.service).unwrap_or_else(|_| "blue".to_string());
+    let active = state::read_active(&def.service).unwrap_or(Color::Blue);
     let active_ports: HashSet<u16> = def
-        .port_mappings(&active)
+        .port_mappings(active)
         .into_iter()
         .map(|(host, _)| host)
         .collect();
