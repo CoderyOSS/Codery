@@ -39,7 +39,7 @@ jobs:
           echo "=== Apps blue container logs (last 50 lines) ==="
           $SSH "docker logs codery-apps-blue --tail 50 2>&1 || echo '(no codery-apps-blue)'"
 
-          echo "=== Sandbox supervisord status (active container) ==="
+          echo "=== Apps s6 services (active container) ==="
           ACTIVE=$($SSH "cat /opt/codery/state/apps.color 2>/dev/null || echo blue")
           $SSH "docker exec codery-apps-${ACTIVE} /command/s6-svstat /run/service/* 2>&1 || echo '(container not running)'"
 
