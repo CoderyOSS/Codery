@@ -244,7 +244,9 @@ async fn server_addr(
     docker: &Docker,
     last_err: &mut Option<Instant>,
 ) -> Option<SocketAddr> {
-    let stale = cached.is_none_or(|r| r.at.elapsed() > Duration::from_secs(RESOLVE_TTL_SECS));
+    let stale = cached
+        .as_ref()
+        .is_none_or(|r| r.at.elapsed() > Duration::from_secs(RESOLVE_TTL_SECS));
     if stale {
         match resolve_server(target, docker).await {
             Ok(addr) => {
