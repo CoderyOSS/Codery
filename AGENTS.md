@@ -128,7 +128,7 @@ one evening) produced hard rules; see ARCHITECTURE.md for the measured budget.
 |---------|-------------|--------------|-------|
 | paseo   | 10000 | 20000 | daemon 6767 → `code.`; ssh 2023 → stable **:2222** |
 | opendesign | 10000 | 20000 | web 7456 → `opendesign.` |
-| apps    | 0 | 10000 | nginx 8080; range 8000-9000; ssh 2022 → stable **:3333** |
+| apps    | 0 | 10000 | nginx 8080; range 8000-9000; ssh 2022 → stable **:3333**; mosh UDP 61000 → stable **:61000** (daemon relay, no publish) |
 | playwright | 10000 | 20000 | ws 3000 (internal only) |
 
 **Stable SSH ports**: the daemon's TCP proxy forwards host **:2222 → active paseo** and
@@ -242,11 +242,18 @@ with a `source` column (`build` | `runtime`):
 |------|---------|-------|
 | Operator → paseo | `ssh -p 2222 paseo@<host>` | Tailscale only; keys in `/opt/codery/ssh/authorized_keys` |
 | Operator → apps | `ssh -p 3333 gem@<host>` | Tailscale only; same key file |
+| Operator → apps (mosh) | `mosh -p 61000 gem@<host>` — or Blink mosh host | Tailscale only; auto-heals across iPad sleep/roaming; tmux via client startup command (`tmux new -A -s main`) |
 | paseo → apps | `ssh gem@apps` | Docker-network internal; agent-to-apps keypair; nix toolchain lives there |
 
 Connection chain for stable ports: `client → :2222/:3333 (codery-ci TCP proxy) →
 :1xx22/:xx22 (docker publish) → :2022 (sshd)`. The proxy reads the active color and
 forwards to the live container.
+
+**Mosh (UDP):** `mosh-server` pins container UDP **61000** (`mosh-server new -p 61000`).
+The codery-ci daemon's UDP relay binds the host Tailscale IP `:61000/udp` and forwards
+datagrams to the active color container's IP on `codery-net` — no Docker publish, so
+the client-facing port never changes across blue/green deploys. Requires the mosh
+package (in the apps flake) and `SetEnv` UTF-8 locale in sshd_config (both baked in).
 
 Adding a device: `echo 'ssh-ed25519 AAAA...' >> /opt/codery/ssh/authorized_keys` —
 no rebuild. Host keys are persistent volumes (stable fingerprints).

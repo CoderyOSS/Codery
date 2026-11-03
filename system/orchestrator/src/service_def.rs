@@ -126,6 +126,23 @@ impl PortBind {
     }
 }
 
+/// Wire protocol for a named port. Defaults to TCP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PortProtocol {
+    /// Standard TCP port. Published as a Docker port binding when listed in
+    /// `ports[]` (and optionally routed by Caddy via `subdomain`).
+    #[default]
+    Tcp,
+    /// UDP port served by the codery-ci UDP relay (`udp_proxy`). A `udp`
+    /// entry with `fixed_port` is NOT published via Docker — the daemon binds
+    /// the fixed port on the host and forwards datagrams to the active color
+    /// container's IP on the container network. This gives mosh-style
+    /// protocols a stable client-facing port across blue/green deploys
+    /// without host-port collisions. Requires `fixed_port`.
+    Udp,
+}
+
 /// A named container port with optional public subdomain.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct NamedPort {
@@ -137,6 +154,10 @@ pub struct NamedPort {
     /// and forward connections to the color-specific host port for this entry.
     /// Use for raw TCP services (e.g. SSH) that Caddy cannot proxy.
     pub fixed_port: Option<u16>,
+    /// Wire protocol. Defaults to `tcp`. `udp` requires `fixed_port` (the
+    /// relay's client-facing port) and bypasses Docker publishing entirely.
+    #[serde(default)]
+    pub protocol: PortProtocol,
     /// Which interface the published host port (and any fixed-port proxy
     /// listener) binds to. Defaults to `any` when omitted.
     #[serde(default)]
@@ -262,11 +283,18 @@ impl ServiceDef {
 
     /// Like [`Self::port_mappings`], but carries the bind interface so the
     /// deployer can restrict which host address each published port listens on.
+    ///
+    /// UDP relay ports (`protocol: udp` with `fixed_port`) are excluded: they
+    /// are never published by Docker. The daemon's UDP relay forwards
+    /// datagrams to the active container's IP on the container network.
     pub fn port_binding_specs(&self, color: Color) -> Vec<PortBindingSpec> {
         let mut specs = Vec::new();
 
         // Named ports
         for p in &self.ports {
+            if p.protocol == PortProtocol::Udp && p.fixed_port.is_some() {
+                continue; // Relay-served; no Docker publish.
+            }
             let host = self.port_scheme.host_port(color, p.container_port);
             specs.push(PortBindingSpec {
                 host,

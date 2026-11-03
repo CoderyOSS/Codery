@@ -23,4 +23,9 @@ UsePAM no
 
 PrintMotd no
 #AcceptEnv LANG LC_*
+# mosh bootstrap runs mosh-server via non-login ssh exec, which gets NO
+# container ENV (no LANG/LOCALE_ARCHIVE) — mosh refuses to start without a
+# UTF-8 locale. Force one server-side. C.UTF-8 is built into modern glibc,
+# so LOCALE_ARCHIVE is not required for it.
+SetEnv LANG=C.UTF-8 LC_ALL=C.UTF-8
 Subsystem sftp /usr/lib/openssh/sftp-server

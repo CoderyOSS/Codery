@@ -7,7 +7,7 @@ use bollard::volume::CreateVolumeOptions;
 use bollard::Docker;
 
 use crate::config::Color;
-use crate::service_def::{ServiceDef, VolumeMount};
+use crate::service_def::{PortProtocol, ServiceDef, VolumeMount};
 use crate::{config, images, state};
 
 /// Run all pre-deploy validation checks against `def` before touching any container.
@@ -96,6 +96,27 @@ pub async fn check_deploy(
                     "host port {host_port} is already in use by a foreign process"
                 ));
             }
+        }
+    }
+
+    // ── 6. UDP relay config sanity ────────────────────────────────────────────
+    // UDP ports are relay-served (host fixed port → active container IP), not
+    // Docker-published, and Caddy routes TCP/HTTP only.
+    for p in &def.ports {
+        if p.protocol != PortProtocol::Udp {
+            continue;
+        }
+        if p.fixed_port.is_none() {
+            errors.push(format!(
+                "udp port '{}' must set fixed_port (the relay's client-facing port)",
+                p.name
+            ));
+        }
+        if p.subdomain.is_some() {
+            errors.push(format!(
+                "udp port '{}' cannot have a subdomain (Caddy routes TCP/HTTP only)",
+                p.name
+            ));
         }
     }
 
