@@ -237,16 +237,16 @@ COPY containers/apps/scripts/s6-load-locale-env.sh /usr/local/bin/s6-load-locale
 COPY containers/apps/scripts/runtime-apps-restore.sh /usr/local/bin/runtime-apps-restore
 RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.sh /usr/local/bin/s6-load-locale-env /usr/local/bin/runtime-apps-restore
 
-# GitHub host key for git operations.
-RUN ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
-
 # --- SSH server ---
 COPY containers/apps/sshd_config /etc/ssh/sshd_config
 RUN mkdir -p /run/sshd /etc/ssh/authorized_keys
 # authorized_keys is host-managed: service.yml bind-mounts
 # /opt/codery/ssh/authorized_keys -> /run/secrets/authorized_keys (append
-# a device pubkey on the host; no rebuild needed).
-RUN chmod 644 /etc/ssh/authorized_keys/gem
+# a device pubkey on the host; no rebuild needed). Nothing is baked into
+# the image itself.
+
+# GitHub host key for git operations (must run after /etc/ssh exists).
+RUN mkdir -p /etc/ssh && ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
 
 # --- Nginx ---
 COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
