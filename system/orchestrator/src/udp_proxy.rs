@@ -27,7 +27,7 @@ const LOG_INTERVAL_SECS: u64 = 5;
 
 /// One UDP relay target extracted from a service definition.
 ///
-/// Created for every `protocol: udp` NamedPort entry that has `fixed_port`.
+/// Created for every `protocol: udp` `NamedPort` entry that has `fixed_port`.
 /// The relay binds `fixed_port` on the host and forwards datagrams to the
 /// active color container's IP on the container network — no Docker publish,
 /// so blue/green swaps never cause host-port collisions, and the client-facing
@@ -214,23 +214,17 @@ async fn outbound_for(
 }
 
 /// Forward server replies back to one client. Runs until the server is silent
-/// for FORWARDER_IDLE_SECS (self-terminating; eviction drops the map entry).
+/// for `FORWARDER_IDLE_SECS` (self-terminating; eviction drops the map entry).
 async fn forward_replies(outbound: Arc<UdpSocket>, main: Arc<UdpSocket>, client: SocketAddr) {
     let mut buf = vec![0u8; BUF_SIZE];
-    loop {
-        match tokio::time::timeout(
-            Duration::from_secs(FORWARDER_IDLE_SECS),
-            outbound.recv_from(&mut buf),
-        )
-        .await
-        {
-            Ok(Ok((n, _src))) => {
-                if main.send_to(&buf[..n], client).await.is_err() {
-                    break;
-                }
-            }
-            // Idle timeout or socket error — end this forwarder.
-            Ok(Err(_)) | Err(_) => break,
+    while let Ok(Ok((n, _src))) = tokio::time::timeout(
+        Duration::from_secs(FORWARDER_IDLE_SECS),
+        outbound.recv_from(&mut buf),
+    )
+    .await
+    {
+        if main.send_to(&buf[..n], client).await.is_err() {
+            break;
         }
     }
 }
@@ -253,7 +247,7 @@ async fn server_addr(
                 *cached = Some(Resolved {
                     addr,
                     at: Instant::now(),
-                })
+                });
             }
             Err(e) => log_throttled(last_err, &format!("udp-proxy: resolve failed: {e:#}")),
         }
@@ -415,7 +409,7 @@ network: codery-net
         // deployer never creates a Docker binding for them.
         let def = def_with_udp_fixed("apps", 61000, 61000);
         let specs = def.port_binding_specs(crate::config::Color::Blue);
-        assert!(specs.is_empty());
+        assert_eq!(specs, [] as [crate::service_def::PortBindingSpec; 0]);
         // TCP ports keep publishing.
         let tcp_def = tcp_only_def("paseo");
         let specs = tcp_def.port_binding_specs(crate::config::Color::Blue);
