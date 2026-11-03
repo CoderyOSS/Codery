@@ -296,6 +296,11 @@ pub fn build_route_map(conn: &Connection) -> Result<Vec<UnifiedRoute>> {
     let defs = crate::service_def::ServiceDef::load_all()?;
     for def in &defs {
         for port in &def.ports {
+            // UDP ports are relay-served, never Docker-published — Caddy
+            // would render a route to a host port that doesn't exist.
+            if port.protocol == crate::service_def::PortProtocol::Udp {
+                continue;
+            }
             if let Some(subdomain) = &port.subdomain {
                 map.entry(subdomain.clone()).or_insert(UnifiedRoute {
                     subdomain: subdomain.clone(),

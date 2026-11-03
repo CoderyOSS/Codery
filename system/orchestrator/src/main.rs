@@ -17,6 +17,7 @@ mod s6;
 mod service_def;
 mod state;
 mod tcp_proxy;
+mod udp_proxy;
 mod ui;
 mod validate;
 

@@ -1,15 +1,15 @@
-use crate::{config, mcp, tcp_proxy, ui};
+use crate::{config, mcp, tcp_proxy, udp_proxy, ui};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-/// Run MCP, UI, and TCP-proxy servers concurrently in a single process.
-/// Exits if any server errors or if SIGTERM/SIGINT is received.
+/// Run MCP, UI, TCP-proxy, and UDP-relay servers concurrently in a single
+/// process. Exits if any server errors or if SIGTERM/SIGINT is received.
 pub async fn serve() -> Result<()> {
     crate::open_port_for_docker_bridges(config::MCP_PORT);
 
     println!(
-        "[daemon] Starting codery-ci daemon: MCP=:{} UI=:{} TCP-proxy",
+        "[daemon] Starting codery-ci daemon: MCP=:{} UI=:{} TCP-proxy UDP-relay",
         config::MCP_PORT,
         config::UI_PORT
     );
@@ -24,6 +24,7 @@ pub async fn serve() -> Result<()> {
         r = mcp::serve(config::MCP_PORT)                                        => r?,
         r = ui::serve(config::UI_PORT, Arc::clone(&events_tx), Arc::clone(&ops)) => r?,
         r = tcp_proxy::serve()                                                  => r?,
+        r = udp_proxy::serve()                                                  => r?,
         () = shutdown_signal()                                                   => {
             println!("[daemon] Received shutdown signal — stopping");
         }

@@ -206,11 +206,16 @@ USER root
 
 # --- Backwards-compat symlinks ---
 # Ensure nix-installed binaries are at expected paths.
+# mosh-server/mosh-client: sshd runs the remote command (mosh bootstrap) with
+# its compiled-in PATH — no nix profile bin — so mosh must be reachable from
+# FHS locations, same reason sshd/nginx are symlinked here.
 RUN mkdir -p /usr/sbin /usr/bin /usr/local/bin /usr/local/sbin \
               /usr/lib/openssh /var/log/nginx /etc/nginx && \
     ln -sf "$(which sshd)"     /usr/sbin/sshd    && \
     ln -sf "$(which nginx)"    /usr/sbin/nginx   && \
     ln -sf "$(which ssh-agent)" /usr/bin/ssh-agent && \
+    ln -sf "$(which mosh-server)" /usr/local/bin/mosh-server && \
+    ln -sf "$(which mosh-client)" /usr/local/bin/mosh-client && \
     ln -sf "$(which nvim)"     /usr/local/bin/vim && \
     SSHD_PREFIX="$(dirname "$(dirname "$(readlink -f "$(which sshd)")")")" && \
     NGINX_PREFIX="$(dirname "$(dirname "$(readlink -f "$(which nginx)")")")" && \

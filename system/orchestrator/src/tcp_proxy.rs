@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::Color;
-use crate::service_def::{PortBind, PortScheme, ServiceDef};
+use crate::service_def::{PortBind, PortProtocol, PortScheme, ServiceDef};
 use crate::state;
 
 /// One proxy target extracted from a service definition.
@@ -17,11 +17,15 @@ pub struct ProxyTarget {
 }
 
 /// Extract all proxy targets from a slice of service definitions.
-/// A target exists for every `NamedPort` entry that has `fixed_port` set.
+/// A target exists for every TCP `NamedPort` entry that has `fixed_port` set.
+/// UDP fixed ports are served by the UDP relay (`udp_proxy`) instead.
 pub fn collect_proxy_targets(defs: &[ServiceDef]) -> Vec<ProxyTarget> {
     let mut targets = Vec::new();
     for def in defs {
         for port in &def.ports {
+            if port.protocol == PortProtocol::Udp {
+                continue;
+            }
             if let Some(fixed_port) = port.fixed_port {
                 targets.push(ProxyTarget {
                     service: def.service.clone(),

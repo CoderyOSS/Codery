@@ -12,6 +12,16 @@ ports:
     # Tailnet-only: published port and the fixed-port proxy listener bind the
     # host Tailscale IP.
     bind: tailnet
+  - name: mosh
+    container_port: 61000
+    fixed_port: 61000
+    # UDP relay: the codery-ci daemon binds tailnet :61000/udp and forwards
+    # datagrams to the active color container's IP. Never Docker-published —
+    # the client-facing port survives blue/green swaps. mosh-server pins this
+    # port inside the container (Blink mosh-server command: `mosh-server new
+    # -p 61000`).
+    protocol: udp
+    bind: tailnet
 
 port_range:
   container_start: 8000
