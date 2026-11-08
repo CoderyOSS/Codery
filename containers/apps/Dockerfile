@@ -244,7 +244,8 @@ RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.s
 
 # --- Persistent tools profile on PATH (login shells + tmux) ---
 # /nix/var/nix/profiles/tools/bin = runtime-installed dev tools (tooladd).
-RUN printf '#! /bin/sh\nexport PATH="/nix/var/nix/profiles/tools/bin:$PATH"\n' > /etc/profile.d/zz-tools.sh \
+RUN mkdir -p /etc/profile.d \
+    && printf '#! /bin/sh\nexport PATH="/nix/var/nix/profiles/tools/bin:$PATH"\n' > /etc/profile.d/zz-tools.sh \
     && chmod +x /etc/profile.d/zz-tools.sh
 
 # --- SSH server ---
