@@ -104,6 +104,25 @@ repo under `proxy/`.
 
 ---
 
+## Runtime-ops contract (2026-11 migration) — READ BEFORE ADDING SERVICES
+
+**Where things run — ownership rule.** Before creating any new service,
+container, or route, apply this test: **is it declared under `containers/` in
+the Codery repo? No → it belongs to a personal project → NEVER commit it to
+the Codery repo.**
+
+| What | Where declared | Managed by | Routes |
+|---|---|---|---|
+| Codery infra (paseo, apps, opendesign, playwright, dockhand) | `containers/<name>/` in Codery repo | codery-ci / runbook | Codery repo routes (infra only) |
+| Project backing services (databases, caches…) | `<project>/docker-compose.yml` | Dockhand stack via `dockhand.*` MCP | project-owned |
+| Project web UIs on a tailnet subdomain | runtime app via `add_app` MCP (qdrant/graph/bolt-proxy pattern) | `add_app`/`restart_app` | SQLite — never committed to the Codery repo |
+| Dev CLI tools | `containers/apps/tools-manifest.txt` | `tooladd` (via `ssh gem@apps tooladd <pkg>`) | n/a |
+
+Design authority: [docs/superpowers/specs/2026-11-07-codery-runtime-ops-design.md](docs/superpowers/specs/2026-11-07-codery-runtime-ops-design.md).
+Machine-execution runbook: [docs/runbook/openminis-migration.md](docs/runbook/openminis-migration.md).
+
+---
+
 ## Host Memory & OOM Prevention
 
 The host has 8 GiB RAM and (unless swap was added) **no swap**. The Sep 16 2026

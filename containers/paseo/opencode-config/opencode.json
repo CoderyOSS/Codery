@@ -15,6 +15,10 @@
       "type": "local",
       "command": ["bun", "/usr/local/bin/github-app-permissions-mcp.ts"]
     },
+    "dockhand": {
+      "type": "local",
+      "command": ["bun", "/home/paseo/.config/opencode/mcp/dockhand-stack-mcp.ts"]
+    },
     "playwright": {
       "type": "local",
       "command": [
@@ -53,6 +57,11 @@
       "head ~/.ssh/*": "deny",
       "tail /run/secrets/*": "deny",
       "tail ~/.ssh/*": "deny"
+    },
+    "edit": {
+      "*": "allow",
+      "**/Codery/proxy/routes.yaml": "ask",
+      "**/Codery/containers/*/service.yml": "ask"
     }
   },
   "compaction": {

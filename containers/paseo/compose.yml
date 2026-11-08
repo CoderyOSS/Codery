@@ -1,0 +1,63 @@
+# paseo — Dockhand stack definition (STAGED; deployed during migration W5
+# phase 1 by OpenMinis — see docs/runbook/openminis-migration.md).
+#
+# Source of truth for the DEFINITION remains containers/paseo/service.yml in
+# the Codery repo until paseo's blue/green exit (W5 phase 1) retires it.
+# This compose is the deploy-time copy that Dockhand will manage.
+#
+# Fixed publishes replace the color scheme:
+#   daemon 127.0.0.1:6767  (Caddy `code.` route -> localhost:6767 via routes.yaml)
+#   ssh    ${TAILNET_IP}:2222 -> 2023 (direct tailnet publish; TCP proxy retired)
+# The old blue/green publishes (16767/26767, 12222/22223-proxy) disappear.
+#
+# env parity: env_file points at the host's canonical /opt/codery/.env — the
+# same env today's container gets via env_overrides, no key duplication.
+#
+# Stack env additions (stack-side .env.dockhand or shell env at deploy):
+#   PASEO_IMAGE   e.g. ghcr.io/coderyoss/codery:paseo-<last-good-sha>
+#   TAILNET_IP    the host's tailscale IP (see /run/tailscale.ip)
+name: paseo
+container_name: paseo
+
+services:
+  paseo:
+    image: ${PASEO_IMAGE:?set PASEO_IMAGE}
+    container_name: paseo
+    restart: unless-stopped
+    user: "0:0"                     # image default; keep parity with codery-ci runs
+    ports:
+      - "127.0.0.1:6767:6767"
+      - "${TAILNET_IP:?set TAILNET_IP}:2222:2023"
+    env_file:
+      - /opt/codery/.env
+    environment:
+      PASEO_HOSTNAMES: "code.rancidgrandmas.online,paseo-preview.rancidgrandmas.online"
+      PASEO_RELAY_ENABLED: "false"
+      PASEO_WEB_UI_ENABLED: "false"
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+      PLAYWRIGHT_WS_ENDPOINT: ws://playwright:3000/
+    volumes:
+      - codery-paseo-home:/home/paseo
+      - /opt/codery/projects:/workspace
+      - /opt/codery/data/opencode:/home/paseo/.local/share/opencode
+      - /opt/codery/projects/Codery/containers/paseo/opencode-config:/home/paseo/.config/opencode
+      - /opt/codery/github-app.pem:/run/secrets/github-app.pem:ro
+      - /opt/codery/ssh/authorized_keys:/run/secrets/authorized_keys:ro
+      - codery-paseo-ssh-host-keys:/etc/ssh/host_keys
+      - /opt/codery/ssh/agent-to-apps:/home/paseo/.ssh/agent-to-apps:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      codery-net:
+        aliases:
+          - paseo
+
+volumes:
+  codery-paseo-home:
+    external: true
+  codery-paseo-ssh-host-keys:
+    external: true
+
+networks:
+  codery-net:
+    external: true

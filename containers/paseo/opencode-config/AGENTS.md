@@ -96,6 +96,57 @@ recreates the route.
 
 ---
 
+## Runtime-ops contract (2026-11 migration) — READ BEFORE ADDING SERVICES
+
+**Where things run — ownership rule.** Before creating any new service,
+container, or route, apply this test: **is it declared under `containers/` in
+the Codery repo? No → it belongs to a personal project → NEVER commit it to
+the Codery repo.**
+
+| What | Where declared | Managed by | Routes |
+|---|---|---|---|
+| Codery infra (paseo, apps, opendesign, playwright, dockhand) | `containers/<name>/` in Codery repo | codery-ci / runbook | Codery repo routes (infra only) |
+| Project backing services (databases, caches…) | `<project>/docker-compose.yml` | Dockhand stack via `dockhand.*` MCP | project-owned |
+| Project web UIs on a tailnet subdomain | runtime app via `add_app` MCP (qdrant/graph/bolt-proxy pattern) | `add_app`/`restart_app` | SQLite — never committed to the Codery repo |
+| Dev CLI tools | `containers/apps/tools-manifest.txt` | `tooladd` (via `ssh gem@apps tooladd <pkg>`) | n/a |
+
+**Writing to Codery infra files** (`proxy/routes.yaml`,
+`containers/*/service.yml`) requires explicit user approval per edit — the
+permission config asks. Do not try to bypass it.
+
+### Dockhand stack MCP
+
+`dockhand.*` tools (thin wrapper over the Dockhand API — compose stacks for
+projects; no terminal/exec; lifecycle beyond stack restart is Dockhand UI
+territory):
+
+| Tool | What it does |
+|---|---|
+| `dockhand_list_stacks` | All compose stacks + states |
+| `dockhand_stack_ps` | Containers of one stack |
+| `dockhand_stack_logs` | Recent logs of a stack container |
+| `dockhand_stack_sync` | Redeploy a stack from its compose file after you edit it |
+| `dockhand_stack_restart` | Restart a stack |
+| `dockhand_stack_health` | Aggregate stack/container health |
+
+If every call returns a token remediation message, `DOCKHAND_API_TOKEN` has
+not been wired into this container yet (migration phase 0 — see
+`docs/runbook/openminis-migration.md`). Tell the user; do not improvise
+docker access.
+
+**Upgrade/switch policy:** never restart, sync, or switch a stack while
+agent sessions are active, and NEVER recreate the paseo container you are
+running in — paseo env changes are applied by the operator (OpenMinis/Rob),
+never by the working agent.
+
+### Dev tools
+
+Install CLI tools at runtime — no image rebuild:
+`ssh gem@apps tooladd <nixpkgs-pkg>` (persists across redeploys; manifest
+auto-updated in `containers/apps/tools-manifest.txt`).
+
+---
+
 ## GitHub
 
 Authenticated via GitHub App with write access to configured repositories.

@@ -1,0 +1,74 @@
+service: dockhand
+image: fnsys/dockhand:latest
+
+# Runtime container operator (2026-11 runtime-ops migration). Pull-only
+# image; manages the local Docker host through the mounted socket. Blue/green
+# is irrelevant here (the container is replaced, not color-swapped) but the
+# schema requires a port_scheme — paseo-style offsets keep us clear of the
+# apps 8000-9000 and playwright 40000/50000 ranges:
+#   blue:  3000+10000=13000
+#   green: 3000+20000=23000
+port_scheme:
+  blue_offset: 10000
+  green_offset: 20000
+
+ports:
+  - name: web
+    container_port: 3000
+    subdomain: dockhand
+    # Loopback publish + Caddy edge; basic auth applied at the proxy from
+    # DOCKHAND_BASIC_AUTH ("<user> <bcrypt-hash>" in /opt/codery/.env —
+    # `caddy hash-password`). Dockhand's own auth MUST be enabled too
+    # (runbook security gate). Caddy binds the tailnet IP, so the UI/API is
+    # reachable from Rob's devices (OpenMinis) and nothing else.
+    bind: loopback
+    auth:
+      env: DOCKHAND_BASIC_AUTH
+
+health_check:
+  type: tcp
+  port: web
+  timeout_secs: 60
+  interval_secs: 2
+
+# The socket grants root-equivalent control of the Docker host. The schema
+# has no group_add, so the container runs as root (manual's Option 2).
+# Mitigations: loopback-only publish + tailnet-only Caddy route + basic auth
+# + Dockhand auth + pinned image + activity-log audit. Socket-proxy
+# hardening is a documented phase-5 option (spec §4).
+user: "0:0"
+
+volumes:
+  # Docker control socket — the entire point of this container.
+  - type: bind
+    host: /var/run/docker.sock
+    container: /var/run/docker.sock
+  # Dockhand state (SQLite, encryption key, git clones if ever used).
+  - type: named
+    name: codery-dockhand-data
+    container: /app/data
+  # Matching-path projects mount: relative bind mounts in project compose
+  # files (REMI's ./backend etc.) resolve because container paths equal host
+  # paths. REMI's stack is adopted from here in place — no file moves.
+  - type: bind
+    host: /opt/codery/projects
+    container: /opt/codery/projects
+  # Core-service stacks (paseo/apps/… compose.yml copies live here).
+  # Matching path per the Dockhand manual's STACKS_DIR guidance.
+  - type: bind
+    host: /opt/codery/stacks
+    container: /opt/codery/stacks
+
+env_overrides:
+  STACKS_DIR: /opt/codery/stacks
+  ORIGIN: https://dockhand.${DOMAIN_NAME}
+  # Git stack pulls happen on the host filesystem via matching paths; no
+  # git credentials are stored in Dockhand (filesystem-first design).
+
+required_env:
+  - DOCKHAND_BASIC_AUTH
+  - DOMAIN_NAME
+
+network: codery-net
+network_aliases:
+  - dockhand
