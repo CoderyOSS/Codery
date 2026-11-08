@@ -10,6 +10,18 @@
 # --- Runtime ---
 FROM nixos/nix:latest
 
+# s6-overlay vendored from the last-built apps image instead of downloaded:
+# GitHub's release CDN 504'd build-terminating for the fra edge (observed
+# 2026-11-08, twice, retries exhausted). These four paths are exactly what
+# the v3.2.3.2 noarch+x86_64 tarballs extract (tar -C /), which the previous
+# image ran. On a fresh machine with no prior apps image, re-enable the
+# curl-based fetch of v3.2.3.2 instead.
+FROM ghcr.io/coderyoss/codery:apps-mosh-udp-relay AS s6-overlay-src
+COPY --from=s6-overlay-src /init /init
+COPY --from=s6-overlay-src /command /command
+COPY --from=s6-overlay-src /package /package
+COPY --from=s6-overlay-src /etc/s6-overlay /etc/s6-overlay
+
 # --- Nix config: flakes on ---
 RUN echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf && \
     echo "max-jobs = auto"                              >> /etc/nix/nix.conf && \
@@ -264,16 +276,16 @@ COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /etc/nginx/conf.d
 
 # --- s6-overlay (process supervision) ---
-# Fetched via retrying curl, not ADD: GitHub release CDN 504s are routine
-# and ADD's single-shot fetch fails the whole build (observed 2026-11-08).
-ARG S6_OVERLAY_VERSION=3.2.3.2
-RUN for f in noarch x86_64; do \
-      curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
-        -o /tmp/s6-overlay-$f.tar.xz \
-        "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-$f.tar.xz" \
-      && tar -C / -Jxf /tmp/s6-overlay-$f.tar.xz \
-      && rm /tmp/s6-overlay-$f.tar.xz; \
-    done
+# Vendored via the s6-overlay-src stage above (GitHub release CDN outage).
+# The fallback when no prior apps image exists locally:
+#   ARG S6_OVERLAY_VERSION=3.2.3.2
+#   RUN for f in noarch x86_64; do \
+#         curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+#           -o /tmp/s6-overlay-$f.tar.xz \
+#           "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-$f.tar.xz" \
+#         && tar -C / -Jxf /tmp/s6-overlay-$f.tar.xz \
+#         && rm /tmp/s6-overlay-$f.tar.xz; \
+#       done
 
 # --- s6-rc service definitions ---
 COPY containers/apps/s6-overlay/ /etc/s6-overlay/
