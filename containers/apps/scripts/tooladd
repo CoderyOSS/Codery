@@ -15,7 +15,11 @@
 set -euo pipefail
 
 PROFILE=/nix/var/nix/profiles/tools
-REPO=/opt/codery/projects/Codery
+# Repo path differs per container: apps mounts the projects tree at
+# /home/gem/projects; paseo at /workspace (same host dir underneath).
+REPO=/home/gem/projects/Codery
+[ -d "$REPO" ] || REPO=/workspace/Codery
+[ -d "$REPO" ] || REPO=/opt/codery/projects/Codery
 MANIFEST="$REPO/containers/apps/tools-manifest.txt"
 NIX="nix --extra-experimental-features nix-command flakes"
 
