@@ -16,11 +16,11 @@ FROM nixos/nix:latest
 # the v3.2.3.2 noarch+x86_64 tarballs extract (tar -C /), which the previous
 # image ran. On a fresh machine with no prior apps image, re-enable the
 # curl-based fetch of v3.2.3.2 instead.
-FROM ghcr.io/coderyoss/codery:apps-mosh-udp-relay AS s6-overlay-src
-COPY --from=s6-overlay-src /init /init
-COPY --from=s6-overlay-src /command /command
-COPY --from=s6-overlay-src /package /package
-COPY --from=s6-overlay-src /etc/s6-overlay /etc/s6-overlay
+FROM ghcr.io/coderyoss/codery:apps-mosh-udp-relay AS s6-vendored
+COPY --from=s6-vendored /init /init
+COPY --from=s6-vendored /command /command
+COPY --from=s6-vendored /package /package
+COPY --from=s6-vendored /etc/s6-overlay /etc/s6-overlay
 
 # --- Nix config: flakes on ---
 RUN echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf && \
@@ -276,7 +276,7 @@ COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /etc/nginx/conf.d
 
 # --- s6-overlay (process supervision) ---
-# Vendored via the s6-overlay-src stage above (GitHub release CDN outage).
+# Vendored via the s6-vendored stage above (GitHub release CDN outage).
 # The fallback when no prior apps image exists locally:
 #   ARG S6_OVERLAY_VERSION=3.2.3.2
 #   RUN for f in noarch x86_64; do \
