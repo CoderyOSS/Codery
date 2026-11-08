@@ -227,6 +227,11 @@ RUN mkdir -p /usr/sbin /usr/bin /usr/local/bin /usr/local/sbin \
 # --- Helper scripts ---
 COPY containers/apps/scripts/github-app-token.sh /usr/local/bin/github-app-token
 COPY containers/apps/scripts/ssh-agent-add-keys.sh /usr/local/bin/ssh-agent-add-keys.sh
+# tooladd: runtime dev-tool installs into the persistent "tools" nix profile
+# (/nix is a named volume — see service.yml). Manifest auto-commit; agents
+# use `ssh gem@apps tooladd <pkg>`. tools-replay: boot oneshot manifest replay.
+COPY containers/apps/scripts/tooladd /usr/local/bin/tooladd
+COPY containers/apps/scripts/tools-replay.sh /usr/local/bin/tools-replay
 # Locale loader sourced by every s6-rc run script (s6-rc doesn't pass container
 # ENV to longruns). Pulls LANG/LC_ALL/ELIXIR_ERL_OPTIONS/LOCALE_ARCHIVE from
 # /run/s6/container_environment so beam.smp gets +fnu and Elixir stops warning.
@@ -235,7 +240,12 @@ COPY containers/apps/scripts/s6-load-locale-env.sh /usr/local/bin/s6-load-locale
 # (/etc/s6-overlay/apps.d, rendered from SQLite by codery-ci) into /run/service
 # at every boot — restores runtime apps after restarts and blue/green redeploys.
 COPY containers/apps/scripts/runtime-apps-restore.sh /usr/local/bin/runtime-apps-restore
-RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.sh /usr/local/bin/s6-load-locale-env /usr/local/bin/runtime-apps-restore
+RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.sh /usr/local/bin/tooladd /usr/local/bin/tools-replay /usr/local/bin/s6-load-locale-env /usr/local/bin/runtime-apps-restore
+
+# --- Persistent tools profile on PATH (login shells + tmux) ---
+# /nix/var/nix/profiles/tools/bin = runtime-installed dev tools (tooladd).
+RUN printf '#! /bin/sh\nexport PATH="/nix/var/nix/profiles/tools/bin:$PATH"\n' > /etc/profile.d/zz-tools.sh \
+    && chmod +x /etc/profile.d/zz-tools.sh
 
 # --- SSH server ---
 COPY containers/apps/sshd_config /etc/ssh/sshd_config

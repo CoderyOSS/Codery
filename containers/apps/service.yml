@@ -37,6 +37,14 @@ health_check:
   timeout_secs: 90
 
 volumes:
+  # Persistent nix store + profiles (2026-11 runtime-ops migration). Docker
+  # auto-seeds an empty named volume from the image's /nix on first boot;
+  # runtime `tooladd` installs then survive blue/green swaps and image
+  # rebuilds. Deploy-time sync of new image store paths:
+  # proxy/scripts/nix-store-sync.sh (runbook step before apps deploys).
+  - type: named
+    name: codery-apps-nix
+    container: /nix
   - type: bind
     host: "${SSH_DIR}"
     container: /home/gem/.ssh

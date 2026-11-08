@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# tooladd — install a nixpkgs package into the persistent "tools" profile.
+#
+# Usage: tooladd <nixpkgs-attr>   e.g.  tooladd cloc
+#
+# - Installs into /nix/var/nix/profiles/tools (root profile; sudo is
+#   NOPASSWD for gem in this image). Survives blue/green swaps and image
+#   rebuilds because /nix is a named volume (auto-seeded from the image).
+# - Regenerates containers/apps/tools-manifest.txt from the live profile
+#   (manifest = record; the profile = truth) and commits it.
+# - Agents: ssh gem@apps tooladd <pkg>. Interactive: same command.
+#
+# Reproducibility: a new machine replays the manifest at boot
+# (s6 tools-replay oneshot) or manually: see docs/runbook/openminis-migration.md.
+set -euo pipefail
+
+PROFILE=/nix/var/nix/profiles/tools
+REPO=/opt/codery/projects/Codery
+MANIFEST="$REPO/containers/apps/tools-manifest.txt"
+NIX="nix --extra-experimental-features nix-command flakes"
+
+[[ $# -eq 1 ]] || { echo "usage: tooladd <nixpkgs-attr>" >&2; exit 2; }
+PKG="$1"
+[[ "$PKG" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "refusing odd attr: $PKG" >&2; exit 2; }
+
+mkdir -p "$PROFILE" "$(dirname "$MANIFEST")"
+
+# Already present?
+have="$($NIX profile list --profile "$PROFILE" --json 2>/dev/null \
+        | jq -r '.elements[]?.attrPath // empty' | sort -u || true)"
+if grep -Fxq "$PKG" <<<"$have"; then
+  echo "tooladd: '$PKG' already in the tools profile — nothing to do"
+  exit 0
+fi
+
+echo "tooladd: installing nixpkgs#$PKG (cache.nixos.org substitute — no image rebuild)..."
+$NIX profile install --profile "$PROFILE" "nixpkgs#$PKG"
+
+# Manifest = live profile attrPaths, sorted.
+have="$($NIX profile list --profile "$PROFILE" --json | jq -r '.elements[]?.attrPath // empty' | sort -u)"
+printf '%s\n' "$have" > "$MANIFEST.tmp"
+mv "$MANIFEST.tmp" "$MANIFEST"
+
+cd "$REPO"
+git add containers/apps/tools-manifest.txt
+if git diff --cached --quiet; then
+  echo "tooladd: manifest unchanged"
+else
+  git commit -m "tools: add $PKG"
+  if command -v github-push >/dev/null 2>&1; then
+    github-push containers/apps/tools-manifest.txt 2>/dev/null || github-push || \
+      echo "tooladd: manifest committed but PUSH FAILED — run github-push later" >&2
+  else
+    echo "tooladd: manifest committed locally — push when credentials allow (github-push)" >&2
+  fi
+fi
+
+echo "tooladd: '$PKG' installed and persisted (survives redeploys; replayed on new machines from the manifest)"
