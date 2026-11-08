@@ -263,11 +263,16 @@ COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /etc/nginx/conf.d
 
 # --- s6-overlay (process supervision) ---
+# Fetched via retrying curl, not ADD: GitHub release CDN 504s are routine
+# and ADD's single-shot fetch fails the whole build (observed 2026-11-08).
 ARG S6_OVERLAY_VERSION=3.2.3.2
-ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp
-RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz
-ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz /tmp
-RUN tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz
+RUN for f in noarch x86_64; do \
+      curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+        -o /tmp/s6-overlay-$f.tar.xz \
+        "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-$f.tar.xz" \
+      && tar -C / -Jxf /tmp/s6-overlay-$f.tar.xz \
+      && rm /tmp/s6-overlay-$f.tar.xz; \
+    done
 
 # --- s6-rc service definitions ---
 COPY containers/apps/s6-overlay/ /etc/s6-overlay/
