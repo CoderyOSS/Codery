@@ -26,10 +26,13 @@ ports:
       env: DOCKHAND_BASIC_AUTH
 
 health_check:
-  type: tcp
-  port: web
-  timeout_secs: 60
-  interval_secs: 2
+  # The fnsys/dockhand image carries its own HEALTHCHECK (curl against its
+  # /api). The image is Wolfi-based — NO bash — so codery-ci's TCP probe
+  # (bash /dev/tcp exec) cannot run inside it; type: docker is the correct
+  # check here. (StartPeriod 5s + retries 3 + interval 30s => healthy well
+  # inside 120s.)
+  type: docker
+  timeout_secs: 120
 
 # The socket grants root-equivalent control of the Docker host. The schema
 # has no group_add, so the container runs as root (manual's Option 2).
