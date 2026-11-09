@@ -16,14 +16,14 @@ ports:
   - name: web
     container_port: 3000
     subdomain: dockhand
-    # Loopback publish + Caddy edge; basic auth applied at the proxy from
-    # DOCKHAND_BASIC_AUTH ("<user> <bcrypt-hash>" in /opt/codery/.env —
-    # `caddy hash-password`). Dockhand's own auth MUST be enabled too
-    # (runbook security gate). Caddy binds the tailnet IP, so the UI/API is
-    # reachable from Rob's devices (OpenMinis) and nothing else.
+    # Loopback publish + Caddy edge (tailnet-only bind). NO Caddy basic-auth:
+    # the native iOS client (dockhand_ios) talks to the API with its own
+    # `Authorization: Bearer dh_...` and cannot answer an edge basic-auth
+    # challenge (it forbids overriding Authorization). The gate is Dockhand's
+    # own auth — admin login required, Argon2id-hashed API tokens, login
+    # rate-limiting, activity audit — behind the tailnet perimeter. Reversal:
+    # re-add an `auth:` block here + reload-routes.
     bind: loopback
-    auth:
-      env: DOCKHAND_BASIC_AUTH
 
 health_check:
   # The fnsys/dockhand image carries its own HEALTHCHECK (curl against its
@@ -69,7 +69,6 @@ env_overrides:
   # git credentials are stored in Dockhand (filesystem-first design).
 
 required_env:
-  - DOCKHAND_BASIC_AUTH
   - DOMAIN_NAME
 
 network: codery-net
