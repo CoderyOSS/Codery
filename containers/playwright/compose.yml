@@ -9,7 +9,6 @@
 # VERSION COUPLING (upgrade together, one commit — see containers/playwright/service.yml):
 #   opencode.json @playwright/mcp@0.0.30 + zod pins <-> npx playwright@1.54.1 <-> this image tag.
 name: playwright
-container_name: playwright
 
 services:
   playwright:
@@ -25,3 +24,7 @@ services:
       codery-net:
         aliases:
           - playwright
+
+networks:
+  codery-net:
+    external: true
