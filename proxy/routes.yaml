@@ -6,6 +6,9 @@
 # target: "apps" → apply apps port_scheme offset + Nginx internal routing
 
 routes:
+  - subdomain: code
+    port: 6767
+    target: host
   - subdomain: mcp
     port: 4040
     target: host

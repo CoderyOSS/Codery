@@ -17,7 +17,6 @@
 #   PASEO_IMAGE   e.g. ghcr.io/coderyoss/codery:paseo-<last-good-sha>
 #   TAILNET_IP    the host's tailscale IP (see /run/tailscale.ip)
 name: paseo
-container_name: paseo
 
 services:
   paseo:
