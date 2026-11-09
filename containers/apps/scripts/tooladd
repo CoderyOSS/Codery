@@ -21,7 +21,7 @@ REPO=/home/gem/projects/Codery
 [ -d "$REPO" ] || REPO=/workspace/Codery
 [ -d "$REPO" ] || REPO=/opt/codery/projects/Codery
 MANIFEST="$REPO/containers/apps/tools-manifest.txt"
-NIX="nix --extra-experimental-features nix-command flakes"
+NIX="nix"
 
 [[ $# -eq 1 ]] || { echo "usage: tooladd <nixpkgs-attr>" >&2; exit 2; }
 PKG="$1"
@@ -38,7 +38,9 @@ if grep -Fxq "$PKG" <<<"$have"; then
 fi
 
 echo "tooladd: installing nixpkgs#$PKG (cache.nixos.org substitute — no image rebuild)..."
-$NIX profile install --profile "$PROFILE" "nixpkgs#$PKG"
+# Single-user nix: /nix/store writes are root-only. sudo is NOPASSWD for gem;
+# the explicit --profile keeps the shared "tools" profile regardless of who runs.
+sudo $NIX profile install --profile "$PROFILE" "nixpkgs#$PKG"
 
 # Manifest = live profile attrPaths, sorted.
 have="$($NIX profile list --profile "$PROFILE" --json | jq -r '.elements[]?.attrPath // empty' | sort -u)"

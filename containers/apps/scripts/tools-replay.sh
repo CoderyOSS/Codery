@@ -11,7 +11,7 @@ set -u
 MANIFEST=/home/gem/projects/Codery/containers/apps/tools-manifest.txt
 [ -f "$MANIFEST" ] || MANIFEST=/opt/codery/projects/Codery/containers/apps/tools-manifest.txt
 PROFILE=/nix/var/nix/profiles/tools
-NIX="nix --extra-experimental-features nix-command flakes"
+NIX="nix"
 
 [ -f "$MANIFEST" ] || exit 0
 mkdir -p "$PROFILE"
