@@ -42,17 +42,19 @@ echo "tooladd: installing nixpkgs#$PKG (cache.nixos.org substitute — no image 
 # the explicit --profile keeps the shared "tools" profile regardless of who runs.
 sudo $NIX profile install --profile "$PROFILE" "nixpkgs#$PKG"
 
-# Manifest = live profile attrPaths, sorted.
-have="$($NIX profile list --profile "$PROFILE" --json | jq -r '.elements[]?.attrPath // empty' | sort -u)"
-printf '%s\n' "$have" > "$MANIFEST.tmp"
-mv "$MANIFEST.tmp" "$MANIFEST"
+# Manifest = live profile attrPaths, sorted. Manifest writes + git MUST run
+# as gem: docker exec lands as root, and git refuses root access to gem's
+# checkout (safe.directory) — root-owned .git objects would poison the repo.
+as_gem() { if [ "$(id -un)" = "root" ]; then sudo -u gem "$@"; else "$@"; fi; }
 
-cd "$REPO"
-git add containers/apps/tools-manifest.txt
-if git diff --cached --quiet; then
+have="$($NIX profile list --profile "$PROFILE" --json | jq -r '.elements[]?.attrPath // empty' | sort -u)"
+as_gem tee "$MANIFEST" >/dev/null <<<"$have"
+
+as_gem git -C "$REPO" add containers/apps/tools-manifest.txt
+if as_gem git -C "$REPO" diff --cached --quiet; then
   echo "tooladd: manifest unchanged"
 else
-  git commit -m "tools: add $PKG"
+  as_gem git -C "$REPO" commit -m "tools: add $PKG"
   if command -v github-push >/dev/null 2>&1; then
     github-push containers/apps/tools-manifest.txt 2>/dev/null || github-push || \
       echo "tooladd: manifest committed but PUSH FAILED — run github-push later" >&2
