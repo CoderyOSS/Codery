@@ -14,7 +14,7 @@ PROFILE=/nix/var/nix/profiles/tools
 NIX="nix"
 
 [ -f "$MANIFEST" ] || exit 0
-mkdir -p "$PROFILE"
+mkdir -p "$(dirname "$PROFILE")"
 
 have="$($NIX profile list --profile "$PROFILE" --json 2>/dev/null \
         | jq -r '.elements[]?.attrPath // empty' | sort -u || true)"

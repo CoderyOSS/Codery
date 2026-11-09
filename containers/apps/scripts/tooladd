@@ -27,7 +27,7 @@ NIX="nix"
 PKG="$1"
 [[ "$PKG" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "refusing odd attr: $PKG" >&2; exit 2; }
 
-mkdir -p "$PROFILE" "$(dirname "$MANIFEST")"
+mkdir -p "$(dirname "$PROFILE")" "$(dirname "$MANIFEST")"
 
 # Already present?
 have="$($NIX profile list --profile "$PROFILE" --json 2>/dev/null \
