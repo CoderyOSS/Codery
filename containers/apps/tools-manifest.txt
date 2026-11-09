@@ -1,5 +1,1 @@
-# Codery apps container — runtime-installed dev tools (nixpkgs attrs).
-# Source of truth = the live nix profile in the /nix volume; this manifest
-# is the reproducibility record. Add tools with: ssh gem@apps tooladd <attr>
-# New-machine replay happens at boot (s6 tools-replay) or:
-#   while read p; do sudo nix profile install --profile /nix/var/nix/profiles/tools "nixpkgs#$p"; done < containers/apps/tools-manifest.txt
+cloc
