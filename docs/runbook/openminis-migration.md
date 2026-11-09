@@ -87,7 +87,7 @@ compose project name (`remi_backend` for REMI's services).
 | Thing | Address |
 |---|---|
 | Host tailnet IP | `$(cat /run/tailscale.ip)` |
-| Dockhand UI/API (OpenMinis, from iPad) | `https://dockhand.rancidgrandmas.online` (tailnet-only; Caddy basic auth + Dockhand auth) |
+| Dockhand UI/API (OpenMinis, from iPad) | `https://dockhand.rancidgrandmas.online` (tailnet-only; Dockhand's own auth — admin login or `dh_` API token. No Caddy basic-auth: removed 2026-11-09 so the native iOS client can connect) |
 | Dockhand UI/API (paseo agent MCP, in-container) | `http://dockhand:3000` (codery-net alias) |
 | Paseo daemon | `https://code.rancidgrandmas.online` (WS) |
 | Apps SSH / mosh | tailnet `:3333` / UDP `:61000` (unchanged by this migration until phase 3) |
@@ -97,7 +97,6 @@ compose project name (`remi_backend` for REMI's services).
 
 | Secret | Lives at | Used by |
 |---|---|---|
-| `DOCKHAND_BASIC_AUTH` | `/opt/codery/.env` (`"<user> <bcrypt-hash>"`) | Caddy gate on dockhand. |
 | `DOCKHAND_API_TOKEN` | `/opt/codery/.env` (`dh_...`) → paseo env | stack MCP in paseo + OpenMinis curl |
 | Dockhand admin login | Rob's password manager | Dockhand UI |
 | `PASEO_PASSWORD`, `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `ANTHROPIC_API_KEY`, `ZAI_API_KEY` | `/opt/codery/.env` | paseo (unchanged) |
@@ -110,7 +109,6 @@ LastPass):**
 ```
 CODEMY_HOST=root@<tailscale-ip>
 DOCKHAND_URL=https://dockhand.rancidgrandmas.online
-DOCKHAND_BASIC_AUTH=<user>:<password>
 DOCKHAND_API_TOKEN=dh_...
 GITHUB_TOKEN=<fine-grained token only if you push repo changes>
 SSH_KEY_PATH=~/.ssh/id_ed25519
@@ -253,9 +251,9 @@ services/apps.yml.
 ```bash
 source ~/.codery/secrets.env
 # Auth layers: Caddy basic auth (-u) + Dockhand bearer token.
-curl -su "$DOCKHAND_BASIC_AUTH" -H "Authorization: Bearer $DOCKHAND_API_TOKEN" \
+curl -s -H "Authorization: Bearer $DOCKHAND_API_TOKEN" \
   "$DOCKHAND_URL/api/stacks?env=1"
-curl -su "$DOCKHAND_BASIC_AUTH" -H "Authorization: Bearer $DOCKHAND_API_TOKEN" \
+curl -s -H "Authorization: Bearer $DOCKHAND_API_TOKEN" \
   -X POST "$DOCKHAND_URL/api/stacks/remi_backend/deploy?env=1" -d '{"pull":true}'
 # Containers: /api/containers · Logs: /api/containers/<id>/logs?tail=100
 # Start/Stop/Restart stack: POST /api/stacks/<name>/{start,stop,restart}
