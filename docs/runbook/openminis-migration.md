@@ -26,6 +26,20 @@ apply that phase's fallback. If nothing fits, run the FULL ABORT and report.
 5. Secrets: NEVER print, log, or commit secret values. `test -f` / `grep -c`
    for existence checks only.
 
+### 0.1 Known codery-ci defects (observed 2026-11-08/09, W2/W3 execution)
+
+These bit us during the migration; they are orchestrator fix-items (phase 4)
+and manual workarounds until then:
+
+| Defect | Symptom | Workaround |
+|---|---|---|
+| Docker client request timeout too short | `create_container`/`start` on the apps container (1001 port bindings) → `Timeout error` while the daemon actually finishes | Check `docker ps -a`: if the container exists `Created`/running, complete manually (see §5 phase 3 note) |
+| cutover `stop` timeout | `Error: failed to stop container codery-apps-<old>` — state + Caddy already flipped | Traffic is fine; just `docker rm -f codery-apps-<old>` afterwards |
+| Deploy-time volume lifecycle | A declared named volume was deleted+recreated empty across a deploy window (`Creating missing named volume:` in validate = real signal!) | Runtime tools lost → re-run `tooladd <pkg>` per `tools-manifest.txt`. Orchestrator fix: prune must never touch declared volumes |
+| `runtime-apps` oneshot never wired | Runtime apps (ideas/qdrant/graph/bolt/label/booksearch) 502 after any apps container boot | FIXED in image `runtime-apps-boot`+ (contents.d link). Older images: `docker exec codery-apps-<color> /usr/local/bin/runtime-apps-restore` |
+| SSH host keys rotated per deploy | All clients' known_hosts break on every apps swap | FIXED in image `runtime-apps-boot`+ (`/etc/ssh` volume). One final rotation on first boot of that image; stable afterwards |
+| Tooladd word-split + sudo | `nix profile install` failed (`'flakes' is not a recognised command`, EACCES) | FIXED in image `runtime-apps-boot`+ |
+
 ---
 
 ## 1. Where to find everything (paths you will need)
