@@ -53,6 +53,7 @@ add label.rancidgrandmas.online       apps:8123
 add booksearch.rancidgrandmas.online  apps:8126
 add graph.rancidgrandmas.online       apps:8127
 add bolt.rancidgrandmas.online        apps:8128
+add routing.rancidgrandmas.online    zoraxy:8000
 
 echo "== verify =="
 sleep 2
