@@ -2,6 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
+> **AI agents (OpenMINIS-class):** start with [RUNBOOK.md](RUNBOOK.md) — it is
+> the operating guide for a Codery VPS: install, setup, debugging, maintenance.
+
 **Codery turns a VPS into an operating system for developers.** A Tailscale-
 perimetered homelab: Docker provides the runtime, Dockhand the management
 plane, Zoraxy the routing edge — and on top of them, a developer toolchain
