@@ -4,6 +4,26 @@
 **Status:** Approved by Rob (this document is the authority for the migration branch `migration/runtime-ops`)
 **Implements the decision record from the 2026-11-07 brainstorming session.**
 
+> **REV2 — final architecture (2026-11-09, approved by Rob).** The routing
+> layer is **Zoraxy** (single Go binary, Dockhand stack, tailnet-IP binds via
+> compose host-IP mapping + host sysctl `ip_nonlocal_bind`, lego DNS-01
+> wildcard via Cloudflare). Route *editing* lives in Zoraxy's UI/API;
+> route/health *visualization* is deferred (follow-up: small codery page or
+> an upstream Zoraxy PR adding a docker-state column to its route table —
+> gray/red/green). Core services consolidate into the **`devtools`**
+> Dockhand stack (paseo, apps, opendesign, playwright) alongside
+> `remi_backend` and a new **`carta`** stack (cartaclient/design/cbe1 move
+> out of the apps container into generic-image containers with bind-mounted
+> source: bun `--hot` reloads, elixir restarts). The apps 8000–9000 port
+> range is closed (publishes: `:3333`, `:61000/udp`, `:8080` transition-only).
+> The codery-ci daemon + MCP are **disabled, not deleted** (supervisord
+> autostart=false; state/images/branch retained for revert). Codery's
+> remaining identity: the observability mirror (deferred), the relays until
+> replaced, triage/doctor scripts, DNS update, and the agent surface.
+> CaddyManager / Ingressi / Charon / Zoraxy evaluated 2026-11-09: Zoraxy
+> adopted; Ingressi rejected (public binds + replaces Caddy wholesale);
+> CaddyManager pre-v0.1 Caddyfile editor; Charon 13★.
+
 ---
 
 ## 1. Intent and why
