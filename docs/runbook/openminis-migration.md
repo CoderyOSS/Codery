@@ -42,6 +42,102 @@ and manual workarounds until then:
 
 ---
 
+## REV 2 — Final architecture: Zoraxy router + `devtools` stack + Codery disabled (2026-11-09)
+
+**Supersedes the phase-1/3 sections below** (§3/§5) — paseo's cutover and apps' exit
+now happen together, as the **`devtools`** Dockhand stack. §2 (phase 0) and §6 (API
+reference) remain authoritative. Rob approved: Zoraxy replaces Caddy wholesale
+(including `mcp.`/`ci.`, which are dropped); Codery daemon + MCP are **disabled,
+not deleted** (supervisord autostart=false, confs/state/images retained for
+revert); observability becomes a follow-up (codery-side page or an upstream
+Zoraxy PR: docker-state column in Zoraxy's route table — its route list already
+reads Docker containers).
+
+### End state
+
+| Layer | Runs |
+|---|---|
+| Router | **Zoraxy** stack (this repo `containers/zoraxy/compose.yml`), tailnet-IP `:443/:80`, mgmt UI `${TAILNET_IP}:8000`, joined to codery-net — upstreams are container names, HTTP services need **no** host port publishes |
+| Stacks | `devtools` (paseo, apps, opendesign, playwright — `containers/devtools/compose.yml`), `remi_backend` (unchanged), `carta` (`containers/carta/compose.yml`: cartaclient/design under `bun --hot`, cbe1 elixir; reload = container restart) |
+| Codery | disabled: daemon + `codery-ci-mcp` autostart=false; Caddy autostart=false; `codery-triage` + `dns-update` stay; `dockhand.*` agent MCP stays (token via stack env); `codery` MCP entry removed from opencode.json |
+
+### REV2 phase A — Zoraxy spike (gate for everything else)
+
+1. Deploy the zoraxy stack: stack dir `/opt/codery/stacks/zoraxy/` (compose from
+   repo, stack `.env` = `TAILNET_IP=$(cat /run/tailscale.ip)`). Inbound :8443 —
+   zero exposure (Caddy keeps :443).
+2. Open `http://<tailnet-ip>:8000` → first-run account setup (vault).
+3. Pilot: add proxy hosts `qdrant.rancidgrandmas.online` → `apps:8125` (expect the
+   401 basic-auth response = chain works) and `opendesign.rancidgrandmas.online`
+   → `opendesign:7456`. Test via `curl -k --resolve <subdomain>:8443:<tailnet-ip>
+   https://<subdomain>/`.
+4. ACME: DNS challenge via lego + Cloudflare token → obtain `*.rancidgrandmas.online`.
+5. Uptime monitor: add targets, stop one container in Dockhand, watch it mark down.
+6. Capture the API endpoints for route add/list (browser devtools) — future adapter.
+**Gate A:** all pilots pass + WS check (add `bolt.` → `apps:8128`, open bolt. UI).
+
+### REV2 phase B — vhost migration + :443 cutover
+
+Enter every vhost in Zoraxy (UI or API), one proxy host each:
+
+| subdomain | upstream | notes |
+|---|---|---|
+| code | paseo:6767 | WebSocket; route only AFTER phase C brings the `paseo` container up |
+| dockhand | dockhand:3000 | WebSocket + API |
+| remi | remi_backend-frontend-1:4321 | |
+| opendesign | opendesign:7456 | |
+| qdrant / ideas / label / booksearch / graph / bolt | apps:8125 / 8124 / 8123 / 8126 / 8127 / 8128 | qdrant has its own basic auth (401 = correct) |
+| carta / design / cbe1 | carta-client:8040 / carta-design:8020 / carta-cbe1:8060 | after the carta stack deploys (phase D) |
+| mcp / ci | — | dropped (Codery MCP + dashboard disabled in phase E) |
+
+Then: edit the zoraxy compose ports 8443→443 + add 80:80, `docker compose up -d`,
+disable Caddy in supervisord (`autostart=false`, stop), verify every subdomain
+through Zoraxy. **Break-glass while Zoraxy is broken:** tailnet SSH is independent
+— `ssh -L 23000:127.0.0.1:23000` → Dockhand UI on localhost:23000; same pattern
+for paseo (:26767→6767 pre-phase-C... post-phase-C use :6767).
+
+### REV2 phase C — paseo + apps join `devtools` (gates: sessions idle; paseo migrates AS-IS on the current image)
+
+Port-conflict sequencing (the daemon's relays bind the exact ports the stack needs):
+
+```bash
+supervisorctl stop codery-ci codery-ci-mcp          # mosh/ssh drop here (~2-4 min)
+docker rm -f codery-apps-blue codery-paseo-green    # free 8080/26767/12022
+# create stack: Dockhand UI -> Stacks -> /opt/codery/stacks/devtools/compose.yml
+# stack .env: TAILNET_IP=<cat /run/tailscale.ip>
+#   PASEO_IMAGE=ghcr.io/coderyoss/codery:paseo-python
+#   APPS_IMAGE=ghcr.io/coderyoss/codery:apps-runtime-apps-boot
+#   OPENDESIGN_IMAGE=ghcr.io/coderyoss/codery:opendesign-<current sha>
+docker compose -f /opt/codery/stacks/devtools/compose.yml --env-file /opt/codery/stacks/devtools/.env up -d
+# routes: add static entries to /opt/codery/proxy/routes.yaml
+#   code -> 127.0.0.1:6767 ; opendesign -> 127.0.0.1:7456 ; then:
+codery-ci reload-routes                              # CLI works even with daemon stopped
+```
+
+Verify: ssh -p 2222 and -p 3333 (host keys rotate ONE final time — /etc/ssh
+volumes make them permanent), mosh, Paseo app connects, ideas/qdrant 200 (boot
+oneshot links runtime apps), `docker exec apps tooladd cloc` still present.
+Then set codery-ci + codery-ci-mcp `autostart=false` in their supervisor confs
+(disable), and remove the `codery` MCP entry from
+`containers/paseo/opencode-config/opencode.json` (commit on the branch).
+**Fallback:** re-enable supervisor programs (relays return), `docker compose down`
+the devtools stack, restore codery state + reload-routes + recreate.
+
+### REV2 phase D — carta stack + cleanup builds
+
+1. Deploy the carta stack (`/opt/codery/stacks/carta/`, compose from repo).
+2. Add carta/design/cbe1 proxy hosts (table above); verify each 200.
+3. Next apps image build drops the baked s6 services `cartaclient/design/cbe1`
+   and the nginx route remnants (repo is ready on the branch).
+
+### REV2 phase E — soak (Rob's empirical gap list)
+
+Expected gaps (by design): host vitals view, gray-with-reason, agent route
+automation. Follow-ups: codery-side mini-page or the upstream Zoraxy PR
+(docker-state column in the route table); thin zoraxy MCP adapter if agents
+need route automation.
+
+
 ## 1. Where to find everything (paths you will need)
 
 ### On the VPS (host)
@@ -170,7 +266,7 @@ paseo` again.
 
 ---
 
-## 3. Phase 1 — paseo exits blue/green
+## 3. Phase 1 — paseo exits blue/green [SUPERSEDED — see REV2 phase C]
 
 **Pre:** sessions inactive (check the Paseo app's session list; ask Rob).
 
@@ -214,7 +310,7 @@ run a trivial command.
 codery-paseo-blue` → restore paseo.yml + routes.yaml → `codery-ci
 reload-routes` → `codery-ci recreate paseo`. Restore time < 5 min.
 
-## 4. Phase 2 — opendesign + playwright (same pattern, trivial)
+## 4. Phase 2 — opendesign + playwright [DONE 2026-11-09 — superseded by REV2 `devtools` stack]
 
 Same as phase 1 with their compose files (`/opt/codery/stacks/{opendesign,playwright}`),
 ports `7456` (loopback) and playwright internal-only. Adopt via Dockhand,
@@ -226,7 +322,7 @@ playwright MCP call).
 **Fallback:** symmetric — stop stacks, restart codery-ci containers
 (`codery-ci recreate opendesign` / `playwright`), restore routes.
 
-## 5. Phase 3 — apps exits blue/green (LAST; only after tools persistence
+## 5. Phase 3 — apps exits blue/green [SUPERSEDED — see REV2 phase C] (LAST; only after tools persistence
 has been in use for a while)
 
 1. Pre-deploy image sync: `/opt/codery/bin/nix-store-sync.sh <new-apps-image> codery-apps-nix`
@@ -262,7 +358,7 @@ curl -s -H "Authorization: Bearer $DOCKHAND_API_TOKEN" \
 The paseo agent uses the same API through the `dockhand.*` MCP tools
 (http://dockhand:3000, token from its env).
 
-## 7. Phase 4 (joint, after 1–3 verified) — codery-ci slim + dashboard
+## 7. Phase 4 [SUPERSEDED — Codery disabled instead; observability deferred — see REV2 phase E]
 
 - Remove build/deploy/cutover/rollback + color machinery + TCP/UDP relays
   from codery-ci (Rust); keep routes/health/MCP/DNS.
