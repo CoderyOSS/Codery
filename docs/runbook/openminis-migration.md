@@ -58,8 +58,36 @@ reads Docker containers).
 | Layer | Runs |
 |---|---|
 | Router | **Zoraxy** stack (this repo `containers/zoraxy/compose.yml`), tailnet-IP `:443/:80`, mgmt UI `${TAILNET_IP}:8000`, joined to codery-net — upstreams are container names, HTTP services need **no** host port publishes |
-| Stacks | `devtools` (paseo, apps, opendesign, playwright — `containers/devtools/compose.yml`), `remi_backend` (unchanged), `carta` (`containers/carta/compose.yml`: cartaclient/design under `bun --hot`, cbe1 elixir; reload = container restart) |
+| Stacks | `devtools` (paseo, apps, opendesign, dbgate, playwright — `containers/devtools/compose.yml`), `remi_backend` (unchanged), `carta` (`containers/carta/compose.yml`: cartaclient/design under `bun --hot`, cbe1 elixir; reload = container restart) |
 | Codery | disabled: daemon + `codery-ci-mcp` autostart=false; Caddy autostart=false; `codery-triage` + `dns-update` stay; `dockhand.*` agent MCP stays (token via stack env); `codery` MCP entry removed from opencode.json |
+
+### Post-migration notes (2026-11-10)
+
+- **Dockhand deploy + `env_file` constraint**: Dockhand's deploy engine parses
+  compose **inside its own container**, which mounts only `/opt/codery/stacks`
+  and `/opt/codery/projects`. Any `env_file:` path outside those (e.g.
+  `/opt/codery/.env`) fails the whole deploy with `env file ... not found`.
+  Volume binds are unaffected (the docker engine resolves those on the host).
+  Fix in place 2026-11-10: dockhand container gained
+  `/opt/codery/.env:/opt/codery/.env:ro`. Until it lands, Dockhand cannot
+  deploy the `devtools` stack — use host-side `docker compose --env-file` or
+  fix the mount first.
+- **OpenDesign auth**: daemon Bearer auth is OFF (`OD_DISABLE_API_AUTH=1`).
+  The daemon never sends `WWW-Authenticate` on 401, so with auth on the SPA
+  silently 401s every call and renders the onboarding page as a false-fresh
+  (it did exactly that post-migration; project data on
+  `/opt/codery/data/opendesign` was never lost). Boundary = Zoraxy edge +
+  tailnet only, same as the sandbox era. Optional hardening: basic-auth the
+  `opendesign.` proxy host in Zoraxy.
+- **dbgate**: added to `devtools` (dbgate:3000 on codery-net, state on host at
+  `/opt/codery/data/dbgate`, REMI Mongo pre-provisioned read-only via
+  `CONNECTIONS_*` env — mongo runs authless on the internal network). Route
+  `dbgate.rancidgrandmas.online → dbgate:3000` via Zoraxy. Never
+  host-publish; the UI is a full DB shell.
+- **`dockhand.*` MCP**: `stack_ps`/`stack_logs` source containers from the
+  `/stacks` payload — the flat `/containers` list omits compose-project
+  fields, which made stacks with non-matching container names (devtools) look
+  empty.
 
 ### REV2 phase A — Zoraxy spike (gate for everything else)
 

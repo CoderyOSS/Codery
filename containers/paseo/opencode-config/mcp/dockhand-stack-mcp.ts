@@ -128,13 +128,15 @@ async function listContainers(): Promise<any> {
   return r.json();
 }
 
-function matchStack(containers: any, stack: string): any[] {
-  const arr = Array.isArray(containers) ? containers : containers?.containers ?? [];
-  const needle = stack.toLowerCase();
-  return arr.filter((c: any) =>
-    (c.stack ?? c.stackName ?? c.composeProject ?? "").toLowerCase() === needle ||
-    (c.name ?? c.names?.[0] ?? "").toLowerCase().includes(needle),
-  );
+// Source of truth for per-stack containers: the /stacks payload (stacks whose
+// container names don't embed the stack name — e.g. devtools = paseo/apps/
+// opendesign/dbgate — are unmatchable in the flat /containers list, which
+// omits compose-project fields).
+async function stackContainers(stack: string): Promise<any[]> {
+  const stacks = await listStacks();
+  const arr = Array.isArray(stacks) ? stacks : stacks?.stacks ?? [];
+  const mine = arr.find((s: any) => (s.name ?? "").toLowerCase() === stack.toLowerCase());
+  return mine?.containerDetails ?? [];
 }
 
 async function callTool(name: string, args: any): Promise<any> {
@@ -147,15 +149,14 @@ async function callTool(name: string, args: any): Promise<any> {
       return { content: [{ type: "text", text: JSON.stringify(stacks, null, 2) }] };
     }
     case "dockhand_stack_ps": {
-      const all = await listContainers();
-      const mine = matchStack(all, args.stack);
+      const mine = await stackContainers(args.stack);
       return { content: [{ type: "text", text: JSON.stringify(mine, null, 2) }] };
     }
     case "dockhand_stack_logs": {
-      const all = await listContainers();
-      let target = args.container
-        ? matchStack(all, args.stack).find((c: any) => (c.name ?? "").includes(args.container))
-        : matchStack(all, args.stack)[0];
+      const mine = await stackContainers(args.stack);
+      const target = args.container
+        ? mine.find((c: any) => (c.name ?? "").includes(args.container))
+        : mine[0];
       if (!target) throw new Error(`No container found for stack '${args.stack}'`);
       const id = target.id ?? target.Id ?? target.name;
       const tail = args.tail ?? 100;

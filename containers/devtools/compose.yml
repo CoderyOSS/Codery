@@ -9,7 +9,12 @@
 #   apps        127.0.0.1:8080 (nginx, transition-only), ${TAILNET_IP}:3333 ssh,
 #               ${TAILNET_IP}:61000/udp mosh — NO 8000-9000 range: HTTP
 #               services are reached by Zoraxy via codery-net container DNS
-#   opendesign  127.0.0.1:7456 (Zoraxy route opendesign.)
+#   opendesign  127.0.0.1:7456 (Zoraxy route opendesign.) — daemon API auth
+#               disabled: Zoraxy edge + tailnet perimeter is the boundary
+#               (sandbox-era model). Without this the SPA 401s everything and
+#               renders the onboarding page as a false-fresh.
+#   dbgate      internal-only (Zoraxy route dbgate. → dbgate:3000); state on
+#               host at /opt/codery/data/dbgate; REMI Mongo pre-provisioned
 #   playwright  internal-only (ws://playwright:3000 on codery-net)
 #
 # Port-conflict note: these publishes collide with the codery-ci daemon's
@@ -91,6 +96,11 @@ services:
       OD_BIND_HOST: 0.0.0.0
       OD_PORT: "7456"
       OD_ALLOWED_ORIGINS: https://opendesign.rancidgrandmas.online
+      # Daemon-side Bearer auth off: the browser never prompts for the token
+      # (no WWW-Authenticate on 401), so with auth on the SPA renders the
+      # onboarding page as a false-fresh. The Zoraxy edge + tailnet perimeter
+      # is the auth boundary — same model the sandbox-era deployment used.
+      OD_DISABLE_API_AUTH: "1"
       PLAYWRIGHT_WS_ENDPOINT: ws://playwright:3000/
     ports:
       - "127.0.0.1:7456:7456"
@@ -98,6 +108,27 @@ services:
       - /opt/codery/data/opendesign:/app/.od
       - /opt/codery/projects:/opt/codery/projects
       - /opt/codery/github-app.pem:/run/secrets/github-app.pem:ro
+    networks:
+      codery-net: {}
+
+  dbgate:
+    # Web DB client (Mongo/Postgres/MySQL/SQLite/Redis/...) — the general
+    # database UI for any project DB on codery-net. Reached via Zoraxy
+    # (dbgate.rancidgrandmas.online → dbgate:3000), never host-published.
+    # Saved connections/scripts persist on the host (container stores its
+    # state in /root/.dbgate). The REMI Mongo connection is pre-provisioned
+    # via env; further connections are configured in the UI and survive
+    # recreation via the bind mount.
+    image: dbgate/dbgate:latest
+    container_name: dbgate
+    restart: unless-stopped
+    environment:
+      CONNECTIONS: remi-mongo
+      LABEL_remi-mongo: REMI MongoDB
+      URL_remi-mongo: mongodb://mongo:27017
+      ENGINE_remi-mongo: mongo@dbgate-plugin-mongo
+    volumes:
+      - /opt/codery/data/dbgate:/root/.dbgate
     networks:
       codery-net: {}
 
