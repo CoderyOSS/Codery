@@ -139,6 +139,15 @@ the devtools stack, restore codery state + reload-routes + recreate.
 
 ### REV2 phase E — soak (Rob's empirical gap list)
 
+**Retired during soak (2026-11-10):** runtime app `labeler` — stale idea-space
+lab leftover (env pointed at a deleted run dir; crash-looped). Removed via
+`s6-svc -d`, bundle dir + SQLite row deleted, `label.` proxy host dropped.
+Restore record if the lab is ever revived:
+`add_app labeler label 8123 /home/gem/projects/labeler "bun server.js"
+env DATA_DIR=/home/gem/projects/REMI/backend/idea-space/runs/<run>/benchmark`
+(labeler source untouched at `/home/gem/projects/labeler`).
+
+
 Expected gaps (by design): host vitals view, gray-with-reason, agent route
 automation. Follow-ups: codery-side mini-page or the upstream Zoraxy PR
 (docker-state column in the route table); thin zoraxy MCP adapter if agents
@@ -160,7 +169,7 @@ need route automation.
 | `/opt/codery/ssh/agent-to-apps` | paseo→apps client key |
 | `/opt/codery/data/opencode` | OpenCode state (agents' auth.json) |
 | `/opt/codery/apps-s6.d` | rendered s6 bundles for runtime apps |
-| `/opt/codery/stacks/` | Dockhand local stack dir (core services' compose copies; created in phase 0) |
+| `/opt/codery/stacks/` | Infra stack composes (`devtools`, `zoraxy`) — Dockhand-deployed. Project stacks (REMI, carta) live in their project roots (`/opt/codery/projects/<proj>/docker-compose.yml`); repo mirrors at `containers/<name>/compose.yml` |
 | `/opt/codery/bin/` | host helper scripts (`codery-triage`, `codery-backup.sh`, `nix-store-sync.sh`) |
 | `/etc/caddy/Caddyfile` | live Caddy config (written by codery-ci `reload-routes`) |
 | `/run/tailscale.ip` | host tailnet IP |
