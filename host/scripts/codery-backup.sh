@@ -64,7 +64,7 @@ for vol in codery-paseo-home codery-paseo-ssh-host-keys codery-dockhand-data; do
   fi
 done
 # codery-apps-nix deliberately NOT saved: multi-GB, re-seeded from the image
-# + tools manifest replay (see docs/runbook/openminis-migration.md).
+# + tools manifest replay (see the image docs in images/apps/).
 
 # --- 4. Projects tree (repos, minus build artifacts) --------------------
 echo "  projects tree (excludes build artifacts; keeps .git)"
@@ -88,7 +88,7 @@ find . -type f ! -name SHA256SUMS -exec sha256sum {} \; > SHA256SUMS
 chmod -R go-rwx "$OUT"
 du -sh "$OUT" "$OUT"/* 2>/dev/null || true
 echo "== backup complete: $OUT"
-echo "   restore instructions: docs/runbook/openminis-migration.md (FULL ABORT section)"
+echo "   restore instructions: see the backup script header + your instance docs"
 
 if command -v rclone >/dev/null 2>&1 && [ -n "${RCLONE_REMOTE:-}" ]; then
   echo "== rclone -> $RCLONE_REMOTE"

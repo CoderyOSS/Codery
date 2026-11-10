@@ -100,7 +100,7 @@ const TOOLS = [
 const REMEDIATION =
   "DOCKHAND_API_TOKEN is not present in this container's environment. " +
   "It is wired by an env_override in the paseo service.yml at migration time " +
-  "(see docs/runbook/openminis-migration.md phase 0). Until then, ask the " +
+  "(wired via the paseo service env at deploy time). Until then, ask the " +
   "operator to use the Dockhand UI or API directly.";
 
 function headers(): Record<string, string> {

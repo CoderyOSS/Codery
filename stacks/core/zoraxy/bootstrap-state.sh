@@ -1,7 +1,7 @@
 #!/bin/sh
 # zoraxy state bootstrap — restores admin, ACME, and proxy rules after a state
 # wipe (known hazard: deploy-time volume lifecycle deletes declared named
-# volumes; see docs/runbook). Idempotent.
+# volumes). Idempotent.
 # Run on the host:  /opt/codery/stacks/zoraxy/bootstrap-state.sh
 #
 # Reads from /opt/codery/.env: DOMAIN_NAME, ACME_EMAIL (operator contact),

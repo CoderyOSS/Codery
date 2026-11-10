@@ -8,7 +8,8 @@ AGENTS.md). Read it before making any changes to this repo.
 > playwright, opendesign, dbgate — opt-in via compose profiles) · **projects**
 > (your applications — one stack per project repo). The codery-ci binary is disabled
 > on the host (revert path retained); routing is Zoraxy, stacks run under
-> Dockhand. Fresh installs: `RUNBOOK.md`. History: `docs/runbook/`.
+> Dockhand. Fresh installs: `RUNBOOK.md`. Instance-specific history and
+> design records live in your private deployment overlay, not in this repo.
 
 ## What This Repo Is
 
@@ -75,7 +76,7 @@ lets these bind before tailscale0 exists.
 | Host unhealthy | `/usr/local/bin/codery-triage` (`--json` for machines) |
 | Full backup | `/usr/local/bin/codery-backup.sh` → `/opt/codery/backups/` |
 | Router lockout | tailnet SSH is independent: `ssh -L 23000:127.0.0.1:23000` → Dockhand UI on localhost |
-| Re-enable codery-ci (revert) | `docs/runbook/openminis-migration.md` FULL ABORT notes |
+| Re-enable codery-ci (revert) | retained on the host: disabled supervisor programs + `/opt/codery/state/` (see your instance docs) |
 
 ## SSH Access
 
@@ -107,8 +108,8 @@ the OOM counter before big builds.
 Supervisor programs `codery-ci`, `codery-ci-mcp`, `caddy`: stopped +
 `autostart=false`; state retained on the host (`/opt/codery/state/`,
 `codery.db`, binary, images). Rust source is recoverable from git history
-(pre-`migration/runtime-ops`). Re-enable + FULL ABORT:
-`docs/runbook/openminis-migration.md`.
+(pre-`migration/runtime-ops`). Re-enable steps live in your instance docs
+(the retained host state documents the exact programs and paths).
 
 ## Workflows (.github/workflows)
 

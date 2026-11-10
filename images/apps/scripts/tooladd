@@ -11,7 +11,7 @@
 # - Agents: ssh gem@apps tooladd <pkg>. Interactive: same command.
 #
 # Reproducibility: a new machine replays the manifest at boot
-# (s6 tools-replay oneshot) or manually: see docs/runbook/openminis-migration.md.
+# (s6 tools-replay oneshot) or manually via: sudo nix profile install --profile /nix/var/nix/profiles/tools
 set -euo pipefail
 
 PROFILE=/nix/var/nix/profiles/tools
