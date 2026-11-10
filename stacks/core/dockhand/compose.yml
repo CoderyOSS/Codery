@@ -1,0 +1,46 @@
+# dockhand — CORE layer: the container/stack management plane.
+#
+# Everything HTTP and every project stack runs under Dockhand; this compose
+# file is the definition of Dockhand itself. Deployed HOST-SIDE:
+#
+#   docker compose -f /opt/codery/stacks/dockhand/compose.yml --env-file /opt/codery/stacks/dockhand/.env up -d
+#
+# Deliberately NOT registered as a Dockhand stack: recreating the management
+# plane from within itself kills the deploy job and can lock out the operator.
+# Host-side compose is also the break-glass path if Dockhand breaks.
+#
+# Invariants:
+#   - state volume `codery-dockhand-data` is NEVER renamed (holds stack
+#     registry + every dh_ API token; new volume = factory reset)
+#   - `/opt/codery/.env` must be bind-mounted: compose resolves env_file
+#     client-side, and the deploy engine runs inside this container
+#   - UI/API on 127.0.0.1:23000 (host) and dockhand:3000 (codery-net);
+#     public access via Zoraxy proxy-host dockhand. -> dockhand:3000
+name: dockhand
+
+services:
+  dockhand:
+    image: ${DOCKHAND_IMAGE:?set DOCKHAND_IMAGE in stack .env}
+    container_name: dockhand
+    restart: unless-stopped
+    env_file:
+      - /opt/codery/.env
+    ports:
+      - "127.0.0.1:23000:3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - codery-dockhand-data:/app/data
+      - /opt/codery/projects:/opt/codery/projects
+      - /opt/codery/stacks:/opt/codery/stacks
+      - /opt/codery/.env:/opt/codery/.env:ro
+    networks:
+      codery-net:
+        aliases: [dockhand]
+
+networks:
+  codery-net:
+    external: true
+
+volumes:
+  codery-dockhand-data:
+    external: true
