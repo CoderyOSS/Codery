@@ -60,7 +60,7 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
-          file: containers/apps/Dockerfile
+          file: images/apps/Dockerfile
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository_owner }}/codery:apps-latest
