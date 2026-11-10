@@ -42,3 +42,7 @@ services:
 
 volumes:
   zoraxy_state:
+
+networks:
+  codery-net:
+    external: true
