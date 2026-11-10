@@ -1,0 +1,77 @@
+# carta — the Carta app stack (three services, generic images, source bind-mounts).
+#
+# Dev-lab hosting pattern (the apps-container process era is retired):
+# stock images + bind-mounted source + hot-reload commands. Code changes
+# reflect without restarts for the bun services (--hot); cbe1 (Elixir mix,
+# compiles at boot) reloads via container restart in Dockhand.
+#
+# Upstreams (Zoraxy proxy-hosts -> codery-net names):
+#   carta. -> carta-client:8040
+#   design. -> carta-design:8020
+#   cbe1. -> carta-cbe1:8060
+#
+# Source of truth for the commands/env: the retired apps-container s6 run
+# files (containers/apps/s6-overlay/s6-rc.d/{cartaclient,design,cbe1}/run).
+# All three mount the shared projects tree so runtime project dirs
+# (CartaBE1 for cbe1) resolve at the same paths the processes expect.
+#
+# PORT/HOST: servers must bind 0.0.0.0 to be reachable cross-container
+# (Zoraxy -> service). Bun.serve defaults to 0.0.0.0; Bandit logs confirm
+# 0.0.0.0:8060. Verify on first boot (runbook phase D checks).
+name: carta
+
+services:
+  cartaclient:
+    image: oven/bun:1
+    container_name: carta-client
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    working_dir: /home/gem/projects/CartaClient/frontend
+    environment:
+      PORT: "8040"
+    command: ["bun", "--hot", "run", "serve.js"]
+    volumes:
+      - /opt/codery/projects:/home/gem/projects
+    networks:
+      codery-net:
+        aliases: [carta-client]
+
+  design:
+    image: oven/bun:1
+    container_name: carta-design
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    working_dir: /home/gem/projects/CartaClient/design
+    environment:
+      PORT: "8020"
+    command: ["bun", "--hot", "run", "serve.ts"]
+    volumes:
+      - /opt/codery/projects:/home/gem/projects
+    networks:
+      codery-net:
+        aliases: [carta-design]
+
+  cbe1:
+    image: elixir:1.18
+    container_name: carta-cbe1
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    working_dir: /home/gem/projects/Carta
+    environment:
+      HOME: /home/gem/projects
+      CARTA_PROJECT_DIR: /home/gem/projects/CartaBE1
+      PORT: "8060"
+    command: >
+      sh -c "mix deps.get && mix compile &&
+             exec elixir --sname cbe1 -S mix run --no-halt"
+    volumes:
+      - /opt/codery/projects:/home/gem/projects
+    networks:
+      codery-net:
+        aliases: [carta-cbe1]
+
+# No ports: everything is reached through Zoraxy via codery-net.
+# The stack's own default network exists implicitly for intra-stack traffic.

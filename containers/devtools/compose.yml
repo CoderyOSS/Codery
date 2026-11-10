@@ -1,0 +1,129 @@
+# devtools — the consolidated core-services stack (Zoraxy end-state).
+#
+# One Dockhand stack: paseo + apps + opendesign + playwright. Deployed by
+# OpenMinis in migration phase C (see docs/runbook/openminis-migration.md,
+# Revision 2). Supersedes the per-service staged composes (removed).
+#
+# Ports (all machine-relative, tailnet-only where external):
+#   paseo       127.0.0.1:6767 (Zoraxy route code.),   ${TAILNET_IP}:2222 ssh
+#   apps        127.0.0.1:8080 (nginx, transition-only), ${TAILNET_IP}:3333 ssh,
+#               ${TAILNET_IP}:61000/udp mosh — NO 8000-9000 range: HTTP
+#               services are reached by Zoraxy via codery-net container DNS
+#   opendesign  127.0.0.1:7456 (Zoraxy route opendesign.)
+#   playwright  internal-only (ws://playwright:3000 on codery-net)
+#
+# Port-conflict note: these publishes collide with the codery-ci daemon's
+# TCP/UDP relays (:2222/:3333/:61000). The relay must be stopped BEFORE
+# `docker compose up` — runbook phase C sequencing.
+name: devtools
+
+services:
+  paseo:
+    image: ${PASEO_IMAGE:?set PASEO_IMAGE in stack .env}
+    container_name: paseo
+    restart: unless-stopped
+    env_file:
+      - /opt/codery/.env
+    environment:
+      PASEO_HOSTNAMES: "code.rancidgrandmas.online"
+      PASEO_RELAY_ENABLED: "false"
+      PASEO_WEB_UI_ENABLED: "false"
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+      PLAYWRIGHT_WS_ENDPOINT: ws://playwright:3000/
+      # Wired by migration phase C (OpenMinis): Dockhand API token for the
+      # agent's dockhand.* MCP.
+      DOCKHAND_API_TOKEN: ${DOCKHAND_API_TOKEN:-}
+    ports:
+      - "127.0.0.1:6767:6767"
+      - "${TAILNET_IP:?set TAILNET_IP in stack .env}:2222:2023"
+    volumes:
+      - codery-paseo-home:/home/paseo
+      - /opt/codery/projects:/workspace
+      - /opt/codery/data/opencode:/home/paseo/.local/share/opencode
+      - /opt/codery/projects/Codery/containers/paseo/opencode-config:/home/paseo/.config/opencode
+      - /opt/codery/github-app.pem:/run/secrets/github-app.pem:ro
+      - /opt/codery/ssh/authorized_keys:/run/secrets/authorized_keys:ro
+      - codery-paseo-ssh-host-keys:/etc/ssh/host_keys
+      - /opt/codery/ssh/agent-to-apps:/home/paseo/.ssh/agent-to-apps:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      codery-net:
+        aliases: [paseo]
+
+  apps:
+    image: ${APPS_IMAGE:?set APPS_IMAGE in stack .env}
+    container_name: apps
+    restart: unless-stopped
+    env_file:
+      - /opt/codery/.env
+    environment:
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+    ports:
+      # nginx: transition-only. Once every runtime-app route is a Zoraxy
+      # proxy-host (upstream apps:<internal_port>), this publish and the
+      # nginx s6 service are retired.
+      - "127.0.0.1:8080:8080"
+      - "${TAILNET_IP}:3333:2022"
+      - "${TAILNET_IP}:61000:61000/udp"
+    volumes:
+      - codery-apps-nix:/nix
+      - codery-apps-ssh-host-keys:/etc/ssh
+      - ${SSH_DIR}:/home/gem/.ssh:ro
+      - /opt/codery/github-app.pem:/run/secrets/github-app.pem:ro
+      - /opt/codery/ssh/authorized_keys:/run/secrets/authorized_keys:ro
+      - /opt/codery/projects:/home/gem/projects
+      - /opt/codery/proxy/apps-nginx.conf:/etc/nginx/conf.d/apps.conf:ro
+      - /opt/codery/apps-s6.d:/etc/s6-overlay/apps.d
+    networks:
+      codery-net:
+        aliases: [apps]
+
+  opendesign:
+    image: ${OPENDESIGN_IMAGE:?set OPENDESIGN_IMAGE in stack .env}
+    container_name: opendesign
+    restart: unless-stopped
+    env_file:
+      - /opt/codery/.env
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=192
+      OD_BIND_HOST: 0.0.0.0
+      OD_PORT: "7456"
+      OD_ALLOWED_ORIGINS: https://opendesign.rancidgrandmas.online
+      PLAYWRIGHT_WS_ENDPOINT: ws://playwright:3000/
+    ports:
+      - "127.0.0.1:7456:7456"
+    volumes:
+      - /opt/codery/data/opendesign:/app/.od
+      - /opt/codery/projects:/opt/codery/projects
+      - /opt/codery/github-app.pem:/run/secrets/github-app.pem:ro
+    networks:
+      codery-net: {}
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.54.1-noble
+    container_name: playwright
+    restart: unless-stopped
+    user: pwuser
+    working_dir: /home/pwuser
+    init: true
+    ipc: host
+    command: ["npx", "-y", "playwright@1.54.1", "run-server", "--port", "3000", "--host", "0.0.0.0"]
+    networks:
+      codery-net:
+        aliases: [playwright]
+
+networks:
+  codery-net:
+    external: true
+
+volumes:
+  codery-paseo-home:
+    external: true
+  codery-paseo-ssh-host-keys:
+    external: true
+  codery-apps-nix:
+    external: true
+  codery-apps-ssh-host-keys:
+    external: true
