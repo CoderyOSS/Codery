@@ -3,8 +3,8 @@
 You are a coding agent inside the Codery (github.com/CoderyOSS/Codery) **paseo
 container** on the VPS, spawned by the Paseo daemon (the iPad Paseo app talks
 to this daemon; it owns the agent processes it launches). You have MCPs for
-running AI workflows (`codery`), GitHub App operations (`github-app`), and
-browser automation (`playwright`).
+container stack operations (`dockhand`), GitHub App operations (`github-app`),
+and browser automation (`playwright`).
 
 ## Your Capabilities
 
@@ -26,22 +26,24 @@ git ls-remote https://github.com/CoderyOSS/Codery HEAD && echo AUTH-OK
 
 ## Environment
 
-Host runs Caddy, Tailscale, supervisord. Shares host with the **apps
-container** (project web servers) and the **playwright container** (the only
-place Chromium runs).
+Host runs Zoraxy (routing), Tailscale (the perimeter), supervisord, and
+Dockhand (stack management). All HTTP services live in Dockhand stacks
+attached to the shared `codery-net` docker network; Zoraxy proxies to them
+by container name — HTTP services need no host port publishes.
 
 ### What you cannot do
-- Cannot modify Caddy, Tailscale, or host supervisor config directly
+- Cannot modify Zoraxy, Tailscale, or host supervisor config directly
 - Cannot access the Docker socket — container control goes through the
-  allowlist-gated `codery.*` MCP tools
-- Route and infrastructure changes go through the Codery repo (push to `main`)
+  `dockhand.*` MCP tools
+- Route changes happen in the Zoraxy UI/API — request them from the user,
+  never invent routing
 
 ### Container hygiene (hard-won rules)
 - **Never run `opencode` as root inside this container.** The image's default
   `docker exec` user is root; a root opencode run creates root-owned state
   under `~/.local/state/opencode/`, and every paseo-user agent then fails to
   load MCPs with EACCES on `locks/` (incident 2026-10-19). Always exec as the
-  paseo user: `docker exec -it -u paseo codery-paseo-<color> bash`
+  paseo user: `docker exec -it -u paseo paseo bash`
 - **Never `npm install -g` or in-place upgrade opencode** — upgrades happen
   by rebuilding the image, never inside a running container.
 - Provider credentials live in `~/.local/share/opencode/auth.json` (host bind
@@ -52,47 +54,38 @@ place Chromium runs).
 
 ## The Codery System (Infrastructure)
 
-Repo: `CoderyOSS/Codery` — at `/workspace/Codery`. Controls the entire
-infrastructure: containers, blue/green deploys, Caddy routing.
+Repo: `CoderyOSS/Codery` — at `/workspace/Codery`. Holds stack definitions,
+the host layer, docs/runbooks, and THIS container's agent config. The
+codery-ci deploy/routing machinery is DISABLED (retained on the host for
+revert) — do not try to use it.
 
 | Path | Purpose |
 |---|---|
-| `containers/<name>/Dockerfile` | Service images |
-| `containers/<name>/service.yml` | Declarative service config (ports, volumes, env) |
+| `containers/devtools/compose.yml` | paseo + apps + opendesign + playwright stack (canonical mirror; deployed copy in Dockhand) |
+| `containers/zoraxy/compose.yml` | Zoraxy routing edge |
+| `containers/apps/Dockerfile` | apps image (tooladd, tools-manifest, s6) |
 | `containers/paseo/opencode-config/` | THIS container's global opencode config (git-managed) |
-| `proxy/` | Host scripts + supervisord configs (Caddy, Tailscale, dns-update) |
-| `system/orchestrator/` | CoderyCI source — Rust binary for blue/green deploys |
-| `.github/workflows/` | CI/CD pipelines (manual-only) |
+| `containers/apps/tools-manifest.txt` | runtime-installed dev tools record |
+| `proxy/` | Host scripts + supervisord configs (Zoraxy mgmt, Tailscale, dns-update) |
+| `docs/runbook/openminis-migration.md` | the operating manual (REV2) |
 
-### Service declarations & blue/green
+### Stacks and hosting
 
-Each service is declared in `containers/<name>/service.yml` and synced to
-`/opt/codery/services/<name>.yml` on the VPS before each deploy — edit both
-(repo copy is the source of truth). Changes take effect on the next
-`deploy`/`recreate`. Deploys are blue/green: `codery-ci build <svc> <tag>`
-then `codery-ci deploy <svc> <tag>` (or `deploy-preview` + `cutover` to stage
-first). Pushing to `main` NEVER deploys — pipelines are manual
-`workflow_dispatch`. Prefer local builds via the codery MCP.
+Everything HTTP runs in Dockhand stacks on the shared `codery-net` network;
+**Zoraxy** proxies subdomains to container names — no host port publishes for
+HTTP. Stacks: `devtools` (paseo, apps, opendesign, playwright), `remi_backend`,
+`carta` (carta-client/design/cbe1). Project stacks keep their compose in the
+project root; infra stacks live in `/opt/codery/stacks/`.
 
-## Codery MCP
+The apps container still runs a few REMI helper processes (qdrant/graph/bolt
+proxies, ideas, booksearch) bound to internal ports 8123-8128 — Zoraxy
+proxy-hosts target them as `apps:<port>`.
 
-Pre-configured in the global opencode config (`~/.config/opencode/` on
-`opencode.json`, repo-managed at `containers/paseo/opencode-config/`). Use
-`codery.*` tools directly — no setup needed.
+### Dev tools
 
-| Tool | What it does |
-|---|---|
-| `get_status` | Active color + deployed SHA per service |
-| `get_routes` | Routing: subdomain -> host port -> container port |
-| `list_images` | Locally cached images per service (before rollback) |
-| `rollback` | Deploy previous cached image via full blue/green |
-| `reload_routes` | Regenerate Caddyfile + nginx, reload in place |
-| `run_preflight` | supervisord / Tailscale / Caddy admin health |
-| `add_app` / `remove_app` / `restart_app` / `list_apps` / `get_app_status` | Hot-manage apps in the apps container |
-
-To restart an app: `restart_app name='myapp'` (s6 respawns it; route and
-config intact). **NEVER remove_app + add_app to restart** — that drops and
-recreates the route.
+Install CLI tools at runtime — no image rebuild:
+`ssh gem@apps tooladd <nixpkgs-pkg>` (persists across redeploys; manifest
+auto-updated in `containers/apps/tools-manifest.txt`).
 
 ---
 

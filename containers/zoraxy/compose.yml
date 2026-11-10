@@ -1,0 +1,49 @@
+# zoraxy — the routing edge (Zoraxy end-state).
+#
+# Two operating modes, selected by which ports block is active:
+#
+#   SPIKE (current): inbound on ${TAILNET_IP}:8443 — runs alongside
+#   production Caddy (:443) with zero exposure. Pilot vhosts are tested via
+#   Host-header requests against :8443.
+#
+#   CUTOVER: swap 8443 -> 443 and add 80 (redirect-only), then disable the
+#   host Caddy in supervisord (runbook phase B). The tailnet-IP host-IP
+#   prefix means NOTHING binds on the public interface; no firewall needed.
+#   Host sysctl net.ipv4.ip_nonlocal_bind=1 (/etc/sysctl.d/) covers the
+#   boot-order race where docker starts before tailscale0 has the IP.
+#
+# Management UI on ${TAILNET_IP}:8000 — tailnet-only, always available even
+# if Zoraxy's own proxy config breaks (it is not proxied through itself).
+#
+# Joins codery-net: proxy-host upstreams are container names/aliases
+# (paseo:6767, apps:8124, dockhand:3000, remi_backend-frontend-1:4321, ...) —
+# HTTP services need no host port publishes at all.
+name: zoraxy
+
+services:
+  zoraxy:
+    image: zoraxydocker/zoraxy:latest
+    container_name: zoraxy
+    restart: unless-stopped
+    ports:
+      - "${TAILNET_IP:?set TAILNET_IP in stack .env}:443:443"
+      - "${TAILNET_IP}:80:80"
+      - "${TAILNET_IP}:8000:8000"
+      # CUTOVER: replace the 8443 line with these two, then disable host Caddy:
+      # - "${TAILNET_IP}:443:443"
+      # - "${TAILNET_IP}:80:80"
+    volumes:
+      - zoraxy_state:/root/zoraxy
+    environment:
+      # FastGC / behavior knobs left at defaults; first-run account setup
+      # happens in the UI on first open (runbook phase A).
+      TZ: America/Los_Angeles
+    networks:
+      codery-net: {}
+
+volumes:
+  zoraxy_state:
+
+networks:
+  codery-net:
+    external: true

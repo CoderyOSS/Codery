@@ -206,11 +206,16 @@ USER root
 
 # --- Backwards-compat symlinks ---
 # Ensure nix-installed binaries are at expected paths.
+# mosh-server/mosh-client: sshd runs the remote command (mosh bootstrap) with
+# its compiled-in PATH — no nix profile bin — so mosh must be reachable from
+# FHS locations, same reason sshd/nginx are symlinked here.
 RUN mkdir -p /usr/sbin /usr/bin /usr/local/bin /usr/local/sbin \
               /usr/lib/openssh /var/log/nginx /etc/nginx && \
     ln -sf "$(which sshd)"     /usr/sbin/sshd    && \
     ln -sf "$(which nginx)"    /usr/sbin/nginx   && \
     ln -sf "$(which ssh-agent)" /usr/bin/ssh-agent && \
+    ln -sf "$(which mosh-server)" /usr/local/bin/mosh-server && \
+    ln -sf "$(which mosh-client)" /usr/local/bin/mosh-client && \
     ln -sf "$(which nvim)"     /usr/local/bin/vim && \
     SSHD_PREFIX="$(dirname "$(dirname "$(readlink -f "$(which sshd)")")")" && \
     NGINX_PREFIX="$(dirname "$(dirname "$(readlink -f "$(which nginx)")")")" && \
@@ -222,6 +227,11 @@ RUN mkdir -p /usr/sbin /usr/bin /usr/local/bin /usr/local/sbin \
 # --- Helper scripts ---
 COPY containers/apps/scripts/github-app-token.sh /usr/local/bin/github-app-token
 COPY containers/apps/scripts/ssh-agent-add-keys.sh /usr/local/bin/ssh-agent-add-keys.sh
+# tooladd: runtime dev-tool installs into the persistent "tools" nix profile
+# (/nix is a named volume — see service.yml). Manifest auto-commit; agents
+# use `ssh gem@apps tooladd <pkg>`. tools-replay: boot oneshot manifest replay.
+COPY containers/apps/scripts/tooladd /usr/local/bin/tooladd
+COPY containers/apps/scripts/tools-replay.sh /usr/local/bin/tools-replay
 # Locale loader sourced by every s6-rc run script (s6-rc doesn't pass container
 # ENV to longruns). Pulls LANG/LC_ALL/ELIXIR_ERL_OPTIONS/LOCALE_ARCHIVE from
 # /run/s6/container_environment so beam.smp gets +fnu and Elixir stops warning.
@@ -230,29 +240,42 @@ COPY containers/apps/scripts/s6-load-locale-env.sh /usr/local/bin/s6-load-locale
 # (/etc/s6-overlay/apps.d, rendered from SQLite by codery-ci) into /run/service
 # at every boot — restores runtime apps after restarts and blue/green redeploys.
 COPY containers/apps/scripts/runtime-apps-restore.sh /usr/local/bin/runtime-apps-restore
-RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.sh /usr/local/bin/s6-load-locale-env /usr/local/bin/runtime-apps-restore
+RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.sh /usr/local/bin/tooladd /usr/local/bin/tools-replay /usr/local/bin/s6-load-locale-env /usr/local/bin/runtime-apps-restore
 
-# GitHub host key for git operations.
-RUN ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
+# --- Persistent tools profile on PATH (login shells + tmux) ---
+# /nix/var/nix/profiles/tools/bin = runtime-installed dev tools (tooladd).
+RUN mkdir -p /etc/profile.d \
+    && printf '#! /bin/sh\nexport PATH="/nix/var/nix/profiles/tools/bin:$PATH"\n' > /etc/profile.d/zz-tools.sh \
+    && chmod +x /etc/profile.d/zz-tools.sh
 
 # --- SSH server ---
 COPY containers/apps/sshd_config /etc/ssh/sshd_config
 RUN mkdir -p /run/sshd /etc/ssh/authorized_keys
 # authorized_keys is host-managed: service.yml bind-mounts
 # /opt/codery/ssh/authorized_keys -> /run/secrets/authorized_keys (append
-# a device pubkey on the host; no rebuild needed).
-RUN chmod 644 /etc/ssh/authorized_keys/gem
+# a device pubkey on the host; no rebuild needed). Nothing is baked into
+# the image itself.
+
+# GitHub host key for git operations (must run after /etc/ssh exists).
+RUN mkdir -p /etc/ssh && ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
 
 # --- Nginx ---
 COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /etc/nginx/conf.d
 
 # --- s6-overlay (process supervision) ---
+# Retrying curl, not ADD: GitHub's release CDN 504s routinely and ADD's
+# single-shot fetch fails the whole build (observed 2026-11-08, fra edge,
+# full outage ~30 min — retries ride out short blips; a full outage still
+# fails the build, re-run later).
 ARG S6_OVERLAY_VERSION=3.2.3.2
-ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp
-RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz
-ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz /tmp
-RUN tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz
+RUN for f in noarch x86_64; do \
+      curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+        -o /tmp/s6-overlay-$f.tar.xz \
+        "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-$f.tar.xz" \
+      && tar -C / -Jxf /tmp/s6-overlay-$f.tar.xz \
+      && rm /tmp/s6-overlay-$f.tar.xz; \
+    done
 
 # --- s6-rc service definitions ---
 COPY containers/apps/s6-overlay/ /etc/s6-overlay/

@@ -69,6 +69,11 @@
         # --- Infra used by entrypoint / s6-managed services ---
         nginx
         openssh
+        # mosh: mosh-server for Blink/iSH mosh clients. Client-facing UDP
+        # port is pinned to 61000; the codery-ci daemon's UDP relay forwards
+        # tailnet :61000/udp to the active color container's IP (no Docker
+        # publish — survives blue/green swaps).
+        mosh
         git
         git-lfs
         glow

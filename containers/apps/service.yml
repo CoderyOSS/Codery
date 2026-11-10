@@ -12,6 +12,16 @@ ports:
     # Tailnet-only: published port and the fixed-port proxy listener bind the
     # host Tailscale IP.
     bind: tailnet
+  - name: mosh
+    container_port: 61000
+    fixed_port: 61000
+    # UDP relay: the codery-ci daemon binds tailnet :61000/udp and forwards
+    # datagrams to the active color container's IP. Never Docker-published —
+    # the client-facing port survives blue/green swaps. mosh-server pins this
+    # port inside the container (Blink mosh-server command: `mosh-server new
+    # -p 61000`).
+    protocol: udp
+    bind: tailnet
 
 port_range:
   container_start: 8000
@@ -27,6 +37,26 @@ health_check:
   timeout_secs: 90
 
 volumes:
+  # Persistent nix store + profiles (2026-11 runtime-ops migration). Docker
+  # auto-seeds an empty named volume from the image's /nix on first boot;
+  # runtime `tooladd` installs then survive blue/green swaps and image
+  # rebuilds. Deploy-time sync of new image store paths:
+  # proxy/scripts/nix-store-sync.sh (runbook step before apps deploys).
+  - type: named
+    name: codery-apps-nix
+    container: /nix
+  # Persistent SSH host keys — stable fingerprints across blue/green swaps
+  # and recreates (parity with paseo). Mounted over the whole /etc/ssh:
+  # Docker auto-seeds the volume from the image's /etc/ssh on first mount,
+  # then the boot oneshot's `ssh-keygen -A` writes host keys INTO the
+  # volume, so they survive every subsequent swap. Trade-off: sshd_config /
+  # moduli / authorized_keys dir are volume-carried after first boot —
+  # future image changes to those need a one-time volume reseed (runbook).
+  # Without this, every deploy rotates host keys and breaks all clients'
+  # known_hosts (observed 2026-11-08 on the nix-volume cutover).
+  - type: named
+    name: codery-apps-ssh-host-keys
+    container: /etc/ssh
   - type: bind
     host: "${SSH_DIR}"
     container: /home/gem/.ssh
