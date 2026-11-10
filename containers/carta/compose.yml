@@ -75,3 +75,7 @@ services:
 
 # No ports: everything is reached through Zoraxy via codery-net.
 # The stack's own default network exists implicitly for intra-stack traffic.
+
+networks:
+  codery-net:
+    external: true
