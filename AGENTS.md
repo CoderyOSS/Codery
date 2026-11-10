@@ -13,6 +13,22 @@ AGENTS.md). Read it before making any changes to this repo.
 
 ## What This Repo Is
 
+**Identity & push rules.** This checkout is the **public Codery repo** — push
+only to `CoderyOSS/Codery` (`github-push <branch> CoderyOSS/Codery`), and
+verify pushes with `git ls-remote https://github.com/CoderyOSS/Codery.git
+<ref>` — always against the URL, never against a local remote. Instance-
+specific work (deployment inventory, personal projects) belongs in a separate
+private instance repo with its own checkout — never here. The bundled
+`github-push` never modifies git remote configuration (it pushes to an
+explicit URL); if you ever find a remote pointing at the wrong repo, fix it
+with `git remote set-url`.
+
+**Extension points.** Everything deployment-specific lives outside Codery's
+source tree: hosted projects in `/opt/codery/projects` (bind-mounted into the
+tool containers), stack configuration in `/opt/codery/stacks/<name>/.env`.
+Those paths are deployment conventions, not product source — a fork is never
+needed to run your own instance.
+
 - **Stack definitions** — `stacks/core/` (dockhand, zoraxy) and
   `stacks/tools/devtools/`; canonical mirrors of the deployed copies in
   `/opt/codery/stacks/`. Never let them diverge: repo = record, stacks dir =

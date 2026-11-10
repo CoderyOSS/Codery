@@ -12,6 +12,11 @@ for the agent contract see [AGENTS.md](AGENTS.md).
 | **Tools** | paseo, apps, playwright, opendesign, dbgate | `stacks/tools/devtools/`, `images/` | Dockhand (`devtools` stack) | `/opt/codery/data/*` + named volumes |
 | **Projects** | your applications | project repos (compose in project root) | Dockhand (per-project stacks) | project-scoped volumes |
 
+**Extension points** (why no fork is ever needed): hosted projects live in
+`/opt/codery/projects` — outside this source tree; per-stack configuration
+lives in `/opt/codery/stacks/<name>/.env` (images, `TAILNET_IP`,
+`COMPOSE_PROFILES`, tokens). A deployment = Codery product + external config.
+
 **Layer tests** (apply before adding anything):
 
 - management / routing / perimeter → **core** — stock upstream image, no custom
