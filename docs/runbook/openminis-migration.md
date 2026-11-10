@@ -117,6 +117,13 @@ codery-ci reload-routes                              # CLI works even with daemo
 Verify: ssh -p 2222 and -p 3333 (host keys rotate ONE final time — /etc/ssh
 volumes make them permanent), mosh, Paseo app connects, ideas/qdrant 200 (boot
 oneshot links runtime apps), `docker exec apps tooladd cloc` still present.
+**Relay replacement note:** the daemon's :3333 TCP proxy and :61000 UDP relay
+are replaced by native Docker publishes (kernel DNAT to the container) — no
+tunnel software remains. One-time host prep BEFORE phase C:
+`echo 'net.ipv4.ip_nonlocal_bind = 1' > /etc/sysctl.d/99-tailnet-binds.conf
+&& sysctl --system` (lets the tailnet-IP publishes bind before tailscale0
+exists at boot — permanently fixes the playbook boot-order trap for every
+tailnet-IP publish, Zoraxy included).
 Then set codery-ci + codery-ci-mcp `autostart=false` in their supervisor confs
 (disable), and remove the `codery` MCP entry from
 `containers/paseo/opencode-config/opencode.json` (commit on the branch).
