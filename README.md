@@ -13,7 +13,7 @@ hosts your actual code projects side by side.
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  PROJECTS — your code                                            │
-│  REMI, Carta, … — each project is a compose stack in its repo    │
+│  each project is a compose stack living in its own repo          │
 ├──────────────────────────────────────────────────────────────────┤
 │  TOOLS — the developer userland (opt-in)                         │
 │  paseo (agent daemon) · apps (terminal: nvchad, tmux, mosh)      │

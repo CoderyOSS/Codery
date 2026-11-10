@@ -59,8 +59,8 @@ Repo: `CoderyOSS/Codery` — at `/workspace/Codery`. Three layers, do not
 cross them: **core** (dockhand, zoraxy, tailscale — `stacks/core/`, `host/`),
 **tools** (paseo, apps, playwright, opendesign, dbgate — `stacks/tools/
 devtools/`, `images/`; opt-in via `COMPOSE_PROFILES` in the stack `.env`),
-**projects** (REMI, Carta — compose in each project repo). Core runs stock
-images; tools are Codery-built. The codery-ci machinery is DISABLED (retained
+**projects** (your applications — compose in each project repo). Core runs
+stock images; tools are Codery-built. The codery-ci machinery is DISABLED (retained
 on the host for revert) — do not try to use it.
 
 | Path | Purpose |
@@ -77,16 +77,16 @@ on the host for revert) — do not try to use it.
 Everything HTTP runs in Dockhand stacks on the shared `codery-net` network;
 **Zoraxy** proxies subdomains to container names — no host port publishes for
 HTTP. Stacks: `devtools` (paseo, apps always on; playwright/opendesign/dbgate
-opt-in), `remi_backend`, `carta`. Project stacks keep their compose in the
+opt-in) plus one stack per project. Project stacks keep their compose in the
 project root; core/tool stack dirs live in `/opt/codery/stacks/`. Once the
 visibility-mount deploy lands, you can READ stack truth at
 `/opt/codery/stacks` and tool data at `/opt/codery/data` (both read-only,
 mounts may not exist yet); the `.env` is never visible to you.
 
-Known layer violation (migration debt, documented): the apps container still
-runs REMI helper processes (qdrant/graph/bolt proxies, ideas, booksearch) on
-internal ports 8123-8128 — Zoraxy targets them as `apps:<port>`. Scheduled to
-move into the remi_backend stack.
+Legacy note: in some deployments the apps container still carries
+project-specific helper processes — a layer violation (project services belong
+in the project stack). Migrate them; see the instance docs on the private
+overlay branch if present.
 
 ### Dev tools
 

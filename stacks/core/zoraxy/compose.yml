@@ -1,7 +1,7 @@
 # zoraxy — CORE layer: the routing edge.
 #
-# Terminates TLS for *.rancidgrandmas.online (wildcard cert via Cloudflare
-# DNS-01), proxies every vhost to codery-net container names — HTTP services
+# Terminates TLS for *.<your-domain> (wildcard cert via Cloudflare DNS-01),
+# proxies every vhost to codery-net container names — HTTP services
 # need no host port publishes. Also runs the uptime monitor. Everything binds
 # the tailnet IP only; the public interface stays closed (no firewall needed).
 #

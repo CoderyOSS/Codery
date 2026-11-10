@@ -6,7 +6,7 @@ AGENTS.md). Read it before making any changes to this repo.
 > **REV3 (2026-11-10) — three-layer layout.** Codery is an OS for developers:
 > **core** (Dockhand, Zoraxy, Tailscale, host layer) · **tools** (paseo, apps,
 > playwright, opendesign, dbgate — opt-in via compose profiles) · **projects**
-> (REMI, Carta — stacks in their own repos). The codery-ci binary is disabled
+> (your applications — one stack per project repo). The codery-ci binary is disabled
 > on the host (revert path retained); routing is Zoraxy, stacks run under
 > Dockhand. Fresh installs: `RUNBOOK.md`. History: `docs/runbook/`.
 
@@ -31,7 +31,7 @@ AGENTS.md). Read it before making any changes to this repo.
 |---|---|---|---|
 | Core | dockhand, zoraxy, tailscale, host layer | `stacks/core/`, `host/` | named volumes + host config |
 | Tools | paseo, apps, playwright, opendesign, dbgate | `stacks/tools/devtools/`, `images/` | `/opt/codery/data/<tool>` + volumes |
-| Projects | REMI, Carta, … | project repos (compose at repo root) | project volumes |
+| Projects | your applications | project repos (compose at repo root) | project volumes |
 
 Rules:
 
@@ -50,7 +50,7 @@ Rules:
 | Layer | Runs | Managed by |
 |---|---|---|
 | Router | **Zoraxy** (tailnet-IP `:443/:80`, mgmt `:8000`) — wildcard TLS via Cloudflare DNS-01, vhosts, uptime monitor | Zoraxy UI/API (Rob); agents request, never edit |
-| Stacks | **Dockhand**: `devtools`, `remi_backend`, `carta` — dockhand itself is host-side compose, never self-registered | Dockhand UI/API + `dockhand.*` agent MCP |
+| Stacks | **Dockhand**: `devtools` + one stack per project — dockhand itself is host-side compose, never self-registered | Dockhand UI/API + `dockhand.*` agent MCP |
 | Host | Tailscale, supervisord (dns-update, tailscale), sysctl tailnet binds | `host/` + RUNBOOK |
 
 **Network fabric**: `codery-net` (external). Every stack attaches; Zoraxy

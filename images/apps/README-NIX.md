@@ -143,9 +143,8 @@ Fully wired through the codery-ci MCP tools — no manual steps needed:
 
 **Persistence:** the `runtime-apps` oneshot (in the user bundle) re-links every
 bundle in `/etc/s6-overlay/apps.d/` at boot, so runtime apps survive container
-restarts and blue/green redeploys. Image-baked apps (cartaclient, cbe1, design)
-are marked `source='build'` in SQLite — routed, but never process-managed by
-the orchestrator.
+restarts and stack redeploys. Image-baked apps are marked `source='build'` in
+SQLite — routed, but never process-managed by the orchestrator.
 
 Manual equivalent (debugging only): `s6-svlink /run/service /etc/s6-overlay/apps.d/<name>`
 to start, `s6-svunlink /run/service <name>` to stop.

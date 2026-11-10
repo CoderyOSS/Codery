@@ -10,7 +10,7 @@ for the agent contract see [AGENTS.md](AGENTS.md).
 |---|---|---|---|---|
 | **Core** | Dockhand, Zoraxy, Tailscale, host layer | `stacks/core/`, `host/` | host-side compose / Dockhand | `codery-dockhand-data`, `zoraxy_state` volumes, host config |
 | **Tools** | paseo, apps, playwright, opendesign, dbgate | `stacks/tools/devtools/`, `images/` | Dockhand (`devtools` stack) | `/opt/codery/data/*` + named volumes |
-| **Projects** | REMI, Carta, … | project repos (compose in project root) | Dockhand (per-project stacks) | project-scoped volumes |
+| **Projects** | your applications | project repos (compose in project root) | Dockhand (per-project stacks) | project-scoped volumes |
 
 **Layer tests** (apply before adding anything):
 
@@ -39,13 +39,13 @@ Full tree documentation: `/opt/codery/README.md` on the host.
 
 ```
 iPad / dev machines (tailnet)
-   │  *.rancidgrandmas.online → tailscale IP
+   │  *.<your-domain> → tailscale IP
    ▼
 Zoraxy :443 (wildcard TLS, Cloudflare DNS-01)
    │  proxy-host → codery-net container names (no host ports for HTTP)
    ▼
 paseo:6767 · apps:<port> · opendesign:7456 · dbgate:3000
-remi_backend-frontend:4321 · carta-* · dockhand:3000
+webapp:3000 · api:8000 · dockhand:3000 — whatever your projects run
 ```
 
 Only SSH, mosh, and transition publishes touch host ports

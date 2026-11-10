@@ -26,7 +26,7 @@ re-run it, never skip.
 
 **Operator decisions to collect before starting** (ask once):
 
-- domain name (default: `rancidgrandmas.online`)
+- domain name (default: `example.com`)
 - which opt-in tools to deploy: `COMPOSE_PROFILES` list (default `browser,db`)
 
 ## Phase 1 — CORE

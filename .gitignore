@@ -18,3 +18,6 @@ skills-lock.json
 system/launchy/target/
 system/orchestrator/ui/dist/
 system/orchestrator/ui/node_modules/
+
+.superpowers/
+.opencode/

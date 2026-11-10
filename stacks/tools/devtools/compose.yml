@@ -4,12 +4,12 @@
 # list (COMPOSE_PROFILES in this stack's .env — add or remove a name, then
 # Deploy):
 #
-#   always   paseo      coding-agent daemon (code.rancidgrandmas.online,
+#   always   paseo      coding-agent daemon (code.<domain>, ssh :2222)
 #                        ssh :2222)
 #            apps       terminal environment (ssh :3333, mosh :61000/udp)
 #   browser  playwright headless browser backend — agent browser automation
-#   design   opendesign design workspace (opendesign.rancidgrandmas.online)
-#   db       dbgate     database client (dbgate.rancidgrandmas.online)
+#   design   opendesign design workspace (opendesign.<domain>)
+#   db       dbgate     database client (dbgate.<domain>)
 #
 # Degrades gracefully: a tool that isn't in the list simply doesn't exist —
 # paseo's browser tools fail fast, opendesign previews error until `browser`
@@ -34,7 +34,7 @@ services:
     env_file:
       - /opt/codery/.env
     environment:
-      PASEO_HOSTNAMES: "code.rancidgrandmas.online"
+      PASEO_HOSTNAMES: "code.${DOMAIN_NAME:?set DOMAIN_NAME in stack .env}"
       PASEO_RELAY_ENABLED: "false"
       PASEO_WEB_UI_ENABLED: "false"
       GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
@@ -118,7 +118,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=192
       OD_BIND_HOST: 0.0.0.0
       OD_PORT: "7456"
-      OD_ALLOWED_ORIGINS: https://opendesign.rancidgrandmas.online
+      OD_ALLOWED_ORIGINS: https://opendesign.${DOMAIN_NAME:?set DOMAIN_NAME in stack .env}
       # daemon Bearer auth off: the browser never receives a WWW-Authenticate
       # challenge, so with auth on the SPA silently 401s and renders the
       # onboarding page as a false-fresh. Boundary = Zoraxy edge + tailnet.
@@ -138,13 +138,13 @@ services:
     container_name: dbgate
     restart: unless-stopped
     profiles: [db]
-    environment:
-      # pre-provisioned connections; configure more in the UI (they persist
-      # via the bind mount). REMI Mongo is authless on the internal network.
-      CONNECTIONS: remi-mongo
-      LABEL_remi-mongo: REMI MongoDB
-      URL_remi-mongo: mongodb://mongo:27017
-      ENGINE_remi-mongo: mongo@dbgate-plugin-mongo
+    environment: {}
+      # Pre-provision connections here if you want them ready on first boot
+      # (else configure in the UI — both persist via the bind mount):
+      # CONNECTIONS: my-mongo
+      # LABEL_my-mongo: My MongoDB
+      # URL_my-mongo: mongodb://mongo:27017
+      # ENGINE_my-mongo: mongo@dbgate-plugin-mongo
     volumes:
       - /opt/codery/data/dbgate:/root/.dbgate
     networks:
