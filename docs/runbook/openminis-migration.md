@@ -69,9 +69,11 @@ reads Docker containers).
   `/opt/codery/.env`) fails the whole deploy with `env file ... not found`.
   Volume binds are unaffected (the docker engine resolves those on the host).
   Fix in place 2026-11-10: dockhand container gained
-  `/opt/codery/.env:/opt/codery/.env:ro`. Until it lands, Dockhand cannot
-  deploy the `devtools` stack — use host-side `docker compose --env-file` or
-  fix the mount first.
+  `/opt/codery/.env:/opt/codery/.env:ro` (same recreate also dropped the
+  blue/green suffix — the container is now plain **`dockhand`**; state volume
+  `codery-dockhand-data` kept unchanged so API tokens survive). Until it
+  lands, Dockhand cannot deploy the `devtools` stack — use host-side
+  `docker compose --env-file` or fix the mount first.
 - **OpenDesign auth**: daemon Bearer auth is OFF (`OD_DISABLE_API_AUTH=1`).
   The daemon never sends `WWW-Authenticate` on 401, so with auth on the SPA
   silently 401s every call and renders the onboarding page as a false-fresh
