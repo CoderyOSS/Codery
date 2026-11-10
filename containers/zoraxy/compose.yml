@@ -26,7 +26,8 @@ services:
     container_name: zoraxy
     restart: unless-stopped
     ports:
-      - "${TAILNET_IP:?set TAILNET_IP in stack .env}:8443:443"
+      - "${TAILNET_IP:?set TAILNET_IP in stack .env}:443:443"
+      - "${TAILNET_IP}:80:80"
       - "${TAILNET_IP}:8000:8000"
       # CUTOVER: replace the 8443 line with these two, then disable host Caddy:
       # - "${TAILNET_IP}:443:443"
