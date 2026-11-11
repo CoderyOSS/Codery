@@ -3,7 +3,13 @@
 # Usage:
 #   github-push                          # push current branch, repo from origin URL
 #   github-push <branch-or-tag>          # push named ref, repo from origin URL
-#   github-push <branch-or-tag> <org/repo>  # explicit repo — USE THIS when auto-detection fails
+#   github-push <branch-or-tag> <org/repo>  # explicit repo
+#
+# This script NEVER modifies git remote configuration. It pushes to an
+# explicit URL built from the target repo, leaving `origin` (and every other
+# remote) exactly as found. Verification after a push: `git ls-remote
+# https://github.com/<org>/<repo>.git <ref>` — always against the URL, never
+# against a local remote.
 #
 # If push fails with a permissions/installation error, the token was likely
 # generated for the wrong GitHub App installation. Do NOT keep retrying —
@@ -25,17 +31,16 @@ hint() {
 BRANCH="${1:-$(git branch --show-current 2>/dev/null || echo main)}"
 EXPLICIT_REPO="${2:-${GITHUB_REPO:-}}"
 
-REMOTE_URL=$(git remote get-url origin 2>/dev/null) || true
 if [ -n "$EXPLICIT_REPO" ]; then
   REPO="$EXPLICIT_REPO"
   echo "Using explicit repo: $REPO"
-elif [ -n "$REMOTE_URL" ]; then
-  REPO=$(echo "$REMOTE_URL" | sed -E 's|https://(x-access-token:[^@]+@)?github.com/||; s|git@github.com:||; s|\.git$||')
 else
-  die "No git remote 'origin' and no explicit <org/repo> given. Usage: github-push <branch> <org/repo>"
+  REMOTE_URL=$(git remote get-url origin 2>/dev/null) || true
+  [ -n "$REMOTE_URL" ] || die "No git remote 'origin' and no explicit <org/repo> given. Usage: github-push <branch> <org/repo>"
+  REPO=$(echo "$REMOTE_URL" | sed -E 's|https://(x-access-token:[^@]+@)?github.com/||; s|git@github.com:||; s|\.git$||')
+  [ -n "$REPO" ] || die "Could not parse repo from remote URL: $REMOTE_URL — pass it explicitly: github-push $BRANCH <org/repo>"
+  echo "Using origin: $REPO"
 fi
-
-[ -n "$REPO" ] || die "Could not parse repo from remote URL: $REMOTE_URL — pass it explicitly: github-push $BRANCH <org/repo>"
 
 REPO_OWNER=$(echo "$REPO" | cut -d'/' -f1)
 
@@ -46,12 +51,13 @@ if ! TOKEN=$(github-app-token "" "$REPO_OWNER"); then
 fi
 [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "Error: empty token returned" >&2; hint; exit 1; }
 
-git remote set-url origin "https://x-access-token:${TOKEN}@github.com/${REPO}.git"
+PUSH_URL="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
 set +e
-git push origin "$BRANCH"
+OUT=$(git push "$PUSH_URL" "$BRANCH" 2>&1)
 RC=$?
 set -e
-git remote set-url origin "https://github.com/${REPO}.git"
+# redact the credential from any git output before printing
+echo "$OUT" | sed "s|x-access-token:[^@]*@|x-access-token:***@|g"
 
 if [ $RC -ne 0 ]; then
   echo "Error: push failed for ${REPO} (ref ${BRANCH})" >&2
