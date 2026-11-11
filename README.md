@@ -5,7 +5,7 @@
 > **AI agents (OpenMINIS-class):** start with [RUNBOOK.md](RUNBOOK.md) — it is
 > the operating guide for a Codery VPS: install, setup, debugging, maintenance.
 
-**Codery turns a VPS into an operating system for developers.** A Tailscale-
+**Codery is a coding platform for your private VPS.** A Tailscale-
 perimetered homelab: Docker provides the runtime, Dockhand the management
 plane, Zoraxy the routing edge — and on top of them, a developer toolchain
 (agent daemon, terminal environment, design workspace, database client) that

@@ -146,12 +146,42 @@ loads the `dockhand.*` MCP (`dockhand_list_stacks` returns the stacks).
 Add Zoraxy proxy-hosts for the enabled tools (code., opendesign., dbgate. →
 container:port from the compose header).
 
-## Phase 3 — PROJECTS
+## Phase 3 — PROJECTS (pulling in your code)
 
-Per project: clone into `/opt/codery/projects/<name>`, register its root
-`docker-compose.yml` as a Dockhand stack, deploy, add Zoraxy routes. Projects
-keep their own secrets in their own repos. Gate per project: route answers
-through Zoraxy with TLS.
+Each personal project lives in its own git repo and carries its compose file
+at the repo root (the Codery convention). Adding one to the instance:
+
+1. **Clone into the shared projects tree** — `/opt/codery/projects/<name>`.
+   Two paths, pick one:
+   - **Via paseo (recommended for private repos):** after Phase 2 the GitHub
+     App credential helper in paseo covers the configured repos. In an agent
+     session: `git clone https://github.com/<you>/<project>.git
+     /workspace/<project>` (paseo sees the tree at `/workspace`).
+   - **As the operator:** your own machine or the apps terminal, with your
+     own GitHub auth, cloning to the same path.
+2. **Confirm the compose file** — `<project>/docker-compose.yml` at the root.
+   No compose file means project work comes first; nothing to deploy.
+3. **Attach reachable services to `codery-net`** — any service a browser,
+   agent, or tool must hit declares the external `codery-net` network (the
+   pattern every project compose shows). Databases conventionally join so
+   dbgate and agents can reach them; purely-internal services can stay on
+   the stack's default network.
+4. **Secrets stay in the project** — e.g. `<project>/backend/.env`. Never
+   move them into `/opt/codery/.env`. Create any non-committed env files the
+   project's docs require.
+5. **Register in Dockhand** — Stacks → new stack → point it at the compose
+   file's absolute path (`/opt/codery/projects/<name>/docker-compose.yml`);
+   Dockhand runs it from the project dir. Fill in any stack variables it
+   asks for; Deploy — with *build* enabled if the compose has `build:`
+   sections.
+6. **Route it** (if it serves HTTP) — Zoraxy UI → proxy host
+   `<name>.<domain>` → `container:port`. Wildcard TLS already covers it.
+7. **Gate per project:** containers healthy in Dockhand, the route answers
+   through Zoraxy with TLS, and any databases show up in dbgate.
+
+**Updating a project later:** `git pull` in the project tree → Dockhand
+Deploy. Config-hash based: only changed services recreate; enable build for
+image-rebuilding projects.
 
 ## Handoff checklist
 
@@ -167,6 +197,7 @@ through Zoraxy with TLS.
 
 | Task | Procedure |
 |---|---|
+| Add a project | Part I Phase 3 — clone into `/opt/codery/projects/`, register the compose in Dockhand, route in Zoraxy |
 | Change a stack service | Edit the stack compose — repo copy AND `/opt/codery/stacks/<name>/compose.yml` (never let them diverge) → Dockhand **Deploy** (or `POST /api/stacks/<name>/deploy`) |
 | Enable/disable a tool | Edit `COMPOSE_PROFILES` in the stack `.env` → Deploy. Removing a tool leaves its container as an orphan — remove it once in the Dockhand UI |
 | Add a subdomain | Zoraxy UI → proxy host (subdomain → `container:port` on codery-net) |
