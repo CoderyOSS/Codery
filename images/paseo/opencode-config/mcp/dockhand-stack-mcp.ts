@@ -68,13 +68,14 @@ const TOOLS = [
   ),
   tool(
     "dockhand_stack_sync",
-    "Redeploy a stack from its compose file on disk (Dockhand deploy: pull + up). Use after editing the project's docker-compose.yml. Never run while a switch policy forbids it (sessions inactive only).",
+    "Redeploy a stack from its compose file on disk (Dockhand deploy). Defaults to local images (no pull) — pass pull for registry refresh (needs registry creds in Dockhand). Use after editing the project's docker-compose.yml. Never run while a switch policy forbids it (sessions inactive only).",
     {
       type: "object",
       properties: {
         stack: { type: "string" },
         build: { type: "boolean", description: "Also run compose build (for stacks with build: sections). Default false." },
         force_recreate: { type: "boolean", description: "Force container recreation. Default false." },
+        pull: { type: "boolean", description: "Pull images from registries before deploying. Default false — private registries need creds configured in Dockhand." },
       },
       required: ["stack"],
       additionalProperties: false,
@@ -165,7 +166,7 @@ async function callTool(name: string, args: any): Promise<any> {
       return { content: [{ type: "text", text: await r.text() }] };
     }
     case "dockhand_stack_sync": {
-      const body: any = { pull: true, build: !!args.build, respectPullPolicy: false, pullBase: false, forceRecreate: !!args.force_recreate };
+      const body: any = { pull: !!args.pull, build: !!args.build, respectPullPolicy: false, pullBase: false, forceRecreate: !!args.force_recreate };
       const r = await api(`/stacks/${encodeURIComponent(args.stack)}/deploy${q}`, { method: "POST", body: JSON.stringify(body) });
       if (!r.ok) throw new Error(`POST deploy ${r.status}: ${await r.text()}`);
       return { content: [{ type: "text", text: `Deploy of '${args.stack}' accepted: ${await r.text()}` }] };
