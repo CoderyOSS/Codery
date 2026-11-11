@@ -107,6 +107,10 @@ services:
         aliases: [playwright]
 
   opendesign:
+    # OPENDESIGN_IMAGE points at either your registry build of
+    # images/opendesign/Dockerfile (release-apps style) or a locally built
+    # tag — the wrapper is only FROM od:<version> + `npm i -g opencode-ai`,
+    # so building on-host is cheap and needs no registry auth.
     image: ${OPENDESIGN_IMAGE:?set OPENDESIGN_IMAGE in stack .env}
     container_name: opendesign
     restart: unless-stopped
