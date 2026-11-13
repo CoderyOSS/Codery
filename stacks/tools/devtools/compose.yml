@@ -73,9 +73,6 @@ services:
     environment:
       GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
     ports:
-      # nginx :8080 is transition-only (pre-Zoraxy routes); retire with the
-      # nginx s6 service once no route targets it
-      - "127.0.0.1:8080:8080"
       - "${TAILNET_IP}:3333:2022"
       - "${TAILNET_IP}:61000:61000/udp"
     volumes:
@@ -107,10 +104,10 @@ services:
         aliases: [playwright]
 
   opendesign:
-    # OPENDESIGN_IMAGE points at either your registry build of
-    # images/opendesign/Dockerfile (release-apps style) or a locally built
-    # tag — the wrapper is only FROM od:<version> + `npm i -g opencode-ai`,
-    # so building on-host is cheap and needs no registry auth.
+    # OPENDESIGN_IMAGE points at a locally built tag — see INSTANCE docs.
+    # The wrapper is only FROM od:<version> + `npm i -g opencode-ai`, so
+    # building on-host (docker build -t codery-od:<date> images/opendesign)
+    # is cheap and needs no registry auth.
     image: ${OPENDESIGN_IMAGE:?set OPENDESIGN_IMAGE in stack .env}
     container_name: opendesign
     restart: unless-stopped
