@@ -11,7 +11,7 @@
 # - Agents: ssh gem@apps tooladd <pkg>. Interactive: same command.
 #
 # Reproducibility: a new machine replays the manifest at boot
-# (s6 tools-replay oneshot) or manually via: sudo nix profile install --profile /nix/var/nix/profiles/tools
+# (s6 tools-replay oneshot) or manually via: sudo nix profile add --profile /nix/var/nix/profiles/tools
 set -euo pipefail
 
 PROFILE=/nix/var/nix/profiles/tools
@@ -21,7 +21,10 @@ REPO=/home/gem/projects/Codery
 [ -d "$REPO" ] || REPO=/workspace/Codery
 [ -d "$REPO" ] || REPO=/opt/codery/projects/Codery
 MANIFEST="$REPO/images/apps/tools-manifest.txt"
-NIX="nix"
+# Explicit feature flags: do not rely on /etc/nix/nix.conf (the nixos/nix
+# base stopped shipping it; we bake our own, but never depend on it).
+# Repeatable single-token form keeps this POSIX-safe and quote-free.
+NIX="nix --extra-experimental-features nix-command --extra-experimental-features flakes"
 
 [[ $# -eq 1 ]] || { echo "usage: tooladd <nixpkgs-attr>" >&2; exit 2; }
 PKG="$1"
@@ -30,7 +33,9 @@ PKG="$1"
 mkdir -p "$(dirname "$PROFILE")" "$(dirname "$MANIFEST")"
 
 # Already present?
-have="$($NIX profile list --profile "$PROFILE" --json 2>/dev/null \
+# All nix invocations that touch the store DB run as root (single-user
+# nix: big-lock is root-owned; a gem-level run dies with EACCES).
+have="$(sudo $NIX profile list --profile "$PROFILE" --json 2>/dev/null \
         | jq -r '.elements[]?.attrPath // empty' | sort -u || true)"
 if grep -Fxq "$PKG" <<<"$have"; then
   echo "tooladd: '$PKG' already in the tools profile — nothing to do"
@@ -40,14 +45,14 @@ fi
 echo "tooladd: installing nixpkgs#$PKG (cache.nixos.org substitute — no image rebuild)..."
 # Single-user nix: /nix/store writes are root-only. sudo is NOPASSWD for gem;
 # the explicit --profile keeps the shared "tools" profile regardless of who runs.
-sudo $NIX profile install --profile "$PROFILE" "nixpkgs#$PKG"
+sudo $NIX profile add --profile "$PROFILE" "nixpkgs#$PKG"
 
 # Manifest = live profile attrPaths, sorted. Manifest writes + git MUST run
 # as gem: docker exec lands as root, and git refuses root access to gem's
 # checkout (safe.directory) — root-owned .git objects would poison the repo.
 as_gem() { if [ "$(id -un)" = "root" ]; then sudo -u gem "$@"; else "$@"; fi; }
 
-have="$($NIX profile list --profile "$PROFILE" --json | jq -r '.elements[]?.attrPath // empty' | sort -u)"
+have="$(sudo $NIX profile list --profile "$PROFILE" --json | jq -r '.elements[]?.attrPath // empty' | sort -u)"
 as_gem tee "$MANIFEST" >/dev/null <<<"$have"
 
 as_gem git -C "$REPO" add images/apps/tools-manifest.txt

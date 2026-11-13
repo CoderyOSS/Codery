@@ -11,7 +11,9 @@ set -u
 MANIFEST=/home/gem/projects/Codery/images/apps/tools-manifest.txt
 [ -f "$MANIFEST" ] || MANIFEST=/opt/codery/projects/Codery/images/apps/tools-manifest.txt
 PROFILE=/nix/var/nix/profiles/tools
-NIX="nix"
+# Explicit feature flags — runs as root at boot, must not depend on
+# /etc/nix/nix.conf (the nixos/nix base stopped shipping it).
+NIX="nix --extra-experimental-features nix-command --extra-experimental-features flakes"
 
 [ -f "$MANIFEST" ] || exit 0
 mkdir -p "$(dirname "$PROFILE")"
@@ -21,9 +23,9 @@ have="$($NIX profile list --profile "$PROFILE" --json 2>/dev/null \
 
 while IFS= read -r pkg; do
   case "$pkg" in ''|'#'*) continue ;; esac
-  if grep -Fxq "$pkg" <<<"$have"; then continue; fi
+  if printf '%s\n' "$have" | grep -Fxq "$pkg"; then continue; fi
   echo "tools-replay: installing nixpkgs#$pkg"
-  $NIX profile install --profile "$PROFILE" "nixpkgs#$pkg" \
+  $NIX profile add --profile "$PROFILE" "nixpkgs#$pkg" \
     || echo "tools-replay: FAILED $pkg (network? retry via: ssh gem@apps tooladd $pkg)"
 done < "$MANIFEST"
 exit 0

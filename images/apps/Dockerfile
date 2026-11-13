@@ -35,6 +35,17 @@ ENV LC_ALL=C.UTF-8
 # regardless of locale detection. See Elixir "Unicode" docs.
 ENV ELIXIR_ERL_OPTIONS="+fnu"
 
+# --- nix config: bake a real /etc/nix/nix.conf ---
+# The nixos/nix base ships its nix.conf as a symlink INTO the store
+# (<hash>-base-system/etc/nix/nix.conf). The runtime /nix is a named
+# volume that may predate this image, so that symlink can dangle and
+# every bare `nix` call dies with "experimental Nix feature 'nix-command'
+# is disabled". A real file is volume-independent and base-update-proof.
+# Scripts still pass --extra-experimental-features explicitly (defense
+# in depth); this file covers manual and future nix usage for all users.
+RUN mkdir -p /etc/nix && rm -f /etc/nix/nix.conf && \
+    printf 'experimental-features = nix-command flakes\n' > /etc/nix/nix.conf
+
 # --- OS users (nixos/nix only ships root) ---
 # /etc/passwd, /etc/group, /etc/shadow are SYMLINKS into the nix store on
 # the nixos/nix base. runc/docker exec fails to resolve them when spawning
