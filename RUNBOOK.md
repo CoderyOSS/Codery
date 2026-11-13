@@ -142,6 +142,22 @@ Image note: build the tools images on the host — no registry needed:
 then point `APPS_IMAGE` / `PASEO_IMAGE` in the stack `.env` at those tags
 (`GHCR_*` keys only matter if you instead pull prebuilt images).
 
+**MANDATORY for every apps image deploy** (skip only on a fresh volume,
+i.e. first-ever boot): the `/nix` named volume is not empty, so Docker will
+NOT re-seed it from the new image. Run the store sync BEFORE pointing
+`APPS_IMAGE` at the new tag and deploying:
+
+    /opt/codery/projects/Codery/host/scripts/nix-store-sync.sh codery-apps:<tag> codery-apps-nix
+
+Skipping this step is a known failure class (2026-11-12 incident): the
+volume's store drifts from the image's store, store-referenced symlinks in
+the container (`/etc/nix/nix.conf` -> `<hash>-base-system/...`, gem's
+home-manager dotfiles) dangle, and shells come up with a bare sshd PATH
+(`mosh`/`tooladd`/coreutils unreachable). The script does a full `cp -a`
+plus in-run verification; if it reports a failure, STOP and inspect before
+deploying. After deploying, verify `ssh gem@apps 'echo $PATH'` includes the
+nix profile dirs and `/nix/var/nix/profiles/tools/bin`.
+
 **Gate T1:** `docker ps` shows paseo + apps (+ profiled tools) running and
 healthy. **Gate T2:** `ssh -p 2222 paseo@<tailnet-ip>` works; `ssh -p 3333
 gem@<tailnet-ip>` works; mosh connects. **Gate T3:** an agent session in paseo
