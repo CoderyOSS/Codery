@@ -92,7 +92,7 @@ overlay branch if present.
 
 Install CLI tools at runtime — no image rebuild:
 `ssh gem@apps tooladd <nixpkgs-pkg>` (persists across redeploys; manifest
-auto-updated in `containers/apps/tools-manifest.txt`).
+auto-updated in `images/apps/tools-manifest.txt`).
 
 ---
 

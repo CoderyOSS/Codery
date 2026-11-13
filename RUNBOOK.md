@@ -134,9 +134,13 @@ Prefer deploying through Dockhand once it's up (register the stack from
 `/opt/codery/stacks/devtools/compose.yml`) — after this phase, Dockhand owns
 the stack lifecycle.
 
-Image note: `ghcr.io/coderyoss/codery:*` is private — `GHCR_USERNAME`/
-`GHCR_TOKEN` in `.env` must be valid, or build images with
-`.github/workflows/release-apps.yml` and push to your own registry.
+Image note: build the tools images on the host — no registry needed:
+
+    docker build -t codery-apps:$(date +%Y%m%d) /opt/codery/projects/Codery/images/apps
+    docker build -t codery-paseo:$(date +%Y%m%d) /opt/codery/projects/Codery/images/paseo
+
+then point `APPS_IMAGE` / `PASEO_IMAGE` in the stack `.env` at those tags
+(`GHCR_*` keys only matter if you instead pull prebuilt images).
 
 **Gate T1:** `docker ps` shows paseo + apps (+ profiled tools) running and
 healthy. **Gate T2:** `ssh -p 2222 paseo@<tailnet-ip>` works; `ssh -p 3333
@@ -204,7 +208,7 @@ image-rebuilding projects.
 | Install a dev tool | `ssh gem@apps tooladd <nixpkgs-pkg>` — persists in the `/nix` volume; manifest auto-committed to the repo |
 | Deploy dockhand itself | Host-side only: `docker compose -f /opt/codery/stacks/dockhand/compose.yml --env-file /opt/codery/stacks/dockhand/.env up -d` |
 | Full backup | `sudo /usr/local/bin/codery-backup.sh` → `/opt/codery/backups/` |
-| Update Codery itself | `git pull` the repo (or merge upstream `main` into your private overlay), pull/rebuild images (`release-apps.yml`), then per-stack Deploy |
+| Update Codery itself | `git pull` the repo (or merge upstream `main` into your private overlay), rebuild images on the host (`docker build -t codery-apps:$(date +%Y%m%d) …`), then per-stack Deploy |
 
 **Stack-change rule:** every deploy is config-hash based — services whose
 config didn't change are not recreated. If a paseo recreate is possible, do it

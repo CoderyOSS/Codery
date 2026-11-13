@@ -129,9 +129,13 @@ Supervisor programs `codery-ci`, `codery-ci-mcp`, `caddy`: stopped +
 
 ## Workflows (.github/workflows)
 
-`release-apps.yml` — builds/pushes the apps image (CI path for the devtools
-stack). `release-orchestrator.yml` + `diagnose.yml` — revert/host-repair
-paths.
+Images build **locally on the VPS host** — no GitHub CI for images:
+
+    docker build -t codery-apps:$(date +%Y%m%d) /opt/codery/projects/Codery/images/apps
+
+then point the stack `.env` (`APPS_IMAGE`/`PASEO_IMAGE`) at the new tag and
+Deploy. `diagnose.yml` — host-repair path. (The old `release-apps.yml`
+ghcr/tag-push pipeline was removed 2026-11-12.)
 
 ## Sensitive Files — Do Not Read or Expose
 
