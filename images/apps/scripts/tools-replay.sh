@@ -8,8 +8,8 @@
 # network; failures are logged loudly and are never fatal.
 set -u
 
-MANIFEST=/home/gem/projects/Codery/containers/apps/tools-manifest.txt
-[ -f "$MANIFEST" ] || MANIFEST=/opt/codery/projects/Codery/containers/apps/tools-manifest.txt
+MANIFEST=/home/gem/projects/Codery/images/apps/tools-manifest.txt
+[ -f "$MANIFEST" ] || MANIFEST=/opt/codery/projects/Codery/images/apps/tools-manifest.txt
 PROFILE=/nix/var/nix/profiles/tools
 NIX="nix"
 

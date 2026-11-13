@@ -8,18 +8,16 @@ All packages come from a pinned nixpkgs revision; NvChad is cloned at a pinned c
 
 | File | Purpose |
 |------|---------|
-| `containers/apps/Dockerfile` | `nixos/nix` base image, `nix profile install` + `home-manager switch` + s6-overlay |
-| `containers/apps/flake.nix` | System profile (Rust, Elixir, Bun, gcc, nvim, nginx, sshd, infra) |
-| `containers/apps/home.nix` | home-manager module for `gem` — neovim + treesitter parsers |
-| `containers/apps/s6-overlay/` | s6-rc service definitions (ssh-agent, sshd, nginx, oneshots) |
-| `containers/apps/service.yml` | Volumes, ports, network alias |
-| `containers/apps/sshd_config` | OpenSSH server config |
-| `containers/apps/nginx.conf` | Nginx reverse-proxy config |
+| `images/apps/Dockerfile` | `nixos/nix` base image, `nix profile install` + `home-manager switch` + s6-overlay |
+| `images/apps/flake.nix` | System profile (Rust, Elixir, Bun, gcc, nvim, sshd, infra) |
+| `images/apps/home.nix` | home-manager module for `gem` — neovim + treesitter parsers |
+| `images/apps/s6-overlay/` | s6-rc service definitions (ssh-agent, sshd, tmux, oneshots) |
+| `images/apps/sshd_config` | OpenSSH server config |
 
 ## Process supervision (s6-overlay)
 
 s6-overlay is PID 1. Services are defined as s6-rc source definition
-directories under `containers/apps/s6-overlay/s6-rc.d/` and included in the `user` bundle.
+directories under `images/apps/s6-overlay/s6-rc.d/` and included in the `user` bundle.
 
 | Service | Type | Description |
 |---------|------|-------------|
@@ -62,8 +60,8 @@ Resolved package versions on this pin (approximate — check via `nix profile li
 
 ```bash
 # From a machine with nix installed (paseo doesn't have it; use host or CI runner)
-nix flake update --flake containers/apps/
-git add containers/apps/flake.lock
+nix flake update --flake images/apps/
+git add images/apps/flake.lock
 git commit -m "apps: bump nixpkgs"
 github-push
 ```
@@ -94,7 +92,7 @@ To build locally on the host:
 # From Codery repo root
 codery-ci build apps test-s6
 # -> docker build -t ghcr.io/coderyoss/codery:apps-test-s6 \
-#                 -f containers/apps/Dockerfile .
+#                 -f images/apps/Dockerfile .
 ```
 
 First build takes ~10-15 min (nix downloads ~1.5GB of packages from cache.nixos.org). Subsequent builds reuse the nix store layer.

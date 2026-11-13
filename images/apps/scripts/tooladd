@@ -6,7 +6,7 @@
 # - Installs into /nix/var/nix/profiles/tools (root profile; sudo is
 #   NOPASSWD for gem in this image). Survives blue/green swaps and image
 #   rebuilds because /nix is a named volume (auto-seeded from the image).
-# - Regenerates containers/apps/tools-manifest.txt from the live profile
+# - Regenerates images/apps/tools-manifest.txt from the live profile
 #   (manifest = record; the profile = truth) and commits it.
 # - Agents: ssh gem@apps tooladd <pkg>. Interactive: same command.
 #
@@ -20,7 +20,7 @@ PROFILE=/nix/var/nix/profiles/tools
 REPO=/home/gem/projects/Codery
 [ -d "$REPO" ] || REPO=/workspace/Codery
 [ -d "$REPO" ] || REPO=/opt/codery/projects/Codery
-MANIFEST="$REPO/containers/apps/tools-manifest.txt"
+MANIFEST="$REPO/images/apps/tools-manifest.txt"
 NIX="nix"
 
 [[ $# -eq 1 ]] || { echo "usage: tooladd <nixpkgs-attr>" >&2; exit 2; }
@@ -50,13 +50,13 @@ as_gem() { if [ "$(id -un)" = "root" ]; then sudo -u gem "$@"; else "$@"; fi; }
 have="$($NIX profile list --profile "$PROFILE" --json | jq -r '.elements[]?.attrPath // empty' | sort -u)"
 as_gem tee "$MANIFEST" >/dev/null <<<"$have"
 
-as_gem git -C "$REPO" add containers/apps/tools-manifest.txt
+as_gem git -C "$REPO" add images/apps/tools-manifest.txt
 if as_gem git -C "$REPO" diff --cached --quiet; then
   echo "tooladd: manifest unchanged"
 else
   as_gem git -C "$REPO" commit -m "tools: add $PKG"
   if command -v github-push >/dev/null 2>&1; then
-    github-push containers/apps/tools-manifest.txt 2>/dev/null || github-push || \
+    github-push main 2>/dev/null || github-push || \
       echo "tooladd: manifest committed but PUSH FAILED — run github-push later" >&2
   else
     echo "tooladd: manifest committed locally — push when credentials allow (github-push)" >&2

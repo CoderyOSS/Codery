@@ -1,14 +1,14 @@
 # Apps container — Nix system profile + home-manager.
 #
 # Pinned to nixos-25.05 stable. Bump by running:
-#   nix flake update --flake containers/apps/
+#   nix flake update --flake images/apps/
 # then commit the regenerated flake.lock.
 #
 # Build the system profile:
-#   nix profile install path:containers/apps#apps-profile
+#   nix profile install path:images/apps#apps-profile
 #
 # Activate user home (gem):
-#   nix run home-manager -- switch -b backup --flake containers/apps#gem
+#   nix run home-manager -- switch -b backup --flake images/apps#gem
 {
   description = "Codery apps container toolchain";
 

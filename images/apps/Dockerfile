@@ -1,6 +1,6 @@
 # Apps container — Nix-managed toolchain + s6-overlay process supervision.
 #
-# Pinned, reproducible Nix profile driven by containers/apps/flake.nix.
+# Pinned, reproducible Nix profile driven by images/apps/flake.nix.
 # Process supervision via s6-overlay (s6-rc). See README-NIX.md for the
 # bump/verify workflow.
 #
@@ -66,7 +66,7 @@ RUN for f in passwd group shadow gshadow; do \
 
 # --- Flake source ---
 WORKDIR /etc/nixos
-COPY containers/apps/flake.nix containers/apps/home.nix ./
+COPY flake.nix home.nix ./
 
 # --- Build & install system profile (Rust, Elixir, Bun, gcc, nvim, nginx, sshd) ---
 # flake.lock auto-generated from pinned inputs on first build.
@@ -225,31 +225,30 @@ RUN mkdir -p /usr/sbin /usr/bin /usr/local/bin /usr/local/sbin \
     ln -sf "$NGINX_PREFIX/conf/mime.types" /etc/nginx/mime.types
 
 # --- Helper scripts ---
-COPY containers/apps/scripts/github-app-token.sh /usr/local/bin/github-app-token
-COPY containers/apps/scripts/ssh-agent-add-keys.sh /usr/local/bin/ssh-agent-add-keys.sh
+COPY scripts/github-app-token.sh /usr/local/bin/github-app-token
+COPY scripts/ssh-agent-add-keys.sh /usr/local/bin/ssh-agent-add-keys.sh
 # tooladd: runtime dev-tool installs into the persistent "tools" nix profile
 # (/nix is a named volume — see service.yml). Manifest auto-commit; agents
 # use `ssh gem@apps tooladd <pkg>`. tools-replay: boot oneshot manifest replay.
-COPY containers/apps/scripts/tooladd /usr/local/bin/tooladd
-COPY containers/apps/scripts/tools-replay.sh /usr/local/bin/tools-replay
+COPY scripts/tooladd /usr/local/bin/tooladd
+COPY scripts/tools-replay.sh /usr/local/bin/tools-replay
 # Locale loader sourced by every s6-rc run script (s6-rc doesn't pass container
 # ENV to longruns). Pulls LANG/LC_ALL/ELIXIR_ERL_OPTIONS/LOCALE_ARCHIVE from
 # /run/s6/container_environment so beam.smp gets +fnu and Elixir stops warning.
-COPY containers/apps/scripts/s6-load-locale-env.sh /usr/local/bin/s6-load-locale-env
+COPY scripts/s6-load-locale-env.sh /usr/local/bin/s6-load-locale-env
 # runtime-apps oneshot: re-links orchestrator-managed app bundles
 # (/etc/s6-overlay/apps.d, rendered from SQLite by codery-ci) into /run/service
 # at every boot — restores runtime apps after restarts and blue/green redeploys.
-COPY containers/apps/scripts/runtime-apps-restore.sh /usr/local/bin/runtime-apps-restore
+COPY scripts/runtime-apps-restore.sh /usr/local/bin/runtime-apps-restore
 RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/ssh-agent-add-keys.sh /usr/local/bin/tooladd /usr/local/bin/tools-replay /usr/local/bin/s6-load-locale-env /usr/local/bin/runtime-apps-restore
 
 # --- Persistent tools profile on PATH (login shells + tmux) ---
 # /nix/var/nix/profiles/tools/bin = runtime-installed dev tools (tooladd).
-RUN mkdir -p /etc/profile.d \
-    && printf '#! /bin/sh\nexport PATH="/nix/var/nix/profiles/tools/bin:$PATH"\n' > /etc/profile.d/zz-tools.sh \
-    && chmod +x /etc/profile.d/zz-tools.sh
+# (a former /etc/profile.d/zz-tools.sh PATH trick lived here; removed —
+# the nix base has no /etc/profile, gem's PATH comes from home.nix bashrcExtra)
 
 # --- SSH server ---
-COPY containers/apps/sshd_config /etc/ssh/sshd_config
+COPY sshd_config /etc/ssh/sshd_config
 RUN mkdir -p /run/sshd /etc/ssh/authorized_keys
 # authorized_keys is host-managed: service.yml bind-mounts
 # /opt/codery/ssh/authorized_keys -> /run/secrets/authorized_keys (append
@@ -260,7 +259,6 @@ RUN mkdir -p /run/sshd /etc/ssh/authorized_keys
 RUN mkdir -p /etc/ssh && ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
 
 # --- Nginx ---
-COPY containers/apps/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /etc/nginx/conf.d
 
 # --- s6-overlay (process supervision) ---
@@ -278,11 +276,11 @@ RUN for f in noarch x86_64; do \
     done
 
 # --- s6-rc service definitions ---
-COPY containers/apps/s6-overlay/ /etc/s6-overlay/
+COPY s6-overlay/ /etc/s6-overlay/
 RUN mkdir -p /etc/s6-overlay/apps.d
 
 # --- Healthcheck ---
-COPY containers/apps/scripts/healthcheck.sh /usr/local/bin/healthcheck
+COPY scripts/healthcheck.sh /usr/local/bin/healthcheck
 RUN chmod +x /usr/local/bin/healthcheck
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=90s --retries=3 \
