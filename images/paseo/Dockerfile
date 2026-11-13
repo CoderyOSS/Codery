@@ -21,19 +21,19 @@ RUN npm install -g opencode-ai@1.18.31 \
 # operation via the credential helper. Needs GITHUB_APP_ID +
 # GITHUB_APP_PRIVATE_KEY_PATH env (service.yml wires them) and resolves the
 # token's org from the credential request path.
-COPY containers/paseo/scripts/github-app-token.sh /usr/local/bin/github-app-token
-COPY containers/paseo/scripts/git-credential-codery.sh /usr/local/bin/git-credential-codery
-COPY containers/paseo/scripts/github-push.sh /usr/local/bin/github-push
+COPY scripts/github-app-token.sh /usr/local/bin/github-app-token
+COPY scripts/git-credential-codery.sh /usr/local/bin/git-credential-codery
+COPY scripts/github-push.sh /usr/local/bin/github-push
 RUN chmod +x /usr/local/bin/github-app-token /usr/local/bin/git-credential-codery /usr/local/bin/github-push
 
 # github-app permissions MCP — bun-only script (Bun.spawnSync / Bun.stdin).
-COPY containers/paseo/scripts/github-app-permissions-mcp.ts /usr/local/bin/github-app-permissions-mcp.ts
+COPY scripts/github-app-permissions-mcp.ts /usr/local/bin/github-app-permissions-mcp.ts
 COPY --from=oven/bun:1.2.13 /usr/local/bin/bun /usr/local/bin/bun
 
 # sshd: hardened config + entrypoint wrapper (starts sshd as root, then execs
 # the base entrypoint, which drops everything else to the paseo user).
-COPY containers/paseo/sshd_config /etc/ssh/sshd_config
-COPY containers/paseo/entrypoint-with-sshd /usr/local/bin/entrypoint-with-sshd
+COPY sshd_config /etc/ssh/sshd_config
+COPY entrypoint-with-sshd /usr/local/bin/entrypoint-with-sshd
 RUN chmod 644 /etc/ssh/sshd_config && chmod 755 /usr/local/bin/entrypoint-with-sshd
 # Host keys are generated on first boot into /etc/ssh/host_keys (named volume
 # — stable fingerprints). AuthorizedKeysFile is /run/secrets/authorized_keys
