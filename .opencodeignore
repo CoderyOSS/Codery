@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+/run/secrets/
+*.pem
+*.key
+.claude/
+debug/

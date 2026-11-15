@@ -1,0 +1,166 @@
+# devtools — TOOLS layer: the developer userland.
+#
+# Two services are always on; everything else is opt-in through the inclusion
+# list (COMPOSE_PROFILES in this stack's .env — add or remove a name, then
+# Deploy):
+#
+#   always   paseo      coding-agent daemon (code.<domain>, ssh :2222)
+#                        ssh :2222)
+#            apps       terminal environment (ssh :3333, mosh :61000/udp)
+#   browser  playwright headless browser backend — agent browser automation
+#   design   opendesign design workspace (opendesign.<domain>)
+#   db       dbgate     database client (dbgate.<domain>)
+#
+# Degrades gracefully: a tool that isn't in the list simply doesn't exist —
+# paseo's browser tools fail fast, opendesign previews error until `browser`
+# is enabled alongside it. Zoraxy proxy-hosts for absent tools 502 until the
+# route is disabled too.
+#
+# Upstreams (Zoraxy → codery-net names): paseo:6767, apps:<port> for runtime
+# helpers, opendesign:7456, dbgate:3000, ws://playwright:3000.
+#
+# Visibility mounts: apps gets the full /opt/codery root (permissions gate
+# writes: stacks/ is gem-owned, secrets are 0600 sudo-only); paseo gets
+# stacks/ + data/ read-only (no .env). These mounts take effect on the next
+# paseo/apps recreate — combine with other changes, don't deploy for them
+# alone.
+name: devtools
+
+services:
+  paseo:
+    image: ${PASEO_IMAGE:?set PASEO_IMAGE in stack .env}
+    container_name: paseo
+    restart: unless-stopped
+    env_file:
+      - /opt/codery/.env
+    environment:
+      PASEO_HOSTNAMES: "code.${DOMAIN_NAME:?set DOMAIN_NAME in stack .env}"
+      PASEO_RELAY_ENABLED: "false"
+      PASEO_WEB_UI_ENABLED: "false"
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+      # opt-in: when playwright isn't deployed, browser tool calls fail fast
+      PLAYWRIGHT_WS_ENDPOINT: ws://playwright:3000/
+      # dockhand.* agent MCP credential
+      DOCKHAND_API_TOKEN: ${DOCKHAND_API_TOKEN:-}
+    ports:
+      - "127.0.0.1:6767:6767"
+      - "${TAILNET_IP:?set TAILNET_IP in stack .env}:2222:2023"
+    volumes:
+      - codery-paseo-home:/home/paseo
+      - /opt/codery/projects:/workspace
+      - /opt/codery/data/opencode:/home/paseo/.local/share/opencode
+      # the LIVE agent config — edit in the repo, next session picks it up
+      - /opt/codery/projects/Codery/images/paseo/opencode-config:/home/paseo/.config/opencode
+      - /opt/codery/github-app.pem:/run/secrets/github-app.pem:ro
+      - /opt/codery/ssh/authorized_keys:/run/secrets/authorized_keys:ro
+      - codery-paseo-ssh-host-keys:/etc/ssh/host_keys
+      - /opt/codery/ssh/agent-to-apps:/home/paseo/.ssh/agent-to-apps:ro
+      # read-only stack truth + tool data (deliberately no .env)
+      - /opt/codery/stacks:/opt/codery/stacks:ro
+      - /opt/codery/data:/opt/codery/data:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      codery-net:
+        aliases: [paseo]
+
+  apps:
+    image: ${APPS_IMAGE:?set APPS_IMAGE in stack .env}
+    container_name: apps
+    restart: unless-stopped
+    env_file:
+      - /opt/codery/.env
+    environment:
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+    ports:
+      - "${TAILNET_IP}:3333:2022"
+      - "${TAILNET_IP}:61000:61000/udp"
+    volumes:
+      - codery-apps-nix:/nix
+      - codery-apps-ssh-host-keys:/etc/ssh
+      - ${SSH_DIR:?set SSH_DIR in stack .env}:/home/gem/.ssh:ro
+      - /opt/codery/github-app.pem:/run/secrets/github-app.pem:ro
+      - /opt/codery/ssh/authorized_keys:/run/secrets/authorized_keys:ro
+      - /opt/codery/projects:/home/gem/projects
+      - /opt/codery/apps-s6.d:/etc/s6-overlay/apps.d
+      # full Codery root — ownership gates writes, not the mount
+      - /opt/codery:/opt/codery
+    networks:
+      codery-net:
+        aliases: [apps]
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.54.1-noble
+    container_name: playwright
+    restart: unless-stopped
+    profiles: [browser]
+    user: pwuser
+    working_dir: /home/pwuser
+    init: true
+    ipc: host
+    command: ["npx", "-y", "playwright@1.54.1", "run-server", "--port", "3000", "--host", "0.0.0.0"]
+    networks:
+      codery-net:
+        aliases: [playwright]
+
+  opendesign:
+    # OPENDESIGN_IMAGE points at a locally built tag — see INSTANCE docs.
+    # The wrapper is only FROM od:<version> + `npm i -g opencode-ai`, so
+    # building on-host (docker build -t codery-od:<date> images/opendesign)
+    # is cheap and needs no registry auth.
+    image: ${OPENDESIGN_IMAGE:?set OPENDESIGN_IMAGE in stack .env}
+    container_name: opendesign
+    restart: unless-stopped
+    profiles: [design]
+    env_file:
+      - /opt/codery/.env
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=192
+      OD_BIND_HOST: 0.0.0.0
+      OD_PORT: "7456"
+      OD_ALLOWED_ORIGINS: https://opendesign.${DOMAIN_NAME:?set DOMAIN_NAME in stack .env}
+      # daemon Bearer auth off: the browser never receives a WWW-Authenticate
+      # challenge, so with auth on the SPA silently 401s and renders the
+      # onboarding page as a false-fresh. Boundary = Zoraxy edge + tailnet.
+      OD_DISABLE_API_AUTH: "1"
+      PLAYWRIGHT_WS_ENDPOINT: ws://playwright:3000/
+    ports:
+      - "127.0.0.1:7456:7456"
+    volumes:
+      - /opt/codery/data/opendesign:/app/.od
+      - /opt/codery/projects:/opt/codery/projects
+      - /opt/codery/github-app.pem:/run/secrets/github-app.pem:ro
+    networks:
+      codery-net: {}
+
+  dbgate:
+    image: dbgate/dbgate:latest
+    container_name: dbgate
+    restart: unless-stopped
+    profiles: [db]
+    environment: {}
+      # Pre-provision connections here if you want them ready on first boot
+      # (else configure in the UI — both persist via the bind mount):
+      # CONNECTIONS: my-mongo
+      # LABEL_my-mongo: My MongoDB
+      # URL_my-mongo: mongodb://mongo:27017
+      # ENGINE_my-mongo: mongo@dbgate-plugin-mongo
+    volumes:
+      - /opt/codery/data/dbgate:/root/.dbgate
+    networks:
+      codery-net: {}
+
+networks:
+  codery-net:
+    external: true
+
+volumes:
+  codery-paseo-home:
+    external: true
+  codery-paseo-ssh-host-keys:
+    external: true
+  codery-apps-nix:
+    external: true
+  codery-apps-ssh-host-keys:
+    external: true
