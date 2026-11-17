@@ -51,8 +51,19 @@ pub fn classify_ref_update(update: &RefUpdate) -> Classification {
 }
 
 impl Oid {
+    /// Lowercase hex rendering, for URLs that name objects (upstream
+    /// compare API). Parsing is the inverse via [`Oid::from_hex`].
+    pub fn to_hex(&self) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(40);
+        for byte in self.0 {
+            let _ = write!(s, "{byte:02x}");
+        }
+        s
+    }
+
     /// Parse exactly 40 lowercase hex digits into raw oid bytes.
-    fn from_hex(s: &str) -> Result<Oid, ParseError> {
+    pub(crate) fn from_hex(s: &str) -> Result<Oid, ParseError> {
         let b = s.as_bytes();
         if b.len() != 40 {
             return Err(ParseError::Malformed("oid is not 40 hex digits"));

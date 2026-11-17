@@ -22,6 +22,30 @@ pub enum Classification {
     NeedsAncestry,
 }
 
+/// Fast-forward verdict for an ordinary update (GATE-005). `Unknown` covers
+/// every case the upstream could not answer definitively and fails closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ancestry {
+    /// `new` is a strict descendant of `old`.
+    FastForward,
+    /// `new` is not a descendant of `old` (behind or diverged).
+    Force,
+    /// The upstream compare could not be trusted; deny.
+    Unknown,
+}
+
+/// The authenticated caller's permission tier on a repo (GATE-008), ordered
+/// highest first so tiers compare directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Role {
+    Admin,
+    Maintain,
+    Write,
+    Triage,
+    Read,
+    None,
+}
+
 /// Policy outcome for an action (GATE-005). Unconfigured defaults to Deny.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Decision {

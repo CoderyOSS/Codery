@@ -4,6 +4,7 @@
 
 mod audit;
 mod config;
+mod github;
 mod pktline;
 mod policy;
 mod state;

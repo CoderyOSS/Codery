@@ -1,0 +1,557 @@
+// GitHub adapter (GATE-008): the ONLY module that may contain
+// `api.github.com` / `github.com` literals. Everything forge-specific
+// (URLs, REST payloads, status mapping) lives behind the [`Platform`]
+// trait so the rest of the gate stays forge-agnostic.
+//
+// Every mapping fails closed (GATE-005): transport errors, non-200
+// statuses and unrecognized payloads collapse to `Ancestry::Unknown` /
+// `RepoAccessError`, never to an allow-looking value.
+
+use std::sync::Arc;
+
+use reqwest::{Client, StatusCode, Url};
+use serde::Deserialize;
+use std::time::Duration;
+
+use crate::pktline::Oid;
+use crate::types::{Ancestry, Role};
+
+/// What the gate needs from the forge upstream (GATE-008).
+pub trait Platform: Send + Sync {
+    /// Is `new` a strict descendant of `old`? Definitive only when the
+    /// upstream compare says so; anything else is [`Ancestry::Unknown`].
+    async fn ancestry(&self, owner: &str, repo: &str, old: &Oid, new: &Oid) -> Ancestry;
+
+    /// The authenticated caller's role on a repo and whether it is private.
+    /// 404 means the repo is invisible to the caller (`NoAccess`), not that
+    /// it does not exist.
+    async fn repo_permissions(&self, owner: &str, repo: &str)
+        -> Result<RepoAccess, RepoAccessError>;
+
+    /// Push URL for a repo hosted upstream.
+    fn git_upstream_url(&self, owner: &str, repo: &str) -> Url;
+
+    /// REST API root this platform talks to.
+    fn api_base(&self) -> Url;
+}
+
+/// The authenticated caller's access to a repo (GATE-008).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepoAccess {
+    pub role: Role,
+    pub private: bool,
+}
+
+/// Permission lookup failure (GATE-008), fail closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoAccessError {
+    /// 404: repo does not exist or the caller cannot see it.
+    NoAccess,
+    /// Any other upstream failure; carries the HTTP status, or 0 when the
+    /// failure was at the transport level (no HTTP response at all).
+    Upstream(u16),
+}
+
+/// The `permissions` object of a GitHub repo resource: one boolean per
+/// tier, all absent/false meaning no access at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct PermissionsObj {
+    #[serde(default)]
+    pub admin: bool,
+    #[serde(default)]
+    pub maintain: bool,
+    #[serde(default)]
+    pub push: bool,
+    #[serde(default)]
+    pub triage: bool,
+    #[serde(default)]
+    pub pull: bool,
+}
+
+/// Highest permission bit that is set; none set ⇒ [`Role::None`].
+pub fn role_of(permissions: &PermissionsObj) -> Role {
+    if permissions.admin {
+        Role::Admin
+    } else if permissions.maintain {
+        Role::Maintain
+    } else if permissions.push {
+        Role::Write
+    } else if permissions.triage {
+        Role::Triage
+    } else if permissions.pull {
+        Role::Read
+    } else {
+        Role::None
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CompareResponse {
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoResponse {
+    #[serde(default)]
+    private: bool,
+    #[serde(default)]
+    permissions: PermissionsObj,
+}
+
+/// REST client for GitHub with per-request machine-token injection. The
+/// token getter is consulted for every request and its value is never
+/// logged; custody of the token itself is wired in later tasks.
+pub struct GitHubPlatform {
+    client: Client,
+    api_base: Url,
+    git_base: Url,
+    token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+}
+
+impl GitHubPlatform {
+    /// Production platform: github.com bases, caller-supplied token custody.
+    pub fn new(token: Arc<dyn Fn() -> Option<String> + Send + Sync>) -> Self {
+        let api_base = Url::parse("https://api.github.com/").expect("hard-coded api base");
+        let git_base = Url::parse("https://github.com/").expect("hard-coded git base");
+        Self::with_bases(api_base, git_base, token)
+    }
+
+    /// Explicit bases (tests point these at a mock server).
+    pub fn with_bases(
+        api_base: Url,
+        git_base: Url,
+        token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+    ) -> Self {
+        let client = Client::builder()
+            // GitHub's API rejects requests without a User-Agent.
+            .user_agent(concat!("gate/", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("reqwest client with rustls backend");
+        Self {
+            client,
+            api_base,
+            git_base,
+            token,
+        }
+    }
+
+    /// Attach the bearer token when custody has one. The value is used only
+    /// in the header — never logged, never stored on the request struct.
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match (self.token)() {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+    }
+
+    fn compare_url(&self, owner: &str, repo: &str, old: &Oid, new: &Oid) -> Option<Url> {
+        Url::parse(&format!(
+            "{}/repos/{}/{}/compare/{}...{}",
+            self.api_base.as_str().trim_end_matches('/'),
+            owner,
+            repo,
+            old.to_hex(),
+            new.to_hex(),
+        ))
+        .ok()
+    }
+
+    fn repo_url(&self, owner: &str, repo: &str) -> Option<Url> {
+        Url::parse(&format!(
+            "{}/repos/{}/{}",
+            self.api_base.as_str().trim_end_matches('/'),
+            owner,
+            repo,
+        ))
+        .ok()
+    }
+}
+
+impl Platform for GitHubPlatform {
+    async fn ancestry(&self, owner: &str, repo: &str, old: &Oid, new: &Oid) -> Ancestry {
+        let Some(url) = self.compare_url(owner, repo, old, new) else {
+            return Ancestry::Unknown;
+        };
+        let response = match self.authorize(self.client.get(url)).send().await {
+            Ok(response) => response,
+            Err(_) => return Ancestry::Unknown,
+        };
+        if response.status() != StatusCode::OK {
+            // 404 (more than 250 commits apart, unknown refs) and every
+            // other status are equally "cannot answer".
+            return Ancestry::Unknown;
+        }
+        let body: CompareResponse = match response.json().await {
+            Ok(body) => body,
+            Err(_) => return Ancestry::Unknown,
+        };
+        match body.status.as_str() {
+            "ahead" => Ancestry::FastForward,
+            "behind" | "diverged" => Ancestry::Force,
+            _ => Ancestry::Unknown,
+        }
+    }
+
+    async fn repo_permissions(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<RepoAccess, RepoAccessError> {
+        let Some(url) = self.repo_url(owner, repo) else {
+            return Err(RepoAccessError::Upstream(0));
+        };
+        let response = self
+            .authorize(self.client.get(url))
+            .send()
+            .await
+            .map_err(|_| RepoAccessError::Upstream(0))?;
+        match response.status() {
+            StatusCode::OK => {
+                let body: RepoResponse = response
+                    .json()
+                    .await
+                    .map_err(|_| RepoAccessError::Upstream(StatusCode::OK.as_u16()))?;
+                Ok(RepoAccess {
+                    role: role_of(&body.permissions),
+                    private: body.private,
+                })
+            }
+            StatusCode::NOT_FOUND => Err(RepoAccessError::NoAccess),
+            status => Err(RepoAccessError::Upstream(status.as_u16())),
+        }
+    }
+
+    fn git_upstream_url(&self, owner: &str, repo: &str) -> Url {
+        Url::parse(&format!(
+            "{}/{}/{}.git",
+            self.git_base.as_str().trim_end_matches('/'),
+            owner,
+            repo,
+        ))
+        .expect("owner/repo appended to a valid base form a valid url")
+    }
+
+    fn api_base(&self) -> Url {
+        self.api_base.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use reqwest::Url;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::pktline::Oid;
+
+    const OLD: &str = "1234567890abcdef1234567890abcdef12345678";
+    const NEW: &str = "fedcba0987654321fedcba0987654321fedcba09";
+    const COMPARE_PATH: &str =
+        "/repos/octo/hello/compare/1234567890abcdef1234567890abcdef12345678...fedcba0987654321fedcba0987654321fedcba09";
+    const REPO_PATH: &str = "/repos/octo/hello";
+
+    fn oid(hex: &str) -> Oid {
+        Oid::from_hex(hex).expect("fixture oid")
+    }
+
+    fn platform_at(server: &MockServer) -> GitHubPlatform {
+        GitHubPlatform::with_bases(
+            Url::parse(&server.uri()).expect("mock api base"),
+            Url::parse("http://git.example.internal/").expect("mock git base"),
+            Arc::new(|| None),
+        )
+    }
+
+    fn platform_with_token(server: &MockServer, token: Option<&str>) -> GitHubPlatform {
+        let token = token.map(str::to_string);
+        GitHubPlatform::with_bases(
+            Url::parse(&server.uri()).expect("mock api base"),
+            Url::parse("http://git.example.internal/").expect("mock git base"),
+            Arc::new(move || token.clone()),
+        )
+    }
+
+    async fn compare_mock(server: &MockServer, status: u16, body: &str) {
+        Mock::given(method("GET"))
+            .and(path(COMPARE_PATH))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn compare_ahead_is_fast_forward() {
+        let server = MockServer::start().await;
+        compare_mock(&server, 200, r#"{"status":"ahead"}"#).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.ancestry("octo", "hello", &oid(OLD), &oid(NEW)).await,
+            Ancestry::FastForward
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_behind_is_force() {
+        let server = MockServer::start().await;
+        compare_mock(&server, 200, r#"{"status":"behind"}"#).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.ancestry("octo", "hello", &oid(OLD), &oid(NEW)).await,
+            Ancestry::Force
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_diverged_is_force() {
+        let server = MockServer::start().await;
+        compare_mock(&server, 200, r#"{"status":"diverged"}"#).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.ancestry("octo", "hello", &oid(OLD), &oid(NEW)).await,
+            Ancestry::Force
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_404_is_unknown() {
+        let server = MockServer::start().await;
+        compare_mock(&server, 404, r#"{"message":"Not Found"}"#).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.ancestry("octo", "hello", &oid(OLD), &oid(NEW)).await,
+            Ancestry::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_500_is_unknown() {
+        let server = MockServer::start().await;
+        compare_mock(&server, 500, r#"{"message":"boom"}"#).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.ancestry("octo", "hello", &oid(OLD), &oid(NEW)).await,
+            Ancestry::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_garbage_body_is_unknown() {
+        let server = MockServer::start().await;
+        compare_mock(&server, 200, r#"{"status":"something-else"}"#).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.ancestry("octo", "hello", &oid(OLD), &oid(NEW)).await,
+            Ancestry::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_error_is_unknown_ancestry() {
+        // A dead upstream must fail closed, never guess.
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        drop(server);
+        let p = GitHubPlatform::with_bases(
+            Url::parse(&uri).expect("mock api base"),
+            Url::parse("http://git.example.internal/").expect("mock git base"),
+            Arc::new(|| None),
+        );
+        assert_eq!(
+            p.ancestry("octo", "hello", &oid(OLD), &oid(NEW)).await,
+            Ancestry::Unknown
+        );
+    }
+
+    async fn repo_mock(server: &MockServer, status: u16, body: &str) {
+        Mock::given(method("GET"))
+            .and(path(REPO_PATH))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn permissions_push_is_write() {
+        let server = MockServer::start().await;
+        repo_mock(
+            &server,
+            200,
+            r#"{"private":true,"permissions":{"push":true,"pull":true}}"#,
+        )
+        .await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.repo_permissions("octo", "hello").await,
+            Ok(RepoAccess {
+                role: Role::Write,
+                private: true,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn permissions_404_is_no_access() {
+        let server = MockServer::start().await;
+        repo_mock(&server, 404, r#"{"message":"Not Found"}"#).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.repo_permissions("octo", "hello").await,
+            Err(RepoAccessError::NoAccess)
+        );
+    }
+
+    #[tokio::test]
+    async fn permissions_all_false_is_none() {
+        let server = MockServer::start().await;
+        repo_mock(
+            &server,
+            200,
+            r#"{"private":false,"permissions":{"admin":false,"maintain":false,"push":false,"triage":false,"pull":false}}"#,
+        )
+        .await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.repo_permissions("octo", "hello").await,
+            Ok(RepoAccess {
+                role: Role::None,
+                private: false,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn permissions_503_is_upstream_error() {
+        let server = MockServer::start().await;
+        repo_mock(&server, 503, r#"{"message":"unavailable"}"#).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.repo_permissions("octo", "hello").await,
+            Err(RepoAccessError::Upstream(503))
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_permissions_object_is_role_none() {
+        let server = MockServer::start().await;
+        repo_mock(&server, 200, r#"{"private":false}"#).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.repo_permissions("octo", "hello").await,
+            Ok(RepoAccess {
+                role: Role::None,
+                private: false,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_token_is_sent_when_getter_supplies_one() {
+        let server = MockServer::start().await;
+        // Only a request carrying exactly this header matches: without the
+        // token the mock falls through to wiremock's default 404 and the
+        // call would fail closed with NoAccess instead of succeeding.
+        Mock::given(method("GET"))
+            .and(path(REPO_PATH))
+            .and(header("authorization", "Bearer s3cr3t"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"private":false,"permissions":{"pull":true}}"#),
+            )
+            .mount(&server)
+            .await;
+        let p = platform_with_token(&server, Some("s3cr3t"));
+        assert_eq!(
+            p.repo_permissions("octo", "hello").await,
+            Ok(RepoAccess {
+                role: Role::Read,
+                private: false,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn no_token_means_no_authorization_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(REPO_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"private":false,"permissions":{"pull":true}}"#),
+            )
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.repo_permissions("octo", "hello").await,
+            Ok(RepoAccess {
+                role: Role::Read,
+                private: false,
+            })
+        );
+        let requests = server.received_requests().await.expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            !requests[0].headers.contains_key("authorization"),
+            "no Authorization header may be sent without a stored token"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_bases_are_github() {
+        let p = GitHubPlatform::new(Arc::new(|| None));
+        assert_eq!(p.api_base().as_str(), "https://api.github.com/");
+        assert_eq!(
+            p.git_upstream_url("octo", "hello").as_str(),
+            "https://github.com/octo/hello.git"
+        );
+    }
+
+    #[test]
+    fn role_of_maps_highest_true_bit() {
+        let all_true = PermissionsObj {
+            admin: true,
+            maintain: true,
+            push: true,
+            triage: true,
+            pull: true,
+        };
+        assert_eq!(role_of(&all_true), Role::Admin);
+        let maintain_only = PermissionsObj {
+            admin: false,
+            maintain: true,
+            push: false,
+            triage: false,
+            pull: false,
+        };
+        assert_eq!(role_of(&maintain_only), Role::Maintain);
+        let push_only = PermissionsObj {
+            admin: false,
+            maintain: false,
+            push: true,
+            triage: false,
+            pull: true,
+        };
+        assert_eq!(role_of(&push_only), Role::Write);
+        let triage_only = PermissionsObj {
+            admin: false,
+            maintain: false,
+            push: false,
+            triage: true,
+            pull: false,
+        };
+        assert_eq!(role_of(&triage_only), Role::Triage);
+        let pull_only = PermissionsObj {
+            admin: false,
+            maintain: false,
+            push: false,
+            triage: false,
+            pull: true,
+        };
+        assert_eq!(role_of(&pull_only), Role::Read);
+        assert_eq!(role_of(&PermissionsObj::default()), Role::None);
+    }
+}
