@@ -776,7 +776,7 @@ async fn elevation_endpoint_known_and_unknown() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn preflight_registry_role_below_write_holds_before_upstream() {
+async fn preflight_registry_role_below_mapped_role_holds_before_upstream() {
     let gate = spawn_gate(ApprovalOutcome::Approved).await;
     gate.state
         .lock()
@@ -784,13 +784,15 @@ async fn preflight_registry_role_below_write_holds_before_upstream() {
         .registry_upsert("octo/reg", "read", "read", "device-flow")
         .unwrap();
 
+    // POST /issues is Triage-tier in the GATE-010 role map, so a read-tier
+    // grant is one below the mapped minimum.
     let resp = gate
         .send("POST", "/api/v3/repos/octo/reg/issues", br#"{"title":"x"}"#)
         .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let v = Gate::body_json(resp).await;
     assert_eq!(v["error"], "permission_pending", "{v}");
-    assert_eq!(v["needs_role"], "write");
+    assert_eq!(v["needs_role"], "triage");
     let elevation_id = v["elevation_id"].as_str().unwrap().to_string();
 
     // The placeholder flow row exists.

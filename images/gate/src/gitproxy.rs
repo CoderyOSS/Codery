@@ -32,11 +32,12 @@ use crate::pktline::{
     classify_ref_update, is_zero, parse_receive_pack_updates, ParseError, RefUpdate,
 };
 use crate::policy::PolicyEngine;
+use crate::rolemapping::{min_role, role_from_name, role_name, Action};
 use crate::routes::GateState;
 use crate::sphere::SphereResolver;
 use crate::state::State as DbState;
 use crate::tokens::AgentIdentity;
-use crate::types::{ActionClass, Ancestry, Classification, Decision};
+use crate::types::{ActionClass, Ancestry, Classification, Decision, Role};
 
 /// Path-grammar-valid owner/repo segment (T4 review pointer): ASCII
 /// letters/digits/`.`/`_`/`-`, no `..` runs, never a bare `.` (URL
@@ -455,6 +456,72 @@ fn err_response() -> Response {
         .into_response()
 }
 
+/// Route-level role pre-flight (GATE-010 §8, task 8): the push pipeline
+/// has no role check, so after it returns Forward/Hold and BEFORE anything
+/// is forwarded, own-sphere pushes to REGISTERED repos are checked against
+/// the role map — every ref-update class needs Write. A gap fails the push
+/// FAST with a git-friendly ERR naming the elevation id (the agent polls
+/// `/proxy/elevations/{id}` and retries once the elevation completes); the
+/// elevation conversation starts in the background. `None` ⇒ clear to
+/// forward.
+async fn preflight_role_gate(
+    gs: &GateState,
+    agent: &str,
+    repo_full: &str,
+    own_sphere: bool,
+) -> Option<Response> {
+    // Same scope as the API pre-flight: own sphere + a registry row.
+    if !own_sphere {
+        return None;
+    }
+    let row = {
+        let guard = gs.state.lock().expect("state lock must be poison-free");
+        guard.registry_get(repo_full).ok().flatten()
+    };
+    let Some(row) = row else {
+        return None;
+    };
+    let granted = role_from_name(&row.granted_role).unwrap_or(Role::None);
+    // Every ref-update class (push / force-push / branch+tag delete) is
+    // Write-tier in the GATE-010 map; Push is the canonical representative.
+    let needed = min_role(Action::Git(ActionClass::Push));
+    if granted >= needed {
+        return None;
+    }
+    let id = {
+        let guard = gs.state.lock().expect("state lock must be poison-free");
+        crate::telegram::elevation::open_or_join_flow(&guard, repo_full, "git-receive-pack", needed)
+    };
+    audit_push(
+        &gs.audit,
+        agent,
+        repo_full,
+        "deny",
+        &format!(
+            "preflight: registry role below {} (elevation {id})",
+            role_name(needed)
+        ),
+    );
+    let msg = format!(
+        "ERR permission_pending elevation_id={id} needs_role={} — grant the \
+         role through the gate's elevation flow; retry after it completes\n",
+        role_name(needed)
+    );
+    let mut body = pkt_line(msg.as_bytes());
+    body.extend_from_slice(b"0000");
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            [(
+                header::CONTENT_TYPE,
+                "application/x-git-receive-pack-result",
+            )],
+            body,
+        )
+            .into_response(),
+    )
+}
+
 fn bad_request(msg: &str) -> Response {
     (StatusCode::BAD_REQUEST, msg.to_string()).into_response()
 }
@@ -728,6 +795,11 @@ async fn receive_pack(
                         "forward",
                         "approval: approved",
                     );
+                    if let Some(resp) =
+                        preflight_role_gate(&gs, &agent_name, &repo_full, own_sphere).await
+                    {
+                        return resp;
+                    }
                     forward_receive(&gs, &deps, &agent_name, &repo_full, &owner, &repo, body)
                         .await
                 }
@@ -756,6 +828,11 @@ async fn receive_pack(
         Plan::Forward => {
             let basis = format!("policy: allow; classes: {}", classes.join("+"));
             audit_push(&gs.audit, &agent_name, &repo_full, "forward", &basis);
+            if let Some(resp) =
+                preflight_role_gate(&gs, &agent_name, &repo_full, own_sphere).await
+            {
+                return resp;
+            }
             forward_receive(&gs, &deps, &agent_name, &repo_full, &owner, &repo, body).await
         }
     }

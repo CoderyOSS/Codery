@@ -20,6 +20,17 @@ pub const DEFAULT_FLOW_REMINDER_SECS: u64 = 3600;
 /// after 7 days) for `GATE_FLOW_GIVE_UP_SECS`.
 pub const DEFAULT_FLOW_GIVE_UP_SECS: u64 = 7 * 24 * 3600;
 
+/// Default elevation batching window (~10 s, GATE-010 §8) for
+/// `GATE_ELEVATION_BATCH_SECS`: concurrent role gaps inside the window
+/// present as ONE combined consent message.
+pub const DEFAULT_ELEVATION_BATCH_SECS: u64 = 10;
+/// Default elevation silence before the ONE reminder (10 min, GATE-010 §9)
+/// for `GATE_ELEVATION_REMINDER_SECS`.
+pub const DEFAULT_ELEVATION_REMINDER_SECS: u64 = 600;
+/// Default elevation no-progress expiry (24 h, GATE-010 §9) for
+/// `GATE_ELEVATION_EXPIRE_SECS`.
+pub const DEFAULT_ELEVATION_EXPIRE_SECS: u64 = 24 * 3600;
+
 /// Parse a seconds override; unset/blank/garbage/zero ⇒ the default (a
 /// misparse must never disable a cadence).
 fn secs_from(v: Option<&str>, default: u64) -> u64 {
@@ -83,6 +94,15 @@ pub struct Config {
     /// Grant-flow give-up window in seconds (`GATE_FLOW_GIVE_UP_SECS`,
     /// default 7 days — GitHub invitations expire after 7 days).
     pub flow_give_up_secs: u64,
+    /// Elevation batching window in seconds (`GATE_ELEVATION_BATCH_SECS`,
+    /// default 10, GATE-010).
+    pub elevation_batch_secs: u64,
+    /// Elevation reminder delay in seconds (`GATE_ELEVATION_REMINDER_SECS`,
+    /// default 600 — the ONE reminder, GATE-010).
+    pub elevation_reminder_secs: u64,
+    /// Elevation no-progress expiry in seconds
+    /// (`GATE_ELEVATION_EXPIRE_SECS`, default 24 h, GATE-010).
+    pub elevation_expire_secs: u64,
 }
 
 /// Bot token as `Some` only when set and non-blank; blank ⇒ `None` (no
@@ -158,6 +178,18 @@ impl Config {
             flow_give_up_secs: secs_from(
                 env::var("GATE_FLOW_GIVE_UP_SECS").ok().as_deref(),
                 DEFAULT_FLOW_GIVE_UP_SECS,
+            ),
+            elevation_batch_secs: secs_from(
+                env::var("GATE_ELEVATION_BATCH_SECS").ok().as_deref(),
+                DEFAULT_ELEVATION_BATCH_SECS,
+            ),
+            elevation_reminder_secs: secs_from(
+                env::var("GATE_ELEVATION_REMINDER_SECS").ok().as_deref(),
+                DEFAULT_ELEVATION_REMINDER_SECS,
+            ),
+            elevation_expire_secs: secs_from(
+                env::var("GATE_ELEVATION_EXPIRE_SECS").ok().as_deref(),
+                DEFAULT_ELEVATION_EXPIRE_SECS,
             ),
         })
     }
@@ -303,6 +335,10 @@ mod tests {
         assert_eq!(DEFAULT_FLOW_POLL_SECS, 5);
         assert_eq!(DEFAULT_FLOW_REMINDER_SECS, 3600);
         assert_eq!(DEFAULT_FLOW_GIVE_UP_SECS, 7 * 24 * 3600);
+        // Elevation values (task 8), pinned verbatim from GATE-010 §8–9.
+        assert_eq!(DEFAULT_ELEVATION_BATCH_SECS, 10);
+        assert_eq!(DEFAULT_ELEVATION_REMINDER_SECS, 600);
+        assert_eq!(DEFAULT_ELEVATION_EXPIRE_SECS, 24 * 3600);
     }
 
     #[test]

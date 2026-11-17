@@ -25,6 +25,17 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// One row of the `flows` table: a durable control-flow (elevation, grant,
+/// setup run) with its kind, current state and JSON payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowRow {
+    pub id: String,
+    pub kind: String,
+    pub flow_state: String,
+    pub payload_json: String,
+    pub updated_at: i64,
+}
+
 /// Wrapper over the SQLite connection holding all gate state.
 pub struct State {
     conn: Connection,
@@ -298,6 +309,85 @@ impl State {
             .optional()
             .map_err(Into::into)
     }
+
+    /// The full flow row for `id` (`None` when unknown) — the elevation
+    /// endpoint and the elevation state machine read kind, state, payload
+    /// and the last-progress timestamp.
+    pub fn flow_get(&self, id: &str) -> anyhow::Result<Option<FlowRow>> {
+        self.conn()
+            .query_row(
+                "SELECT id, kind, state, payload_json, updated_at
+                 FROM flows WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok(FlowRow {
+                        id: r.get(0)?,
+                        kind: r.get(1)?,
+                        flow_state: r.get(2)?,
+                        payload_json: r.get(3)?,
+                        updated_at: r.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Every flow row of `kind`, oldest progress first.
+    pub fn flows_list(&self, kind: &str) -> anyhow::Result<Vec<FlowRow>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, kind, state, payload_json, updated_at
+             FROM flows WHERE kind = ?1 ORDER BY updated_at",
+        )?;
+        let mapped = stmt.query_map([kind], |r| {
+            Ok(FlowRow {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                flow_state: r.get(2)?,
+                payload_json: r.get(3)?,
+                updated_at: r.get(4)?,
+            })
+        })?;
+        Ok(mapped.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Write a flow's state + payload WITHOUT stamping `updated_at` — a
+    /// background detail (an extra action joining an elevation flow during
+    /// its collection window) must not reset the detection clock the
+    /// batching window measures. Transitions (real progress) go through
+    /// [`flow_insert`], which stamps.
+    pub fn flow_patch_quiet(
+        &self,
+        id: &str,
+        flow_state: &str,
+        payload_json: &str,
+    ) -> anyhow::Result<()> {
+        self.conn().execute(
+            "UPDATE flows SET state = ?2, payload_json = ?3 WHERE id = ?1",
+            rusqlite::params![id, flow_state, payload_json],
+        )?;
+        Ok(())
+    }
+}
+
+/// RFC 4122 uuid v4 from the platform entropy source (no extra crate).
+/// Shared by every module that mints flow ids (elevations).
+pub(crate) fn uuid_v4() -> String {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("entropy source failed");
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+    let hex = |bytes: &[u8]| -> String {
+        bytes.iter().map(|x| format!("{x:02x}")).collect::<String>()
+    };
+    format!(
+        "{}-{}-{}-{}-{}",
+        hex(&b[0..4]),
+        hex(&b[4..6]),
+        hex(&b[6..8]),
+        hex(&b[8..10]),
+        hex(&b[10..16]),
+    )
 }
 
 #[cfg(test)]

@@ -18,6 +18,10 @@ use gate::state::State as DbState;
 use gate::tasks::{run_daily_loop, startup_check, DAILY_INTERVAL, LifecycleDeps};
 use gate::telegram::approvals::{register_approvals, TelegramApprovalBackend};
 use gate::telegram::commands::{register_commands, CommandDeps};
+use gate::telegram::elevation::{
+    nonce_lookup as elevation_nonce_lookup, register_elevation, ElevationDeps,
+    ElevationHandler, NullReductionFlow,
+};
 use gate::telegram::grant::{GrantOfferDeps, RealGrantFlow};
 use gate::telegram::lifecycle::{register_lifecycle, nonce_lookup as rotate_nonce_lookup};
 use gate::telegram::setup::{
@@ -155,6 +159,30 @@ async fn main() -> anyhow::Result<()> {
         audit: audit.clone(),
     });
 
+    // Elevation sweep (GATE-010 §8–9, task 8): expires stale elevation
+    // flows after 24 h and takes over DETECTED rows (proxy pre-flight AND
+    // the 403 error mapping feed the same rows) — consent asks go to the
+    // operator chat when the bot is configured. The reduction seam is the
+    // Task-9 placeholder until B9 ships the real reducer.
+    let elevation_deps = Arc::new(ElevationDeps {
+        state: state.clone(),
+        platform: platform.clone(),
+        machine_login: machine_login.clone(),
+        notify: telegram_notify.clone(),
+        batch_window: Duration::from_secs(cfg.elevation_batch_secs),
+        poll: Duration::from_secs(cfg.flow_poll_secs),
+        reminder_after: Duration::from_secs(cfg.elevation_reminder_secs),
+        expire_after: Duration::from_secs(cfg.elevation_expire_secs),
+        reduction: Arc::new(NullReductionFlow),
+        audit: audit.clone(),
+    });
+    let (_elevation_shutdown_tx, elevation_shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(gate::telegram::elevation::run_elevation_sweep(
+        (*elevation_deps).clone(),
+        elevation_shutdown_rx,
+        Duration::from_secs(cfg.flow_poll_secs),
+    ));
+
     // Telegram control plane (GATE-006): spawn the long-poll loop ONLY
     // when a bot token is configured — core git/API serving must work
     // without the bot. An empty allowlist keeps the loop running but drops
@@ -186,11 +214,17 @@ async fn main() -> anyhow::Result<()> {
         let approvals = TelegramApprovalBackend::nonce_lookup(state.clone());
         let rotate = rotate_nonce_lookup(state.clone());
         let setup = setup_nonce_lookup(state.clone());
+        let elevation = elevation_nonce_lookup(state.clone());
         router.set_nonce_lookup(Arc::new(move |flow| {
             approvals(flow)
                 .or_else(|| rotate(flow))
                 .or_else(|| setup(flow))
+                .or_else(|| elevation(flow))
         }));
+        register_elevation(
+            &mut router,
+            Arc::new(ElevationHandler::new((*elevation_deps).clone())),
+        );
         register_commands(
             &mut router,
             Arc::new(CommandDeps {

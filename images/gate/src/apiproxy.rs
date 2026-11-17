@@ -36,6 +36,7 @@ use crate::audit::{Audit, AuditEntry};
 use crate::errors::AgentError;
 use crate::github::{Platform, RepoAccessError};
 use crate::policy::PolicyEngine;
+use crate::rolemapping::{classify_api, min_role, role_from_name, role_name, Action};
 use crate::routes::GateState;
 use crate::sphere::SphereResolver;
 use crate::state::State as DbState;
@@ -240,25 +241,32 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
         None => false,
     };
 
-    // Pre-flight role gap (P0 heuristic; Plan B Task 6 replaces it with the
-    // real role map). Only own-sphere, repo-scoped, write-method mutations
-    // on REGISTERED repos are checked; third-party repos skip to approval.
+    // Pre-flight role gap (GATE-010 role map, task B8): the minimum role
+    // the map assigns to this action decides. Only own-sphere, repo-scoped,
+    // write-method mutations on REGISTERED repos are checked; third-party
+    // repos skip to approval. Fail-fast (binding ADR ruling): a gap
+    // answers `permission_pending` immediately and opens (or joins) the
+    // repo's elevation flow — the request NEVER waits on the role change;
+    // the agent retries after the elevation completes.
     if let (Some((owner, repo)), true) = (&scoped, is_write_method(&method)) {
         if own_sphere {
+            let needed = min_role(Action::Api(classify_api(method.as_str(), &format!("/{rest}"))));
+            let needed_name = role_name(needed);
             let row = {
                 let guard = gs.state.lock().expect("state lock must be poison-free");
                 guard.registry_get(&repo_label).ok().flatten()
             };
             if let Some(row) = row {
-                if parse_role(&row.granted_role) < Role::Write {
+                let granted = role_from_name(&row.granted_role).unwrap_or(Role::None);
+                if granted < needed {
                     let id = {
                         let guard =
                             gs.state.lock().expect("state lock must be poison-free");
-                        start_elevation_flow(
+                        crate::telegram::elevation::open_or_join_flow(
                             &guard,
                             &repo_label,
-                            &rest,
-                            "registry role below write",
+                            &format!("/{rest}"),
+                            needed,
                         )
                     };
                     audit_api(
@@ -266,11 +274,11 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
                         &agent_name,
                         &repo_label,
                         "deny",
-                        "preflight: registry role below write",
+                        &format!("preflight: registry role below {needed_name}"),
                     );
-                    return AgentError::permission_pending(id, "write").into_response();
+                    return AgentError::permission_pending(id, needed_name).into_response();
                 }
-                // Registry grant suffices on paper; verify it still holds.
+                // Registry grant covers the map; verify it still holds.
                 match deps.platform.repo_permissions(owner, repo).await {
                     Err(RepoAccessError::NoAccess) => {
                         // GATE-010 grant-offer trigger: a mutation hit a
@@ -297,17 +305,17 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
                     // A transient upstream failure must not invent a deny;
                     // let forwarding surface the real error.
                     Err(RepoAccessError::Upstream(_)) => {}
-                    Ok(access) if access.role < Role::Write => {
+                    Ok(access) if access.role < needed => {
                         let id = {
                             let guard = gs
                                 .state
                                 .lock()
                                 .expect("state lock must be poison-free");
-                            start_elevation_flow(
+                            crate::telegram::elevation::open_or_join_flow(
                                 &guard,
                                 &repo_label,
-                                &rest,
-                                "live role below write",
+                                &format!("/{rest}"),
+                                needed,
                             )
                         };
                         audit_api(
@@ -315,9 +323,9 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
                             &agent_name,
                             &repo_label,
                             "deny",
-                            "preflight: live role below write",
+                            &format!("preflight: live role below {needed_name}"),
                         );
-                        return AgentError::permission_pending(id, "write").into_response();
+                        return AgentError::permission_pending(id, needed_name).into_response();
                     }
                     Ok(_) => {}
                 }
@@ -496,7 +504,7 @@ async fn forward_and_respond(
     let text = String::from_utf8_lossy(&resp_body).into_owned();
     let mapping = {
         let guard = gs.state.lock().expect("state lock must be poison-free");
-        map_upstream_error(status, &resp_headers, &text, rest, &guard)
+        map_upstream_error(status, &resp_headers, &text, method.as_str(), rest, &guard)
     };
     match mapping {
         Ok(()) => {
@@ -525,6 +533,12 @@ async fn forward_and_respond(
                     .await;
                 }
             }
+            // GATE-010 contradiction logging (B6 handoff): GitHub rejected
+            // with a role-gap the registry's role actually covers — the map
+            // said "allowed", reality said no. Audit it for map fixes.
+            if let AgentError::PermissionPending { .. } = &e {
+                log_rolemap_contradiction(gs, agent, method, rest, status);
+            }
             audit_api(
                 &gs.audit,
                 agent,
@@ -537,28 +551,83 @@ async fn forward_and_respond(
     }
 }
 
-/// Elevation status endpoint: `{"id","state"}` from the `flows` table;
-/// Plan B's control plane rewrites `state` as the flow progresses.
+/// Audit a `rolemap.contradiction` event when the upstream refused an
+/// action (403 admin-rights) the role map + registry said was allowed.
+/// Carries method + path so the P0 heuristic table is fixable. The audit
+/// is deliberately one event per contradiction, keyed by method/path.
+fn log_rolemap_contradiction(
+    gs: &GateState,
+    agent: &str,
+    method: &Method,
+    rest: &str,
+    status: u16,
+) {
+    let Some((owner, repo)) = repo_of_path(rest) else {
+        return;
+    };
+    let repo_label = format!("{owner}/{repo}");
+    let needed = min_role(Action::Api(classify_api(method.as_str(), &format!("/{rest}"))));
+    let granted = {
+        let guard = gs.state.lock().expect("state lock must be poison-free");
+        guard
+            .registry_get(&repo_label)
+            .ok()
+            .flatten()
+            .and_then(|r| role_from_name(&r.granted_role))
+            .unwrap_or(Role::None)
+    };
+    if granted < needed {
+        return; // the map agreed with reality — no contradiction
+    }
+    gs.audit.record(AuditEntry {
+        ts: crate::state::now(),
+        agent: Some(agent.to_string()),
+        repo: repo_label,
+        action: "rolemap.contradiction".to_string(),
+        decision: "deny".to_string(),
+        basis: format!(
+            "{method} /{rest}: registry role {} covers {} but upstream answered {status}",
+            role_name(granted),
+            role_name(needed),
+        ),
+        approver: None,
+    });
+}
+
+/// Elevation status endpoint: `{"id","state",...}` from the `flows` table
+/// plus the gap detail (repo, needed role, temporary flag) agents poll
+/// after a `permission_pending`. The elevation state machine (telegram::
+/// elevation) rewrites `state` as the flow progresses.
 async fn elevation(
     State(gs): State<Arc<GateState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    let state_str = {
+    let row = {
         let guard = gs.state.lock().expect("state lock must be poison-free");
-        guard.flow_state(&id)
+        guard.flow_get(&id)
     };
-    match state_str {
-        Ok(Some(flow_state)) => (
-            StatusCode::OK,
-            Json(json!({ "id": id, "state": flow_state })),
-        )
-            .into_response(),
-        _ => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "message": "no such flow" })),
-        )
-            .into_response(),
+    let row = match row {
+        Ok(Some(row)) if row.kind == "elevation" => row,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "no such flow" })),
+            )
+                .into_response()
+        }
+    };
+    let payload = crate::telegram::elevation::ElevationPayload::from_json(&row.payload_json);
+    let mut body = json!({ "id": id, "state": row.flow_state });
+    if !payload.repo.is_empty() {
+        body["repo"] = json!(payload.repo);
     }
+    if !payload.needed_role.is_empty() {
+        body["needs_role"] = json!(payload.needed_role);
+    }
+    if let Some(temporary) = payload.temporary {
+        body["temporary"] = json!(temporary);
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 /// Map an upstream failure to a GATE-010 agent error; `Ok(())` means "not
@@ -569,15 +638,18 @@ async fn elevation(
 ///   is Plan B's job; here the agent just learns the setup flow must run).
 /// - 401 ⇒ `credential_unavailable` (the machine credential stopped
 ///   working mid-flight).
-/// - 403 + body containing "admin rights" ⇒ `permission_pending` with a
-///   placeholder elevation flow row (`kind='elevation'`,
-///   `state='DETECTED'`) so the endpoint and Plan B have something real.
+/// - 403 + body containing "admin rights" ⇒ `permission_pending` with an
+///   elevation flow row (`kind='elevation'`) opened/joined through the
+///   SAME flow system the pre-flight uses — the needed role comes from the
+///   GATE-010 role map (`classify_api` on method+path), and the endpoint +
+///   the elevation sweep see one system.
 /// - 403 + `X-Accepted-OAuth-Scopes` naming a scope the token does not
 ///   carry ⇒ `role_unavailable` naming that scope.
 pub fn map_upstream_error(
     status: u16,
     headers: &HeaderMap,
     body: &str,
+    method: &str,
     path: &str,
     state: &DbState,
 ) -> Result<(), AgentError> {
@@ -593,13 +665,14 @@ pub fn map_upstream_error(
         },
         403 => {
             if body.contains("admin rights") {
-                let id = start_elevation_flow(
+                let needed = min_role(Action::Api(classify_api(method, &format!("/{path}"))));
+                let id = crate::telegram::elevation::open_or_join_flow(
                     state,
                     repo.as_deref().unwrap_or("-"),
                     path,
-                    "upstream demands admin rights",
+                    needed,
                 );
-                Err(AgentError::permission_pending(id, "admin"))
+                Err(AgentError::permission_pending(id, role_name(needed)))
             } else if let Some(scope) = missing_scope(headers) {
                 Err(AgentError::role_unavailable(&scope))
             } else {
@@ -608,41 +681,6 @@ pub fn map_upstream_error(
         }
         _ => Ok(()),
     }
-}
-
-/// Generate a placeholder elevation id (uuid v4) and persist the flow row
-/// the endpoint and Plan B read. State writes must not be swallowed — a
-/// failure here is loud (same posture as the audit log).
-fn start_elevation_flow(state: &DbState, repo: &str, path: &str, reason: &str) -> String {
-    let id = uuid_v4();
-    let payload = json!({
-        "repo": repo,
-        "path": path,
-        "reason": reason,
-    });
-    state
-        .flow_insert(&id, "elevation", "DETECTED", &payload.to_string())
-        .expect("elevation flow row must persist");
-    id
-}
-
-/// RFC 4122 uuid v4 from the platform entropy source (no extra crate).
-fn uuid_v4() -> String {
-    let mut b = [0u8; 16];
-    getrandom::fill(&mut b).expect("entropy source failed");
-    b[6] = (b[6] & 0x0f) | 0x40; // version 4
-    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
-    let hex = |bytes: &[u8]| -> String {
-        bytes.iter().map(|x| format!("{x:02x}")).collect::<String>()
-    };
-    format!(
-        "{}-{}-{}-{}-{}",
-        hex(&b[0..4]),
-        hex(&b[4..6]),
-        hex(&b[6..8]),
-        hex(&b[8..10]),
-        hex(&b[10..16]),
-    )
 }
 
 /// `owner/repo` for `/repos/{owner}/{repo}...` paths (repo-scoped), else
@@ -664,19 +702,6 @@ fn repo_label_of(rest: &str) -> String {
     repo_of_path(rest)
         .map(|(o, r)| format!("{o}/{r}"))
         .unwrap_or_else(|| "-".to_string())
-}
-
-/// Registry role spellings → [`Role`]; unknown spellings fail closed to
-/// [`Role::None`].
-fn parse_role(spelling: &str) -> Role {
-    match spelling {
-        "admin" => Role::Admin,
-        "maintain" => Role::Maintain,
-        "write" => Role::Write,
-        "triage" => Role::Triage,
-        "read" => Role::Read,
-        _ => Role::None,
-    }
 }
 
 /// Methods the P0 heuristic treats as needing Write: POST/PUT/PATCH/DELETE.
@@ -892,7 +917,7 @@ mod tests {
         let s = state();
         for status in [200, 201, 204, 301, 302, 399] {
             assert_eq!(
-                map_upstream_error(status, &headers(&[]), "", "repos/o/r", &s),
+                map_upstream_error(status, &headers(&[]), "", "GET", "repos/o/r", &s),
                 Ok(()),
                 "{status}"
             );
@@ -906,6 +931,7 @@ mod tests {
             404,
             &headers(&[]),
             r#"{"message":"Not Found"}"#,
+            "GET",
             "repos/octo/hello/issues/1",
             &s,
         )
@@ -921,7 +947,7 @@ mod tests {
     fn non_repo_404_passes_through() {
         let s = state();
         assert_eq!(
-            map_upstream_error(404, &headers(&[]), r#"{"message":"Not Found"}"#, "user", &s),
+            map_upstream_error(404, &headers(&[]), r#"{"message":"Not Found"}"#, "GET", "user", &s),
             Ok(())
         );
     }
@@ -933,6 +959,7 @@ mod tests {
             401,
             &headers(&[]),
             r#"{"message":"Bad credentials"}"#,
+            "GET",
             "repos/octo/hello",
             &s,
         )
@@ -947,6 +974,7 @@ mod tests {
             403,
             &headers(&[]),
             r#"{"message":"Must have admin rights to Repository."}"#,
+            "POST",
             "repos/octo/hello/hooks",
             &s,
         )
@@ -983,7 +1011,7 @@ mod tests {
             ("x-accepted-oauth-scopes", "repo, admin:org"),
             ("x-oauth-scopes", "public_repo, read:org"),
         ]);
-        let e = map_upstream_error(403, &hs, r#"{"message":"Forbidden"}"#, "repos/octo/hello", &s)
+        let e = map_upstream_error(403, &hs, r#"{"message":"Forbidden"}"#, "POST", "repos/octo/hello", &s)
             .unwrap_err();
         assert_eq!(e.kind(), "role_unavailable");
         let AgentError::RoleUnavailable { message } = e else {
@@ -996,11 +1024,11 @@ mod tests {
     fn unmapped_403_and_5xx_pass_through() {
         let s = state();
         assert_eq!(
-            map_upstream_error(403, &headers(&[]), r#"{"message":"Forbidden"}"#, "repos/o/r", &s),
+            map_upstream_error(403, &headers(&[]), r#"{"message":"Forbidden"}"#, "POST", "repos/o/r", &s),
             Ok(())
         );
         assert_eq!(
-            map_upstream_error(500, &headers(&[]), "boom", "repos/o/r", &s),
+            map_upstream_error(500, &headers(&[]), "boom", "POST", "repos/o/r", &s),
             Ok(())
         );
     }
@@ -1017,17 +1045,6 @@ mod tests {
         assert_eq!(repo_of_path("repos//hello"), None);
         assert_eq!(repo_of_path("user"), None);
         assert_eq!(repo_of_path("graphql"), None);
-    }
-
-    #[test]
-    fn parse_role_maps_registry_spellings_fail_closed() {
-        assert_eq!(parse_role("admin"), Role::Admin);
-        assert_eq!(parse_role("maintain"), Role::Maintain);
-        assert_eq!(parse_role("write"), Role::Write);
-        assert_eq!(parse_role("triage"), Role::Triage);
-        assert_eq!(parse_role("read"), Role::Read);
-        assert_eq!(parse_role(""), Role::None);
-        assert_eq!(parse_role("superuser"), Role::None);
     }
 
     #[test]
@@ -1154,7 +1171,7 @@ mod tests {
     #[test]
     fn uuid_v4_is_rfc4122_shaped() {
         for _ in 0..8 {
-            let id = uuid_v4();
+            let id = crate::state::uuid_v4();
             assert_eq!(id.len(), 36, "{id}");
             let parts: Vec<&str> = id.split('-').collect();
             assert_eq!(
@@ -1167,6 +1184,6 @@ mod tests {
             let variant = u8::from_str_radix(&parts[3][..1], 16).unwrap();
             assert!((8..=11).contains(&variant), "variant bits: {id}");
         }
-        assert_ne!(uuid_v4(), uuid_v4());
+        assert_ne!(crate::state::uuid_v4(), crate::state::uuid_v4());
     }
 }
