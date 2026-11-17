@@ -130,6 +130,7 @@ impl Ctl {
                 audit,
                 machine_token,
                 lifecycle: None,
+                grant: None,
             }),
         );
         register_setup(&mut router, deps.clone());
@@ -966,6 +967,7 @@ async fn spawn_form_gate() -> FormGate {
             audit,
             machine_token,
             lifecycle: None,
+            grant: None,
         }),
     );
     register_setup(&mut router, deps.clone());

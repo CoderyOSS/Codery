@@ -27,6 +27,7 @@
 
 pub mod approvals;
 pub mod commands;
+pub mod grant;
 pub mod lifecycle;
 pub mod send;
 pub mod setup;

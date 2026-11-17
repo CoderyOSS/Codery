@@ -328,6 +328,20 @@ mod tests {
         async fn user_exists(&self, _: &str) -> bool {
             unimplemented!("not used by registry tests")
         }
+
+        async fn repository_invitations(
+            &self,
+        ) -> Result<Vec<crate::github::Invitation>, crate::github::InviteError> {
+            unimplemented!("not used by registry tests")
+        }
+
+        async fn accept_invitation(&self, _: i64) -> Result<(), crate::github::InviteError> {
+            unimplemented!("not used by registry tests")
+        }
+
+        async fn org_plan_note(&self, _: &str) -> Option<String> {
+            unimplemented!("not used by registry tests")
+        }
     }
 
     // -- harness -------------------------------------------------------------

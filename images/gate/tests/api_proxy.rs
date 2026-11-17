@@ -23,6 +23,8 @@ use gate::github::{GitHubPlatform, Platform};
 use gate::policy::{PolicyEngine, PolicyFile};
 use gate::routes::{router, GateState, RateLimiter};
 use gate::state::State as DbState;
+use gate::telegram::fake::FakeTelegram;
+use gate::telegram::grant::GrantOfferDeps;
 use gate::tokens::TokenStore;
 
 const AGENT: &str = "claude-code";
@@ -44,6 +46,9 @@ struct Gate {
     audit_path: PathBuf,
     dir: PathBuf,
     state: Arc<Mutex<DbState>>,
+    /// The grant-offer channel when the gate was spawned with the offer
+    /// hook on (`spawn_gate_with_offer`); `None` otherwise.
+    telegram: Option<Arc<FakeTelegram>>,
 }
 
 impl Drop for Gate {
@@ -162,6 +167,22 @@ async fn spawn_gate_full(
     machine_token: Option<&str>,
     max_body_bytes: usize,
 ) -> Gate {
+    spawn_gate_opts(auto, policy_src, machine_token, max_body_bytes, false).await
+}
+
+/// Variant with the GATE-010 grant-offer hook wired to a FakeTelegram.
+async fn spawn_gate_with_offer(auto: ApprovalOutcome) -> Gate {
+    spawn_gate_opts(auto, DEFAULT_POLICY, Some(MACHINE_TOKEN), DEFAULT_MAX_BODY_BYTES, true)
+        .await
+}
+
+async fn spawn_gate_opts(
+    auto: ApprovalOutcome,
+    policy_src: &str,
+    machine_token: Option<&str>,
+    max_body_bytes: usize,
+    offer: bool,
+) -> Gate {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -203,7 +224,7 @@ async fn spawn_gate_full(
     ));
     let policy = PolicyEngine::new(&PolicyFile::parse(policy_src).unwrap());
     let backend = Arc::new(StubBackend::new(state.clone(), audit.clone(), auto).unwrap());
-    let api = ApiDeps::new(
+    let mut api = ApiDeps::new(
         state.clone(),
         platform,
         policy,
@@ -212,6 +233,17 @@ async fn spawn_gate_full(
         APPROVAL_TIMEOUT,
     )
     .unwrap();
+    let telegram = if offer {
+        let fake = Arc::new(FakeTelegram::new());
+        api.offer = Some(GrantOfferDeps {
+            state: state.clone(),
+            notify: Some((fake.clone(), 4242)),
+            machine_login: "gate-machine".to_string(),
+        });
+        Some(fake)
+    } else {
+        None
+    };
 
     let gs = GateState {
         state: state.clone(),
@@ -243,6 +275,7 @@ async fn spawn_gate_full(
         audit_path,
         dir,
         state: state.clone(),
+        telegram,
     }
 }
 
@@ -819,6 +852,83 @@ async fn preflight_registered_role_ok_forwards_after_approval() {
     let audit = gate.api_audit();
     let decisions: Vec<&str> = audit.iter().map(|l| l["decision"].as_str().unwrap()).collect();
     assert_eq!(decisions, vec!["hold", "forward"], "{audit:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Grant-offer trigger (GATE-010): mutation + no-access ⇒ offer, debounced
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutation_404_offers_grant_once_reads_never_offer() {
+    let gate = spawn_gate_with_offer(ApprovalOutcome::Approved).await;
+    mount_get(
+        &gate,
+        "/repos/octo/ghost/issues",
+        404,
+        r#"{"message":"Not Found"}"#,
+    )
+    .await;
+    mount_post(
+        &gate,
+        "/repos/octo/ghost/issues",
+        404,
+        r#"{"message":"Not Found"}"#,
+    )
+    .await;
+
+    // First mutation: access_pending + exactly one offer message.
+    let resp = gate
+        .send("POST", "/api/v3/repos/octo/ghost/issues", br#"{"title":"x"}"#)
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let v = Gate::body_json(resp).await;
+    assert_eq!(v["error"], "access_pending");
+    let fake = gate.telegram.as_ref().expect("offer channel wired");
+    assert_eq!(fake.sent().len(), 1, "one offer: {:?}", fake.sent());
+    assert!(
+        fake.sent()[0].text.contains("octo/ghost") && fake.sent()[0].text.contains("/grant"),
+        "the offer names the repo and /grant: {}",
+        fake.sent()[0].text
+    );
+
+    // Second mutation the same day: debounced — still one message.
+    let resp = gate
+        .send("POST", "/api/v3/repos/octo/ghost/issues", br#"{"title":"y"}"#)
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(fake.sent().len(), 1, "the daily marker debounces the offer");
+
+    // A READ hitting the same 404 never offers (still one message).
+    let resp = gate
+        .send("GET", "/api/v3/repos/octo/ghost/issues", b"")
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(fake.sent().len(), 1, "reads never trigger offers");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preflight_noaccess_offers_the_grant_too() {
+    let gate = spawn_gate_with_offer(ApprovalOutcome::Approved).await;
+    gate.state
+        .lock()
+        .unwrap()
+        .registry_upsert("octo/reg", "write", "write", "device-flow")
+        .unwrap();
+    mount_repo_get(&gate, "octo", "reg", 404, r#"{"message":"Not Found"}"#).await;
+
+    let resp = gate
+        .send("POST", "/api/v3/repos/octo/reg/issues", br#"{"title":"x"}"#)
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let fake = gate.telegram.as_ref().expect("offer channel wired");
+    assert_eq!(fake.sent().len(), 1, "pre-flight no-access offers: {:?}", fake.sent());
+    assert!(fake.sent()[0].text.contains("octo/reg"), "{}", fake.sent()[0].text);
+
+    let resp = gate
+        .send("POST", "/api/v3/repos/octo/reg/issues", br#"{"title":"x"}"#)
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(fake.sent().len(), 1, "debounced on the second trigger");
 }
 
 // ---------------------------------------------------------------------------

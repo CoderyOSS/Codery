@@ -77,6 +77,23 @@ pub trait Platform: Send + Sync {
     /// non-200 or transport failure is `false` — fail closed, "not there
     /// yet", never an advance.
     async fn user_exists(&self, username: &str) -> bool;
+
+    /// The machine account's pending repository invitations (GATE-010
+    /// grant flow): `GET /user/repository_invitations`, narrowed to the
+    /// invitation id and the repo's full name. Any non-200 or unparsable
+    /// body is an error — the caller keeps polling, never guesses.
+    async fn repository_invitations(&self) -> Result<Vec<Invitation>, InviteError>;
+
+    /// Accept one pending invitation: `PATCH
+    /// /user/repository_invitations/{id}`. Any 2xx is success.
+    async fn accept_invitation(&self, id: i64) -> Result<(), InviteError>;
+
+    /// The org's paid-plan name (e.g. `"team"`) when `GET /orgs/{org}` is
+    /// visible to the machine account AND carries a `plan` field; `None`
+    /// when the org is invisible, has no plan, or the body is unusable —
+    /// the seat note (GATE-010) is best-effort information, and a personal
+    /// owner answers 404 here, which is exactly the org-vs-personal split.
+    async fn org_plan_note(&self, org: &str) -> Option<String>;
 }
 
 /// Result of a successful machine-token verification (GATE-004): the
@@ -129,6 +146,14 @@ pub const SECURITY_SETTINGS_URL: &str = "https://github.com/settings/security";
 pub const SETUP_GUIDE_URL: &str =
     "https://github.com/CoderyOSS/Codery/blob/main/docs/guides/gitauthgate-setup.md";
 
+/// Collaborator settings page for one repo — the grant instructions'
+/// `[Open collaborator settings]` link (GATE-010). Like every
+/// `github.com` literal, the URL is built ONLY in this module; the
+/// Telegram layer (grant.rs) consumes the helper and carries no literal.
+pub fn collaborator_settings_url(owner: &str, repo: &str) -> String {
+    format!("https://github.com/{owner}/{repo}/settings/access")
+}
+
 /// The authenticated caller's access to a repo (GATE-008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepoAccess {
@@ -143,6 +168,23 @@ pub enum RepoAccessError {
     NoAccess,
     /// Any other upstream failure; carries the HTTP status, or 0 when the
     /// failure was at the transport level (no HTTP response at all).
+    Upstream(u16),
+}
+
+/// One pending repository invitation for the machine account (GATE-010
+/// grant flow).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invitation {
+    /// The invitation id `PATCH /user/repository_invitations/{id}` needs.
+    pub id: i64,
+    /// `owner/repo` the invitation is for.
+    pub repo_full_name: String,
+}
+
+/// Invitation listing/acceptance failure (fail closed): a transport
+/// failure carries status 0, anything else the HTTP status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InviteError {
     Upstream(u16),
 }
 
@@ -221,6 +263,32 @@ struct UserResponse {
     id: i64,
     #[serde(default)]
     two_factor_authentication: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct InvitationResponse {
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    repository: InvitationRepo,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct InvitationRepo {
+    #[serde(default)]
+    full_name: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OrgResponse {
+    #[serde(default)]
+    plan: OrgPlan,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OrgPlan {
+    #[serde(default)]
+    name: String,
 }
 
 /// REST client for GitHub with per-request machine-token injection. The
@@ -528,6 +596,61 @@ impl Platform for GitHubPlatform {
             Err(_) => return false,
         };
         response.status() == StatusCode::OK
+    }
+
+    async fn repository_invitations(&self) -> Result<Vec<Invitation>, InviteError> {
+        let url = self
+            .api_base
+            .join("user/repository_invitations")
+            .map_err(|_| InviteError::Upstream(0))?;
+        let response = self
+            .authorize(self.client.get(url))
+            .send()
+            .await
+            .map_err(|_| InviteError::Upstream(0))?;
+        if response.status() != StatusCode::OK {
+            return Err(InviteError::Upstream(response.status().as_u16()));
+        }
+        let body: Vec<InvitationResponse> = response
+            .json()
+            .await
+            .map_err(|_| InviteError::Upstream(StatusCode::OK.as_u16()))?;
+        Ok(body
+            .into_iter()
+            .map(|i| Invitation {
+                id: i.id,
+                repo_full_name: i.repository.full_name,
+            })
+            .collect())
+    }
+
+    async fn accept_invitation(&self, id: i64) -> Result<(), InviteError> {
+        let url = self
+            .api_base
+            .join(&format!("user/repository_invitations/{id}"))
+            .map_err(|_| InviteError::Upstream(0))?;
+        let response = self
+            .authorize(self.client.patch(url))
+            .send()
+            .await
+            .map_err(|_| InviteError::Upstream(0))?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            Ok(())
+        } else {
+            Err(InviteError::Upstream(status))
+        }
+    }
+
+    async fn org_plan_note(&self, org: &str) -> Option<String> {
+        let url = self.api_base.join(&format!("orgs/{org}")).ok()?;
+        let response = self.authorize(self.client.get(url)).send().await.ok()?;
+        if response.status() != StatusCode::OK {
+            return None;
+        }
+        let body: OrgResponse = response.json().await.ok()?;
+        let name = body.plan.name;
+        (!name.is_empty()).then_some(name)
     }
 }
 
@@ -1220,7 +1343,12 @@ mod tests {
         let p = platform_at(&server);
         assert!(!p.user_exists("rob-agent").await, "500 ⇒ false, never an advance");
 
-        // Dead upstream: every request fails at the transport level.
+        // Dead upstream: every request fails at the transport level. The
+        // probe uses a username NO sibling test serves — after the server
+        // is dropped the OS can recycle its port to a parallel test's
+        // mock, and a shared name (e.g. rob-agent, served 200 by the
+        // setup-flow harness) would answer instead of refusing,
+        // nondeterministically failing this test.
         let uri = server.uri();
         drop(server);
         let dead = GitHubPlatform::with_bases(
@@ -1228,7 +1356,10 @@ mod tests {
             Url::parse("http://git.example.internal/").unwrap(),
             Arc::new(|| None),
         );
-        assert!(!dead.user_exists("rob-agent").await, "transport error ⇒ false");
+        assert!(
+            !dead.user_exists("transport-probe-nobody-serves").await,
+            "transport error ⇒ false"
+        );
     }
 
     #[tokio::test]
@@ -1258,6 +1389,165 @@ mod tests {
                 .iter()
                 .all(|r| !r.headers.contains_key("authorization")),
             "user_exists must never carry credentials"
+        );
+    }
+
+    // -- repository invitations + org plan (GATE-010 grant flow) -------------
+
+    #[tokio::test]
+    async fn repository_invitations_parse_id_and_full_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/repository_invitations"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"id":123,"repository":{"full_name":"acme/api"}},
+                    {"id":9,"repository":{"full_name":"octo/hello"}}]"#,
+            ))
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.repository_invitations().await,
+            Ok(vec![
+                Invitation {
+                    id: 123,
+                    repo_full_name: "acme/api".to_string(),
+                },
+                Invitation {
+                    id: 9,
+                    repo_full_name: "octo/hello".to_string(),
+                },
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_invitations_empty_list_is_empty_vec() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/repository_invitations"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert_eq!(p.repository_invitations().await, Ok(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn repository_invitations_non_200_and_non_json_fail_closed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/repository_invitations"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.repository_invitations().await,
+            Err(InviteError::Upstream(500))
+        );
+
+        let junk = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/repository_invitations"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>nope</html>"))
+            .mount(&junk)
+            .await;
+        let p_junk = platform_at(&junk);
+        assert_eq!(
+            p_junk.repository_invitations().await,
+            Err(InviteError::Upstream(StatusCode::OK.as_u16()))
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_invitation_patches_the_right_path_and_2xx_is_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/user/repository_invitations/42"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert_eq!(p.accept_invitation(42).await, Ok(()));
+        let requests = server.received_requests().await.expect("recorded requests");
+        assert!(
+            requests.iter().any(|r| {
+                r.method == "PATCH" && r.url.path() == "/user/repository_invitations/42"
+            }),
+            "the accept PATCH must hit the invitation id"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_invitation_non_2xx_is_upstream_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/user/repository_invitations/42"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"message":"Not Found"}"#))
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.accept_invitation(42).await,
+            Err(InviteError::Upstream(404))
+        );
+    }
+
+    #[tokio::test]
+    async fn org_plan_note_returns_the_plan_name_when_visible() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/orgs/acme"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"login":"acme","plan":{"name":"team","seats":5,"filled_seats":2}}"#,
+            ))
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert_eq!(p.org_plan_note("acme").await, Some("team".to_string()));
+    }
+
+    #[tokio::test]
+    async fn org_plan_note_is_none_when_hidden_missing_or_junk() {
+        let server = MockServer::start().await;
+        // 404: org invisible to the machine account (or not an org).
+        Mock::given(method("GET"))
+            .and(path("/orgs/private"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"message":"Not Found"}"#))
+            .mount(&server)
+            .await;
+        // 200 but no plan field (personal fallback shape).
+        Mock::given(method("GET"))
+            .and(path("/orgs/noplan"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"login":"noplan"}"#),
+            )
+            .mount(&server)
+            .await;
+        // 200 with junk body.
+        Mock::given(method("GET"))
+            .and(path("/orgs/junk"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>nope</html>"))
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert_eq!(p.org_plan_note("private").await, None, "404 ⇒ None");
+        assert_eq!(
+            p.org_plan_note("noplan").await,
+            None,
+            "missing plan field ⇒ None"
+        );
+        assert_eq!(p.org_plan_note("junk").await, None, "unparsable ⇒ None");
+    }
+
+    #[test]
+    fn collaborator_settings_url_is_built_in_the_adapter() {
+        // The github.com literal lives only here; the Telegram layer
+        // consumes this helper (same posture as SIGNUP_URL & co).
+        assert_eq!(
+            collaborator_settings_url("acme", "api"),
+            "https://github.com/acme/api/settings/access"
         );
     }
 }

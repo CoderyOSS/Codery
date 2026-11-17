@@ -10,14 +10,30 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 536_870_912;
 /// `GATE_REGISTRY_SWEEP_SECS` is unset, blank or unparsable.
 pub const DEFAULT_REGISTRY_SWEEP_SECS: u64 = 30 * 60;
 
-/// Parse `GATE_REGISTRY_SWEEP_SECS`; unset/blank/garbage/zero ⇒ the 30-min
-/// default (a misparse must not disable the sweep).
-fn sweep_secs_from(v: Option<&str>) -> u64 {
+/// Default grant-flow poll cadence (5 s, GATE-010) for
+/// `GATE_FLOW_POLL_SECS`.
+pub const DEFAULT_FLOW_POLL_SECS: u64 = 5;
+/// Default grant-flow invitation reminder delay (1 h, GATE-010) for
+/// `GATE_FLOW_REMINDER_SECS`.
+pub const DEFAULT_FLOW_REMINDER_SECS: u64 = 3600;
+/// Default grant-flow give-up window (7 d — GitHub invitations expire
+/// after 7 days) for `GATE_FLOW_GIVE_UP_SECS`.
+pub const DEFAULT_FLOW_GIVE_UP_SECS: u64 = 7 * 24 * 3600;
+
+/// Parse a seconds override; unset/blank/garbage/zero ⇒ the default (a
+/// misparse must never disable a cadence).
+fn secs_from(v: Option<&str>, default: u64) -> u64 {
     v.map(str::trim)
         .filter(|s| !s.is_empty())
         .and_then(|s| s.parse().ok())
         .filter(|s| *s > 0)
-        .unwrap_or(DEFAULT_REGISTRY_SWEEP_SECS)
+        .unwrap_or(default)
+}
+
+/// Parse `GATE_REGISTRY_SWEEP_SECS`; unset/blank/garbage/zero ⇒ the 30-min
+/// default (a misparse must not disable the sweep).
+fn sweep_secs_from(v: Option<&str>) -> u64 {
+    secs_from(v, DEFAULT_REGISTRY_SWEEP_SECS)
 }
 
 /// Parse `GATE_MAX_BODY_BYTES`; unset/blank/garbage ⇒ the 512 MiB default
@@ -58,6 +74,15 @@ pub struct Config {
     /// Registry sweep cadence in seconds (`GATE_REGISTRY_SWEEP_SECS`,
     /// default 1800).
     pub registry_sweep_secs: u64,
+    /// Grant-flow poll cadence in seconds (`GATE_FLOW_POLL_SECS`,
+    /// default 5, GATE-010).
+    pub flow_poll_secs: u64,
+    /// Grant-flow invitation reminder delay in seconds
+    /// (`GATE_FLOW_REMINDER_SECS`, default 3600).
+    pub flow_reminder_secs: u64,
+    /// Grant-flow give-up window in seconds (`GATE_FLOW_GIVE_UP_SECS`,
+    /// default 7 days — GitHub invitations expire after 7 days).
+    pub flow_give_up_secs: u64,
 }
 
 /// Bot token as `Some` only when set and non-blank; blank ⇒ `None` (no
@@ -121,6 +146,18 @@ impl Config {
             telegram_chat_id: chat_id_from(env::var("TELEGRAM_CHAT_ID").ok().as_deref()),
             registry_sweep_secs: sweep_secs_from(
                 env::var("GATE_REGISTRY_SWEEP_SECS").ok().as_deref(),
+            ),
+            flow_poll_secs: secs_from(
+                env::var("GATE_FLOW_POLL_SECS").ok().as_deref(),
+                DEFAULT_FLOW_POLL_SECS,
+            ),
+            flow_reminder_secs: secs_from(
+                env::var("GATE_FLOW_REMINDER_SECS").ok().as_deref(),
+                DEFAULT_FLOW_REMINDER_SECS,
+            ),
+            flow_give_up_secs: secs_from(
+                env::var("GATE_FLOW_GIVE_UP_SECS").ok().as_deref(),
+                DEFAULT_FLOW_GIVE_UP_SECS,
             ),
         })
     }
@@ -259,5 +296,26 @@ mod tests {
         assert_eq!(sweep_secs_from(Some("1800")), 1800);
         assert_eq!(sweep_secs_from(Some(" 5 ")), 5, "test override");
         assert_eq!(sweep_secs_from(Some("3600")), 3600);
+    }
+
+    #[test]
+    fn flow_secs_defaults_are_the_gate_010_values() {
+        assert_eq!(DEFAULT_FLOW_POLL_SECS, 5);
+        assert_eq!(DEFAULT_FLOW_REMINDER_SECS, 3600);
+        assert_eq!(DEFAULT_FLOW_GIVE_UP_SECS, 7 * 24 * 3600);
+    }
+
+    #[test]
+    fn flow_secs_parse_or_default_like_the_sweep() {
+        for (default, env, want) in [
+            (DEFAULT_FLOW_POLL_SECS, None, DEFAULT_FLOW_POLL_SECS),
+            (DEFAULT_FLOW_POLL_SECS, Some(""), DEFAULT_FLOW_POLL_SECS),
+            (DEFAULT_FLOW_POLL_SECS, Some("junk"), DEFAULT_FLOW_POLL_SECS),
+            (DEFAULT_FLOW_POLL_SECS, Some("0"), DEFAULT_FLOW_POLL_SECS),
+            (DEFAULT_FLOW_REMINDER_SECS, Some(" 2 "), 2),
+            (DEFAULT_FLOW_GIVE_UP_SECS, Some("600"), 600),
+        ] {
+            assert_eq!(secs_from(env, default), want, "{env:?}");
+        }
     }
 }

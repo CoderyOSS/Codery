@@ -43,13 +43,13 @@
 //!
 //! # THE GRANT-FLOW SEAM (controller ruling, binding)
 //!
-//! Step 8 consumes [`GrantFlow`] as `Arc<dyn GrantFlow>`. This task ships
-//! the trait, [`GrantOutcome`], the [`NotifyHandle`] the real flow will
-//! use to reach the user, a scripted test double ([`FakeGrantFlow`]) and
-//! a fail-closed production placeholder ([`UnimplementedGrantFlow`]).
-//! When the real grant machinery lands (GATE-010, task B7), it implements
-//! [`GrantFlow`] and takes over the wiring in `main.rs` — the step-8
-//! handler here does not change.
+//! Step 8 consumes [`GrantFlow`] as `Arc<dyn GrantFlow>`. This module
+//! ships the trait, [`GrantOutcome`], the [`NotifyHandle`] the flow uses
+//! to reach the user and a scripted test double ([`FakeGrantFlow`]). The
+//! REAL grant machinery lives in [`crate::telegram::grant`]
+//! ([`crate::telegram::grant::RealGrantFlow`], GATE-010): it implements
+//! [`GrantFlow`] and `main.rs` wires it in — the step-8 handler here
+//! consumes the trait and never changed.
 //!
 //! Intake mechanics (steps 6–7) REUSE task 4's pieces:
 //! [`crate::onepage::mint_setup_nonce`] for the single-use form nonce
@@ -92,7 +92,7 @@ const KEY_MSG: &str = "msg";
 const KEY_CHECKLIST: &str = "checklist";
 
 // ---------------------------------------------------------------------------
-// The grant-flow seam (B7 wires the real implementation into this)
+// The grant-flow seam (the real implementation lives in telegram::grant)
 // ---------------------------------------------------------------------------
 
 /// What a grant flow uses to reach the operator while granting (GATE-010:
@@ -154,22 +154,6 @@ impl GrantOutcome {
 #[async_trait]
 pub trait GrantFlow: Send + Sync {
     async fn grant(&self, repo: &str, notify: &NotifyHandle) -> GrantOutcome;
-}
-
-/// Production placeholder until the real grant flow (GATE-010, task B7)
-/// is wired in: every repo reports Failed with honest guidance. Fail
-/// closed — the checklist never claims a grant that did not happen.
-pub struct UnimplementedGrantFlow;
-
-#[async_trait]
-impl GrantFlow for UnimplementedGrantFlow {
-    async fn grant(&self, _repo: &str, _notify: &NotifyHandle) -> GrantOutcome {
-        GrantOutcome::Failed {
-            reason: "granting arrives in a later update — add the machine \
-                     account as a collaborator on GitHub for now"
-                .to_string(),
-        }
-    }
 }
 
 /// Scripted test double: per-repo outcomes with a default fallback, plus

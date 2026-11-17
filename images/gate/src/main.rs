@@ -18,10 +18,10 @@ use gate::state::State as DbState;
 use gate::tasks::{run_daily_loop, startup_check, DAILY_INTERVAL, LifecycleDeps};
 use gate::telegram::approvals::{register_approvals, TelegramApprovalBackend};
 use gate::telegram::commands::{register_commands, CommandDeps};
+use gate::telegram::grant::{GrantOfferDeps, RealGrantFlow};
 use gate::telegram::lifecycle::{register_lifecycle, nonce_lookup as rotate_nonce_lookup};
 use gate::telegram::setup::{
-    nonce_lookup as setup_nonce_lookup, register_setup, resume as setup_resume,
-    SetupDeps, UnimplementedGrantFlow,
+    nonce_lookup as setup_nonce_lookup, register_setup, resume as setup_resume, SetupDeps,
 };
 use gate::telegram::{run_poll_loop, TelegramClient, TelegramRouter, POLL_BACKOFF_BASE};
 
@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     // The API proxy shares every dependency with the git proxy: one
     // platform (single place holding api_base + token custody), one
     // policy engine, one approval backend, one registry.
-    let api = ApiDeps::new(
+    let mut api = ApiDeps::new(
         state.clone(),
         platform.clone(),
         policy,
@@ -118,6 +118,14 @@ async fn main() -> anyhow::Result<()> {
         machine_token.clone(),
         Duration::from_secs(APPROVAL_TIMEOUT_SECS),
     )?;
+    // Grant-offer hook (GATE-010): a repo-scoped mutation that upstream
+    // answers 404 offers the Telegram grant flow, debounced once per repo
+    // per 24 h. Without the bot the hook stays off (offer-silent).
+    api.offer = Some(GrantOfferDeps {
+        state: state.clone(),
+        notify: telegram_notify.clone(),
+        machine_login: machine_login.clone(),
+    });
 
     // Machine-token lifecycle (GATE-004 §6.3): the master forwarding
     // switch is created here and shared by the gate state and the
@@ -157,6 +165,17 @@ async fn main() -> anyhow::Result<()> {
     // callbacks are nonce-validated against the pending rows, the
     // lifecycle rotate nonce and the setup flow nonce.
     if let Some((api, backend)) = telegram {
+        // Grant-flow machinery (GATE-010): the real implementation behind
+        // setup step 8 AND the /grant command. Durations come from env
+        // (GATE_FLOW_* overrides shrink them for tests).
+        let grant_flow = Arc::new(RealGrantFlow::new(gate::telegram::grant::GrantDeps {
+            state: state.clone(),
+            platform: platform.clone(),
+            machine_login: machine_login.clone(),
+            poll: Duration::from_secs(cfg.flow_poll_secs),
+            reminder_after: Duration::from_secs(cfg.flow_reminder_secs),
+            give_up_after: Duration::from_secs(cfg.flow_give_up_secs),
+        }));
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let mut router = TelegramRouter::new();
@@ -179,13 +198,13 @@ async fn main() -> anyhow::Result<()> {
                 audit: audit.clone(),
                 machine_token: machine_token.clone(),
                 lifecycle: Some(lifecycle_deps.clone()),
+                grant: cfg.telegram_chat_id.map(|chat| (grant_flow.clone(), chat)),
             }),
         );
         register_lifecycle(&mut router, lifecycle_deps.clone());
-        // Guided setup walkthrough (GATE-011). The grant-flow seam is
-        // satisfied by the fail-closed placeholder until task B7 wires the
-        // real grant machinery into `GrantFlow` — the step-8 handler
-        // consumes the trait, not this placeholder.
+        // Guided setup walkthrough (GATE-011): the grant-flow seam is fed
+        // by the real machinery (telegram::grant::RealGrantFlow) — step 8
+        // walks the invitation flow end-to-end.
         let setup_deps = Arc::new(SetupDeps {
             state: state.clone(),
             platform: platform.clone(),
@@ -194,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
             gate_public_url: cfg.public_url.clone(),
             chat_id: cfg.telegram_chat_id.unwrap_or(0),
             forwarding: forwarding.clone(),
-            grant: Arc::new(UnimplementedGrantFlow),
+            grant: grant_flow.clone(),
             audit: audit.clone(),
         });
         register_setup(&mut router, setup_deps.clone());

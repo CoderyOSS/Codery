@@ -23,18 +23,25 @@ use async_trait::async_trait;
 use crate::approval::list_unresolved;
 use crate::audit::{Audit, AuditEntry};
 use crate::state::{self, RegistryRow, State};
+use crate::telegram::grant::{outcome_text, RealGrantFlow};
 use crate::telegram::send::SendRequest;
+use crate::telegram::setup::{GrantFlow, NotifyHandle};
 use crate::telegram::{TelegramApi, Update, UpdateHandler};
 use crate::tokens::TokenStore;
+use crate::types::Role;
 
 /// Reply for commands the gate does not know. `/setup` is NOT dispatched
 /// here — the guided walkthrough owns it (its replies edit the command
 /// bubble and may fresh-send on a stale resume); the dispatcher yields it.
 const UNKNOWN_COMMAND: &str =
-    "Unknown command. Available: /pending, /status, /block owner/repo, /unblock owner/repo, /token mint|revoke|list, /rotate, /disconnect, /setup";
+    "Unknown command. Available: /pending, /status, /block owner/repo, /unblock owner/repo, /token mint|revoke|list, /grant owner/repo [role], /rotate, /disconnect, /setup";
 
 /// Usage line for /block and /unblock.
 const BLOCK_USAGE: &str = "Usage: /block owner/repo — or /unblock owner/repo";
+
+/// Usage line for /grant (GATE-010): repo grammar + optional tier.
+const GRANT_USAGE: &str =
+    "Usage: /grant owner/repo [role] — role: read|triage|write|maintain|admin (default write)";
 
 /// Usage line for /token and its subcommands; also the rejection reply for
 /// malformed or invalid token names.
@@ -45,12 +52,15 @@ const TOKEN_USAGE: &str = "Usage: /token mint <name> | /token revoke <name> | /t
 /// forwarding line on /status. No secrets ever render — only the
 /// enabled/disabled verdict. `lifecycle` carries the machine-token
 /// lifecycle deps (GATE-004): present ⇒ /rotate and /disconnect are live,
-/// absent ⇒ both answer the usage reply (no bot, no lifecycle).
+/// absent ⇒ both answer the usage reply (no bot, no lifecycle). `grant`
+/// carries the grant-flow machinery (GATE-010) plus the chat id it
+/// reports into: present ⇒ /grant runs the real flow, absent ⇒ usage.
 pub struct CommandDeps {
     pub state: Arc<Mutex<State>>,
     pub audit: Arc<Audit>,
     pub machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     pub lifecycle: Option<Arc<crate::tasks::LifecycleDeps>>,
+    pub grant: Option<(Arc<RealGrantFlow>, i64)>,
 }
 
 /// Register the command dispatcher on a router.
@@ -83,6 +93,15 @@ impl UpdateHandler for Commands {
         if cmd == "setup" {
             // The guided walkthrough handler (telegram::setup) sees this
             // same update and owns the reply — nothing to do here.
+            return;
+        }
+        if cmd == "grant" {
+            // Grant flow (GATE-010): validates and spawns the polling
+            // conversation in the background — the router is never held
+            // for the hours a real invitation wait can take. The reply
+            // edits in place like every other command.
+            let reply = self.grant_reply(arg, &rest, &api);
+            let _ = api.edit_message(to, reply).await;
             return;
         }
         let reply: SendRequest = match (cmd, arg) {
@@ -118,6 +137,57 @@ impl From<(String, Vec<(String, String)>)> for SendRequest {
 }
 
 impl Commands {
+    /// /grant owner/repo [role]: validate, ack in place, and run the
+    /// grant conversation in the background (GATE-010). The spawned task
+    /// reports the terminal outcome as one message — setup's checklist
+    /// rendering does not apply here.
+    fn grant_reply(
+        &self,
+        arg: Option<&str>,
+        rest: &[&str],
+        api: &Arc<dyn TelegramApi>,
+    ) -> SendRequest {
+        let Some((flow, chat)) = self.deps.grant.as_ref() else {
+            return (GRANT_USAGE.to_string(), Vec::new()).into();
+        };
+        let Some(repo_arg) = arg else {
+            return (GRANT_USAGE.to_string(), Vec::new()).into();
+        };
+        let Some(repo) = valid_repo(repo_arg) else {
+            return (
+                format!("'{repo_arg}' is not owner/repo. {GRANT_USAGE}"),
+                Vec::new(),
+            )
+                .into();
+        };
+        let intended = match rest.first() {
+            None => Role::Write,
+            Some(word) => match role_from_arg(word) {
+                Some(role) => role,
+                None => {
+                    return (format!("Unknown role '{word}'. {GRANT_USAGE}"), Vec::new()).into();
+                }
+            },
+        };
+        let notify = NotifyHandle {
+            api: api.clone(),
+            chat_id: *chat,
+        };
+        let flow = flow.clone();
+        let login = flow.deps.machine_login.clone();
+        let ack = format!(
+            "Grant flow started for {repo} (intended role: {intended}). Instructions \
+             below — I'll confirm here when access is verified."
+        );
+        tokio::spawn(async move {
+            let outcome = flow.grant(&repo, &notify).await;
+            let _ = notify
+                .send(SendRequest::text(outcome_text(&repo, &login, &outcome)))
+                .await;
+        });
+        SendRequest::text(ack)
+    }
+
     /// /pending: every unresolved hold — id, repo, class, age — with
     /// resume/cancel buttons bound to (id, nonce, action).
     fn pending_reply(&self) -> (String, Vec<(String, String)>) {
@@ -361,6 +431,19 @@ fn valid_token_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
+/// /grant's optional role word (GATE-010): case-insensitive registry
+/// spellings; `none` is not a grantable target.
+fn role_from_arg(word: &str) -> Option<Role> {
+    match word.to_ascii_lowercase().as_str() {
+        "read" => Some(Role::Read),
+        "triage" => Some(Role::Triage),
+        "write" => Some(Role::Write),
+        "maintain" => Some(Role::Maintain),
+        "admin" => Some(Role::Admin),
+        _ => None,
+    }
+}
+
 /// Human age of a hold: seconds, then minutes, then hours.
 fn age(created_ms: u64) -> String {
     let secs = now_unix_ms().saturating_sub(created_ms) / 1000;
@@ -422,6 +505,19 @@ mod tests {
     }
 
     #[test]
+    fn grant_role_arg_maps_registry_spellings_case_insensitively() {
+        assert_eq!(role_from_arg("write"), Some(Role::Write));
+        assert_eq!(role_from_arg("Write"), Some(Role::Write));
+        assert_eq!(role_from_arg("TRIAGE"), Some(Role::Triage));
+        assert_eq!(role_from_arg("read"), Some(Role::Read));
+        assert_eq!(role_from_arg("maintain"), Some(Role::Maintain));
+        assert_eq!(role_from_arg("admin"), Some(Role::Admin));
+        assert_eq!(role_from_arg("none"), None, "none is not a grant target");
+        assert_eq!(role_from_arg("emperor"), None);
+        assert_eq!(role_from_arg(""), None);
+    }
+
+    #[test]
     fn status_shows_last_verified_per_repo_and_removals() {
         let state = Arc::new(Mutex::new(
             State::open(":memory:").expect("open"),
@@ -448,6 +544,7 @@ mod tests {
             audit: Arc::new(Audit::open(&audit_path)),
             machine_token: Arc::new(|| None),
             lifecycle: None,
+            grant: None,
         });
         let commands = Commands { deps };
         let (text, buttons) = commands.status_reply();

@@ -165,6 +165,7 @@ impl Ctl {
                 audit: audit.clone(),
                 machine_token,
                 lifecycle: Some(deps.clone().into()),
+                grant: None,
             }),
         );
         register_lifecycle(&mut router, deps.clone().into());

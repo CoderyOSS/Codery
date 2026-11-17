@@ -73,6 +73,12 @@ pub struct ApiDeps {
     pub machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     pub approval_timeout: Duration,
     pub http: Client,
+    /// Grant-offer hook (GATE-010): `Some` ⇒ a MUTATION whose upstream
+    /// answer is a repo-scoped 404 (the machine account has no access)
+    /// offers the Telegram grant flow, debounced once per repo per 24 h.
+    /// `None` (no bot configured, or unit tests) ⇒ the error mapping
+    /// alone, no offer message.
+    pub offer: Option<crate::telegram::grant::GrantOfferDeps>,
 }
 
 impl ApiDeps {
@@ -95,6 +101,7 @@ impl ApiDeps {
             machine_token,
             approval_timeout,
             http,
+            offer: None,
         })
     }
 }
@@ -266,6 +273,18 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
                 // Registry grant suffices on paper; verify it still holds.
                 match deps.platform.repo_permissions(owner, repo).await {
                     Err(RepoAccessError::NoAccess) => {
+                        // GATE-010 grant-offer trigger: a mutation hit a
+                        // repo the machine account cannot see — offer the
+                        // grant flow (debounced once per repo per 24 h).
+                        if let Some(offer) = &deps.offer {
+                            let _ = crate::telegram::grant::maybe_offer_grant(
+                                &offer.state,
+                                &offer.notify,
+                                &repo_label,
+                                &offer.machine_login,
+                            )
+                            .await;
+                        }
                         audit_api(
                             &gs.audit,
                             &agent_name,
@@ -491,6 +510,21 @@ async fn forward_and_respond(
             passthrough(status, &resp_headers, resp_body)
         }
         Err(e) => {
+            // GATE-010 grant-offer trigger: a MUTATION just learned the
+            // machine account has no access to this repo (upstream 404 on
+            // a repo-scoped path). Reads never offer; a reachable public
+            // repo never lands here (third-party goes through approval).
+            if let (AgentError::AccessPending { repo, .. }, true) = (&e, is_write_method(method)) {
+                if let Some(offer) = &deps.offer {
+                    let _ = crate::telegram::grant::maybe_offer_grant(
+                        &offer.state,
+                        &offer.notify,
+                        repo,
+                        &offer.machine_login,
+                    )
+                    .await;
+                }
+            }
             audit_api(
                 &gs.audit,
                 agent,
