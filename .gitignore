@@ -21,3 +21,7 @@ system/orchestrator/ui/node_modules/
 
 .superpowers/
 .opencode/
+
+# git worktrees (superpowers)
+.worktrees/
+.superpowers/
