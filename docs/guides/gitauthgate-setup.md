@@ -34,6 +34,10 @@ container, no route, and paseo's gate env vars interpolate to empty.
    | `GATE_MACHINE_LOGIN` | machine account login (you pick it during setup; must match the account the gate verifies tokens against) |
    | `TELEGRAM_BOT_TOKEN` | token from [@BotFather](https://t.me/BotFather) — the control channel for approvals and setup |
    | `TELEGRAM_ALLOWLIST` | Telegram chat/user IDs allowed to talk to the bot |
+   | `TELEGRAM_CHAT_ID` | numeric chat id approval asks are delivered to (see below) |
+
+   How to obtain the Telegram values — see **Telegram control channel
+   wiring** below.
 
 3. **Stage routing + image keys in the stack `.env`**
    (`/opt/codery/stacks/devtools/.env` — compose interpolation reads this
@@ -68,6 +72,28 @@ container, no route, and paseo's gate env vars interpolate to empty.
 
 5. **Deploy via Dockhand** (repo copy and `/opt/codery/stacks/` copy of
    `compose.yml` updated together).
+
+## Telegram control channel wiring
+
+The control plane (first-run setup, approvals, grants, elevation,
+reminders) talks over the Telegram Bot API. Three keys in
+`/opt/codery/.env`, staged with the other gate secrets, then **Deploy** —
+the gate service picks them up via `env_file`:
+
+| Key | How to obtain |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Message [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token it issues (`123456:ABC-…`). |
+| `TELEGRAM_ALLOWLIST` | Comma-separated Telegram **user IDs** allowed to talk to the bot — the operator(s). Find yours: message [@userinfobot](https://t.me/userinfobot); it replies with your `Id`. |
+| `TELEGRAM_CHAT_ID` | The numeric chat id **asks are delivered to** (approval prompts, elevation consents, expiry reminders). Usually your own user id — the same number as your allowlist entry. Negative numbers are group chats. |
+
+Missing-key behavior is fail closed, by design:
+
+- **No bot token** → the control-plane poll loop never spawns; git/API
+  proxying still works, but there is no setup, no approvals (held
+  mutations are denied), no grants/elevation.
+- **Empty allowlist** → every update is dropped.
+- **Unset/invalid `TELEGRAM_CHAT_ID`** → the bot runs, but no ask can be
+  delivered: approval present errors and held mutations are denied.
 
 ## Zoraxy route (operator applies)
 
@@ -127,10 +153,8 @@ ment them during opt-in. Note the outcome here when you do.
 
 ## First-run setup
 
-With the gate deployed and the Zoraxy route live (note: the Telegram
-control channel is the follow-up milestone — see
-`docs/superpowers/plans/2026-11-16-gitauthgate-control-plane.md`; these
-steps apply once it lands):
+With the gate deployed, the Zoraxy route live, and the Telegram keys
+staged (see **Telegram control channel wiring** above):
 
 1. Message your Telegram bot (from an allowlisted chat) and start the
    guided walkthrough (GATE-011) — eight steps, one message each: machine
@@ -182,3 +206,89 @@ apps container are wired manually per instance.
 `GET /` on the gate renders the agent instruction page: copy-paste clone
 URLs (public + private repos), commit identity, API env — with the live
 gate host, and the minted token when you open it with `?token=…`.
+
+## Acceptance QA checklist (manual, post-deploy)
+
+Run once against a **scratch GitHub account + repo** — never production
+repos. This checklist extends, not replaces, the host-side checks above:
+compose config with and without the `gag` profile, the image build, the
+codery-net DNS/TLS probe, and the empty-`GH_HOST` check all still apply
+(run those first).
+
+1. **First-run setup, Telegram only.** From the allowlisted chat, run
+   `/setup` and complete the whole walkthrough (machine-account email
+   alias, sign-up in a private window, profile, private-email setting,
+   2FA, classic PAT, token intake form, repo grants).
+   **Expected:** the bot verifies each step via the API, the token lands
+   in custody, the repo grant lands, and a working agent exists in one
+   repo — no page visited that the walkthrough didn't link.
+2. **Wrong-account token rejected by name.** Paste a PAT from your main
+   account into the intake form.
+   **Expected:** rejected naming the login — "wrong account — the token
+   belongs to `<main>`, not the machine account `<machine>`" — and
+   custody unchanged.
+3. **Force-push hold → approve → forwarded.** With `force-push =
+   "approve"` (the default policy), `git push --force` from the agent.
+   **Expected:** the push blocks for up to 300 s while an ask arrives in
+   `TELEGRAM_CHAT_ID`; **Approve** → the push forwards upstream and
+   succeeds. Deny/timeout → rejected. Either outcome is audited.
+4. **`/block` kill switch.** `/block <owner>/<repo>`, then any git/API
+   request against that repo.
+   **Expected:** GitHub-shaped 429 immediately — no ask, no upstream
+   forwarding. `/unblock <owner>/<repo>` restores service.
+5. **Role-gap action ⇒ permission_pending with elevation.** Attempt an
+   action the agent's role lacks (e.g. an admin-only mutation from a
+   `write` agent).
+   **Expected:** fail-fast pre-flight errors `permission_pending`
+   before anything is forwarded; ONE combined consent message arrives;
+   approve → temp grant, retry succeeds; deny → denied.
+6. **Role change detected without user confirmation.** Change the
+   agent's collaborator role upstream (or remove it) and wait one sweep
+   (≤ 30 min).
+   **Expected:** the registry sweep reconciles the role map on its own —
+   no prompt — and elevated grants are walked back per policy; the
+   change lands in the audit log.
+7. **"Grant until done, then remove."** `/grant <owner>/<repo>
+   maintainer` → do the elevated thing → `/revoke <owner>/<repo>`.
+   **Expected:** the grant lands (invitation auto-accepted), the
+   elevated action works while held, and revoke walks the agent back to
+   its base role (e.g. `write`).
+8. **Expiry reminders + `/rotate` with no failed requests.** With a
+   token expiring inside the reminder window, confirm the 14/3/1-day
+   reminders each fire exactly once with a `[Start /rotate]` button;
+   then `/rotate` (or the button).
+   **Expected:** the intake mints the form, custody swaps to the new
+   token once verified, and agents keep working with zero failed
+   requests during and after the swap.
+9. **Log hygiene.**
+   `grep -rE "ghp_|Authorization" /opt/codery/data/gate/audit.jsonl`
+   **Expected:** only redactions — no full token strings, no raw
+   Authorization values.
+
+## Known operational notes
+
+Watch items from the build ledger — not bugs, but know them before you
+operate:
+
+- **Shared rate-limit bucket behind Zoraxy.** The auth-failure limiter
+  keys on source IP, and behind Zoraxy every agent arrives from one
+  source — one agent's repeated auth failures can 429 *all* agents for
+  60 s. Chase repeated 401s quickly.
+- **Approval holds need a Zoraxy timeout ≥ 300 s.** Held mutations
+  block the HTTP request until answered (up to 300 s); a shorter router
+  timeout turns every held mutation into a gateway error before the
+  human can answer (see the route section above).
+- **Startup verify runs before bind.** The gate verifies custody before
+  the listener binds — no request is ever served while the credential
+  state is unverified. A bad `GATE_TOKEN_ENC_KEY` or unreadable state
+  fails boot rather than serving half-configured.
+- **Git-read deny audit asymmetry.** Allowed reads and all mutations
+  are audited; reads that fail *locally* (forwarding flag off, no
+  custody credential, malformed path) return before the audit call and
+  are **not** in `audit.jsonl`. Upstream-unreachable read failures are
+  audited.
+- **`policy.toml` unknown keys abort boot.** The policy parser rejects
+  unknown keys/sections (`deny_unknown_fields`) — a typo stops startup
+  instead of being ignored. Grep the live `/opt/codery/data/gate/
+  policy.toml` before every image upgrade: keys an older build tolerated
+  may be fatal now.

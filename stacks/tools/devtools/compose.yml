@@ -146,9 +146,10 @@ services:
     # codery-gate:<date> images/gate) is cheap and needs no registry auth.
     # Config model (GATE-001/009, opendesign placement): secrets
     # (GATE_TOKEN_ENC_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWLIST,
-    # GATE_MACHINE_LOGIN) come from /opt/codery/.env via env_file; routing
-    # values are pinned here. The 23080 loopback publish is for host-side
-    # curl checks only — Zoraxy reaches the container by DNS alias.
+    # TELEGRAM_CHAT_ID, GATE_MACHINE_LOGIN) come from /opt/codery/.env via
+    # env_file; routing values are pinned here. The 23080 loopback publish
+    # is for host-side curl checks only — Zoraxy reaches the container by
+    # DNS alias.
     image: ${GATE_IMAGE:?set GATE_IMAGE in stack .env}
     container_name: gitauthgate
     restart: unless-stopped
