@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use std::time::Duration;
@@ -17,6 +18,11 @@ use crate::pktline::Oid;
 use crate::types::{Ancestry, Role};
 
 /// What the gate needs from the forge upstream (GATE-008).
+///
+/// `#[async_trait]` keeps the methods object-safe so later tasks can hold
+/// `Arc<dyn Platform>` (sphere resolver / server); signatures are
+/// otherwise identical to the plan's.
+#[async_trait]
 pub trait Platform: Send + Sync {
     /// Is `new` a strict descendant of `old`? Definitive only when the
     /// upstream compare says so; anything else is [`Ancestry::Unknown`].
@@ -117,7 +123,7 @@ impl GitHubPlatform {
     }
 
     /// Explicit bases (tests point these at a mock server).
-    pub fn with_bases(
+    pub(crate) fn with_bases(
         api_base: Url,
         git_base: Url,
         token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
@@ -168,6 +174,7 @@ impl GitHubPlatform {
     }
 }
 
+#[async_trait]
 impl Platform for GitHubPlatform {
     async fn ancestry(&self, owner: &str, repo: &str, old: &Oid, new: &Oid) -> Ancestry {
         let Some(url) = self.compare_url(owner, repo, old, new) else {
@@ -339,9 +346,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compare_garbage_body_is_unknown() {
+    async fn compare_unknown_status_string_is_unknown() {
         let server = MockServer::start().await;
         compare_mock(&server, 200, r#"{"status":"something-else"}"#).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.ancestry("octo", "hello", &oid(OLD), &oid(NEW)).await,
+            Ancestry::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_non_json_body_is_unknown() {
+        let server = MockServer::start().await;
+        compare_mock(&server, 200, "<html>upstream maintenance</html>").await;
         let p = platform_at(&server);
         assert_eq!(
             p.ancestry("octo", "hello", &oid(OLD), &oid(NEW)).await,
@@ -508,6 +526,14 @@ mod tests {
             p.git_upstream_url("octo", "hello").as_str(),
             "https://github.com/octo/hello.git"
         );
+    }
+
+    #[test]
+    fn platform_is_dyn_compatible() {
+        // Compiles only when `Platform` is object-safe (F2): later tasks
+        // hold `Arc<dyn Platform>`.
+        let p: Arc<dyn Platform> = Arc::new(GitHubPlatform::new(Arc::new(|| None)));
+        let _: &(dyn Platform + '_) = &*p;
     }
 
     #[test]

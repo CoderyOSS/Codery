@@ -34,16 +34,34 @@ pub enum Ancestry {
     Unknown,
 }
 
-/// The authenticated caller's permission tier on a repo (GATE-008), ordered
-/// highest first so tiers compare directly.
+/// The authenticated caller's permission tier on a repo (GATE-008),
+/// ordered ascending by privilege, so comparisons read as spelled:
+/// `role >= Role::Write` grants writers and above, denies everyone below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Role {
-    Admin,
-    Maintain,
-    Write,
-    Triage,
-    Read,
     None,
+    Read,
+    Triage,
+    Write,
+    Maintain,
+    Admin,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Role;
+
+    #[test]
+    fn role_orders_ascending_by_privilege() {
+        assert!(Role::None < Role::Read);
+        assert!(Role::Read < Role::Triage);
+        assert!(Role::Triage < Role::Write);
+        assert!(Role::Write < Role::Maintain);
+        assert!(Role::Maintain < Role::Admin);
+        // The comparisons a policy will actually write.
+        assert!(Role::Write > Role::Read);
+        assert!(Role::Admin > Role::Write);
+    }
 }
 
 /// Policy outcome for an action (GATE-005). Unconfigured defaults to Deny.
