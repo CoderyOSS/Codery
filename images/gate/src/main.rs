@@ -2,6 +2,7 @@
 // HTTP server in later tasks (GATE-005/GATE-007); unused until then.
 #![allow(dead_code)]
 
+mod approval;
 mod audit;
 mod config;
 mod github;
