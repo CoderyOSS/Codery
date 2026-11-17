@@ -19,9 +19,10 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Extension, Router};
+use axum::{Extension, Json, Router};
 use base64::Engine as _;
 use reqwest::Client;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::approval::{ApprovalBackend, ApprovalDetail, ApprovalOutcome, ApprovalRequest};
@@ -38,9 +39,12 @@ use crate::tokens::AgentIdentity;
 use crate::types::{ActionClass, Ancestry, Classification, Decision};
 
 /// Path-grammar-valid owner/repo segment (T4 review pointer): ASCII
-/// letters/digits/`.`/`_`/`-`, no `..` runs, never empty.
+/// letters/digits/`.`/`_`/`-`, no `..` runs, never a bare `.` (URL
+/// normalization would desync the gated repo key from the upstream path),
+/// never empty.
 fn valid_segment(s: &str) -> bool {
     !s.is_empty()
+        && s != "."
         && !s.contains("..")
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
@@ -388,13 +392,16 @@ impl GitDeps {
     }
 }
 
-/// The git smart-HTTP routes (mounted behind the auth middleware).
+/// The git smart-HTTP routes (mounted behind the auth middleware). The
+/// body cap (`DefaultBodyLimit::max`) pairs with the capped reads in the
+/// handlers: over-limit requests get a 413 before anything is buffered
+/// (receive-pack) or forwarded (upload-pack streams).
 pub fn router(state: Arc<GateState>) -> Router<Arc<GateState>> {
     Router::new()
         .route("/git/{owner}/{repo}/info/refs", get(info_refs))
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
-        .layer(DefaultBodyLimit::disable())
+        .layer(DefaultBodyLimit::max(state.max_body_bytes))
         .with_state(state)
 }
 
@@ -404,6 +411,28 @@ fn audit_push(audit: &Audit, agent: &str, repo: &str, decision: &str, basis: &st
         agent: Some(agent.to_string()),
         repo: repo.to_string(),
         action: "git.receive-pack".to_string(),
+        decision: decision.to_string(),
+        basis: basis.to_string(),
+        approver: None,
+    });
+}
+
+/// Audit a git-read request (GATE-005: reads pass through and are logged):
+/// one record per request, in the same shape as [`audit_push`] but with
+/// the per-read action name.
+fn audit_read(
+    audit: &Audit,
+    agent: &str,
+    repo: &str,
+    action: &str,
+    decision: &str,
+    basis: &str,
+) {
+    audit.record(AuditEntry {
+        ts: crate::state::now(),
+        agent: Some(agent.to_string()),
+        repo: repo.to_string(),
+        action: action.to_string(),
         decision: decision.to_string(),
         basis: basis.to_string(),
         approver: None,
@@ -428,6 +457,16 @@ fn err_response() -> Response {
 
 fn bad_request(msg: &str) -> Response {
     (StatusCode::BAD_REQUEST, msg.to_string()).into_response()
+}
+
+/// GitHub-shaped 413 (final-review body cap): the request exceeded
+/// `GATE_MAX_BODY_BYTES` and was never forwarded upstream.
+fn payload_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(json!({ "message": "Payload too large" })),
+    )
+        .into_response()
 }
 
 fn bad_gateway() -> Response {
@@ -473,10 +512,11 @@ fn upstream_subpath(url: &mut reqwest::Url, sub: &str) {
 
 async fn info_refs(
     State(gs): State<Arc<GateState>>,
-    Extension(_agent): Extension<AgentIdentity>,
+    Extension(agent): Extension<AgentIdentity>,
     Path((owner_raw, repo_raw)): Path<(String, String)>,
     Query(params): Query<BTreeMap<String, String>>,
 ) -> Response {
+    let agent_name = agent.name.clone();
     let Some(service) = params.get("service").map(String::as_str) else {
         return bad_request("missing service parameter");
     };
@@ -492,6 +532,7 @@ async fn info_refs(
     let Some(auth) = deps.basic_auth() else {
         return credential_unavailable();
     };
+    let repo_full = format!("{owner}/{repo}");
     let mut url = deps.platform.git_upstream_url(&owner, &repo);
     upstream_subpath(&mut url, "info/refs");
     url.set_query(Some(&format!("service={service}")));
@@ -502,17 +543,38 @@ async fn info_refs(
         .send()
         .await
     {
-        Ok(up) => passthrough_response(up).await,
-        Err(_) => bad_gateway(),
+        Ok(up) => {
+            audit_read(
+                &gs.audit,
+                &agent_name,
+                &repo_full,
+                "git.info-refs",
+                "forward",
+                &format!("service={service}"),
+            );
+            passthrough_response(up).await
+        }
+        Err(_) => {
+            audit_read(
+                &gs.audit,
+                &agent_name,
+                &repo_full,
+                "git.info-refs",
+                "deny",
+                "upstream unreachable",
+            );
+            bad_gateway()
+        }
     }
 }
 
 async fn upload_pack(
     State(gs): State<Arc<GateState>>,
-    Extension(_agent): Extension<AgentIdentity>,
+    Extension(agent): Extension<AgentIdentity>,
     Path((owner_raw, repo_raw)): Path<(String, String)>,
     req: axum::extract::Request,
 ) -> Response {
+    let agent_name = agent.name.clone();
     let Some((owner, repo)) = split_repo_path(&owner_raw, &repo_raw) else {
         return bad_request("invalid owner/repo path");
     };
@@ -522,6 +584,7 @@ async fn upload_pack(
     let Some(auth) = deps.basic_auth() else {
         return credential_unavailable();
     };
+    let repo_full = format!("{owner}/{repo}");
     let mut url = deps.platform.git_upstream_url(&owner, &repo);
     upstream_subpath(&mut url, "git-upload-pack");
     let stream = req.into_body().into_data_stream();
@@ -534,8 +597,28 @@ async fn upload_pack(
         .send()
         .await
     {
-        Ok(up) => passthrough_response(up).await,
-        Err(_) => bad_gateway(),
+        Ok(up) => {
+            audit_read(
+                &gs.audit,
+                &agent_name,
+                &repo_full,
+                "git.upload-pack",
+                "forward",
+                "service=git-upload-pack",
+            );
+            passthrough_response(up).await
+        }
+        Err(_) => {
+            audit_read(
+                &gs.audit,
+                &agent_name,
+                &repo_full,
+                "git.upload-pack",
+                "deny",
+                "upstream unreachable",
+            );
+            bad_gateway()
+        }
     }
 }
 
@@ -543,9 +626,24 @@ async fn receive_pack(
     State(gs): State<Arc<GateState>>,
     Extension(agent): Extension<AgentIdentity>,
     Path((owner_raw, repo_raw)): Path<(String, String)>,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> Response {
     let agent_name = agent.name.clone();
+    // Body reads are capped at the configured limit: an over-limit push
+    // gets a 413 (GitHub-shaped), is audited, and never reaches upstream.
+    let body = match axum::body::to_bytes(req.into_body(), gs.max_body_bytes).await {
+        Ok(body) => body,
+        Err(_) => {
+            audit_push(
+                &gs.audit,
+                &agent_name,
+                &format!("{owner_raw}/{repo_raw}"),
+                "deny",
+                "payload too large",
+            );
+            return payload_too_large();
+        }
+    };
     let Some((owner, repo)) = split_repo_path(&owner_raw, &repo_raw) else {
         audit_push(
             &gs.audit,
@@ -991,6 +1089,7 @@ tag-delete = \"approve\"
         assert!(valid_segment("octo"));
         assert!(valid_segment("hello.world_2-x"));
         assert!(!valid_segment(""));
+        assert!(!valid_segment("."));
         assert!(!valid_segment(".."));
         assert!(!valid_segment("a..b"));
         assert!(!valid_segment("a/b"));
@@ -1003,5 +1102,7 @@ tag-delete = \"approve\"
         );
         assert_eq!(split_repo_path("oc to", "hello.git"), None);
         assert_eq!(split_repo_path("octo", "../etc.git"), None);
+        assert_eq!(split_repo_path(".", "hello.git"), None);
+        assert_eq!(split_repo_path("octo", ".git"), None);
     }
 }

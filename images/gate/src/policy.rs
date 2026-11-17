@@ -6,7 +6,10 @@ use crate::types::{ActionClass, Decision};
 
 /// Per-class rules for the global defaults or a single repo.
 /// An unset class maps to `None` and decides as `Deny` (fail closed).
+/// Unknown keys are a parse error: a typo'd key must abort config load,
+/// never silently fall back to a more permissive default.
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClassPolicy {
     #[serde(default)]
     push: Option<Decision>,
@@ -33,6 +36,7 @@ impl ClassPolicy {
 /// own-sphere API mutations default to `approve` (a hold, never a silent
 /// forward).
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApiPolicy {
     #[serde(default)]
     mutations: Option<Decision>,
@@ -51,6 +55,7 @@ pub struct ApiPolicy {
 /// mutations = "approve"
 /// ```
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyFile {
     #[serde(default)]
     defaults: ClassPolicy,
@@ -264,5 +269,53 @@ mutations = \"allow\"
         assert_eq!(e.decide("acme/widget", Class::Push, true), Decision::Allow);
         // ...and the API section parsed alongside.
         assert_eq!(e.decide_api(true), Decision::Allow);
+    }
+
+    // Config load must abort boot on a typo'd section or key: serde
+    // silently dropping it would leave the repo on more permissive
+    // defaults (final-review fix 1). Values (the strings mapped to
+    // Decision) may stay lenient — only unknown KEYS/sections are fatal.
+
+    #[test]
+    fn typo_d_section_fails_the_parse() {
+        let err = PolicyFile::parse("\
+[defaults]
+push = \"allow\"
+
+[repes.\"acme/widget\"]
+tag-delete = \"deny\"
+")
+        .expect_err("typo'd section must fail the parse");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown field"), "message: {msg}");
+        assert!(msg.contains("repes"), "message: {msg}");
+    }
+
+    #[test]
+    fn typo_d_class_key_fails_the_parse() {
+        let err = PolicyFile::parse("\
+[repos.\"acme/widget\"]
+tag-deleet = \"deny\"
+")
+        .expect_err("typo'd class key must fail the parse");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown field"), "message: {msg}");
+        assert!(msg.contains("tag-deleet"), "message: {msg}");
+    }
+
+    #[test]
+    fn typo_d_api_key_fails_the_parse() {
+        let err = PolicyFile::parse("[api]\nmutashuns = \"deny\"\n")
+            .expect_err("typo'd api key must fail the parse");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown field"), "message: {msg}");
+        assert!(msg.contains("mutashuns"), "message: {msg}");
+    }
+
+    #[test]
+    fn well_formed_files_still_parse_under_strict_keys() {
+        PolicyFile::parse(SAMPLE).expect("sample parses");
+        PolicyFile::parse("[api]\nmutations = \"deny\"\n").expect("api section parses");
+        PolicyFile::parse("").expect("empty file parses");
     }
 }

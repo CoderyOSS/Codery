@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Extension, Json, Router};
@@ -101,13 +101,16 @@ impl ApiDeps {
 
 /// The API proxy routes (mounted behind the auth middleware, like the git
 /// proxy): `ANY /api/v3/{*path}` (+ the bare `/api/v3` root) and the
-/// elevation status endpoint Plan B's control plane and agents poll.
+/// elevation status endpoint Plan B's control plane and agents poll. The
+/// body cap (`DefaultBodyLimit::max`) pairs with the capped read in
+/// [`handle_api`]: over-limit requests get a 413 before anything is
+/// buffered.
 pub fn router(state: Arc<GateState>) -> Router<Arc<GateState>> {
     Router::new()
         .route("/api/v3/{*path}", any(api_v3))
         .route("/api/v3", any(api_root))
         .route("/proxy/elevations/{id}", get(elevation))
-        .layer(DefaultBodyLimit::disable())
+        .layer(DefaultBodyLimit::max(state.max_body_bytes))
         .with_state(state)
 }
 
@@ -138,9 +141,14 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
     // re-encode round trip, which would change the %2F-in-segment semantics
     // some GitHub paths (e.g. /contents/a%2Fb) rely on.
     let raw_path = req.uri().path().to_string();
-    let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+    // Body reads are capped at the configured limit: an over-limit request
+    // gets a 413 (GitHub-shaped), is audited, and never reaches upstream.
+    let body = match axum::body::to_bytes(req.into_body(), gs.max_body_bytes).await {
         Ok(body) => body,
-        Err(_) => return bad_request("unreadable body"),
+        Err(_) => {
+            audit_api(&gs.audit, &agent_name, "-", "deny", "payload too large");
+            return payload_too_large();
+        }
     };
 
     let Some(deps) = gs.api.clone() else {
@@ -761,6 +769,16 @@ fn bad_request(msg: &str) -> Response {
     (StatusCode::BAD_REQUEST, msg.to_string()).into_response()
 }
 
+/// GitHub-shaped 413 (final-review body cap): the request exceeded
+/// `GATE_MAX_BODY_BYTES` and was never forwarded upstream.
+fn payload_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(json!({ "message": "Payload too large" })),
+    )
+        .into_response()
+}
+
 fn not_configured() -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -769,12 +787,30 @@ fn not_configured() -> Response {
         .into_response()
 }
 
-/// Status + content-type + body, straight from upstream.
+/// Response headers forwarded back to agents: `content-type` plus the
+/// GitHub headers agents depend on — pagination (`Link`), redirects
+/// (`Location`), caching (`ETag`), backoff (`Retry-After`) and rate-limit
+/// budget (`X-RateLimit-*`). Everything else is dropped.
+const RESPONSE_HEADERS: &[&str] = &[
+    "content-type",
+    "link",
+    "location",
+    "etag",
+    "retry-after",
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+    "x-ratelimit-used",
+];
+
+/// Status + response-header allowlist + body, from upstream.
 fn passthrough(status: u16, headers: &HeaderMap, body: Bytes) -> Response {
     let sc = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut builder = Response::builder().status(sc);
-    if let Some(ct) = headers.get(header::CONTENT_TYPE) {
-        builder = builder.header(header::CONTENT_TYPE, ct.clone());
+    for name in RESPONSE_HEADERS {
+        for value in headers.get_all(*name) {
+            builder = builder.header(*name, value.clone());
+        }
     }
     builder
         .body(Body::from(body))
@@ -784,6 +820,7 @@ fn passthrough(status: u16, headers: &HeaderMap, body: Bytes) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header;
 
     fn state() -> DbState {
         DbState::open(":memory:").unwrap()

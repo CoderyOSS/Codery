@@ -81,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut gate_state = GateState::with_git(state, audit, git);
     gate_state.api = Some(Arc::new(api));
+    gate_state.max_body_bytes = cfg.max_body_bytes;
     gate_state.onepage = Some(Arc::new(OnePageDeps {
         gate_host,
         machine_login,

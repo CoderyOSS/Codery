@@ -2,6 +2,19 @@ use std::env;
 
 use anyhow::Context;
 
+/// Default cap on proxied request bodies (512 MiB), used when
+/// `GATE_MAX_BODY_BYTES` is unset, blank or unparsable.
+pub const DEFAULT_MAX_BODY_BYTES: usize = 536_870_912;
+
+/// Parse `GATE_MAX_BODY_BYTES`; unset/blank/garbage ⇒ the 512 MiB default
+/// (never zero — a misparse must not disable every proxied request).
+fn max_body_bytes_from(v: Option<&str>) -> usize {
+    v.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_MAX_BODY_BYTES)
+}
+
 /// Gate runtime configuration (GATE-009 env keys).
 pub struct Config {
     pub public_url: String,
@@ -13,6 +26,9 @@ pub struct Config {
     /// Machine account username (GATE-004): the Basic-auth login used for
     /// git passthrough to upstream, `base64("{login}:{token}")`.
     pub machine_login: String,
+    /// Cap on proxied request bodies (`GATE_MAX_BODY_BYTES`); over-limit
+    /// requests get a 413 before anything is forwarded upstream.
+    pub max_body_bytes: usize,
 }
 
 impl Config {
@@ -33,6 +49,9 @@ impl Config {
                 .unwrap_or_else(|_| "/data/audit.jsonl".into()),
             machine_login: env::var("GATE_MACHINE_LOGIN")
                 .context("GATE_MACHINE_LOGIN is required")?,
+            max_body_bytes: max_body_bytes_from(
+                env::var("GATE_MAX_BODY_BYTES").ok().as_deref(),
+            ),
         })
     }
 
@@ -88,5 +107,30 @@ mod tests {
         assert_eq!(gate_host("", "0.0.0.0:8080"), "http://gitauthgate:8080");
         assert_eq!(gate_host("  ", "127.0.0.1:9999"), "http://gitauthgate:9999");
         assert_eq!(gate_host("", "0.0.0.0"), "http://gitauthgate:8080");
+    }
+
+    #[test]
+    fn max_body_bytes_defaults_when_unset_or_garbage() {
+        assert_eq!(max_body_bytes_from(None), DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(max_body_bytes_from(Some("")), DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(max_body_bytes_from(Some("   ")), DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(max_body_bytes_from(Some("junk")), DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(
+            max_body_bytes_from(Some("512MiB")),
+            DEFAULT_MAX_BODY_BYTES,
+            "plain integer parsing only"
+        );
+    }
+
+    #[test]
+    fn max_body_bytes_parses_plain_integers() {
+        assert_eq!(max_body_bytes_from(Some("1048576")), 1_048_576);
+        assert_eq!(max_body_bytes_from(Some(" 2048 ")), 2048);
+        assert_eq!(max_body_bytes_from(Some("0")), 0, "explicit zero honored");
+    }
+
+    #[test]
+    fn default_max_body_bytes_is_512_mib() {
+        assert_eq!(DEFAULT_MAX_BODY_BYTES, 536_870_912);
     }
 }

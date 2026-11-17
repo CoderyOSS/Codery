@@ -17,6 +17,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use gate::approval::{ApprovalOutcome, StubBackend};
 use gate::audit::Audit;
+use gate::config::DEFAULT_MAX_BODY_BYTES;
 use gate::github::GitHubPlatform;
 use gate::gitproxy::GitDeps;
 use gate::policy::{PolicyEngine, PolicyFile};
@@ -112,6 +113,11 @@ impl Gate {
 }
 
 async fn spawn_gate(auto: ApprovalOutcome) -> Gate {
+    spawn_gate_with_limit(auto, DEFAULT_MAX_BODY_BYTES).await
+}
+
+/// Variant with a test-chosen body cap (final-review fix 4).
+async fn spawn_gate_with_limit(auto: ApprovalOutcome, max_body_bytes: usize) -> Gate {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -162,7 +168,9 @@ async fn spawn_gate(auto: ApprovalOutcome) -> Gate {
     )
     .unwrap();
 
-    let app = router(GateState::with_git(state, audit, git));
+    let mut gate_state = GateState::with_git(state, audit, git);
+    gate_state.max_body_bytes = max_body_bytes;
+    let app = router(gate_state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -341,6 +349,34 @@ fn machine_auth_header() -> String {
         base64::engine::general_purpose::STANDARD
             .encode(format!("{MACHINE_LOGIN}:{MACHINE_TOKEN}"))
     )
+}
+
+fn agent_auth_header(token: &str) -> String {
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("{AGENT}:{token}"))
+    )
+}
+
+/// Raw HTTP/1.1 GET straight on the socket: reqwest would normalize bare
+/// `.` path segments away before sending, so the grammar test needs the
+/// exact bytes on the wire. Returns the response status code.
+fn raw_get_status(port: u16, path: &str, auth: &str) -> u16 {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))
+        .expect("gate listens");
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).expect("request written");
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).expect("response read");
+    let text = String::from_utf8_lossy(&buf);
+    text.split_whitespace()
+        .nth(1)
+        .unwrap_or_else(|| panic!("no status line: {text}"))
+        .parse()
+        .expect("status code parses")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -651,4 +687,202 @@ async fn unparseable_receive_body_is_403_without_upstream() {
         "{:?}",
         pushes[0]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Git reads are audited (final-review fix 2, GATE-005)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_reads_are_audited_forward_per_request() {
+    let gate = spawn_gate(ApprovalOutcome::Approved).await;
+    let head = "1234567890abcdef1234567890abcdef12345678";
+
+    let mut adv = pkt("# service=git-upload-pack\n");
+    adv.extend_from_slice(&flush());
+    adv.extend(pkt(&format!(
+        "{head} HEAD\0multi_ack_detailed ofs-delta object-format=sha1 symref=HEAD:refs/heads/main agent=gate-test\n"
+    )));
+    adv.extend(pkt(&format!("{head} refs/heads/main\n")));
+    adv.extend_from_slice(&flush());
+
+    Mock::given(method("GET"))
+        .and(path(format!("/{OWNER}/{REPO}.git/info/refs")))
+        .and(query_param("service", "git-upload-pack"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .append_header("content-type", "application/x-git-upload-pack-advertisement")
+                .set_body_bytes(adv),
+        )
+        .mount(&gate.upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/{OWNER}/{REPO}.git/git-upload-pack")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .append_header("content-type", "application/x-git-upload-pack-result")
+                .set_body_bytes(b"0008NAK\n".to_vec()),
+        )
+        .mount(&gate.upstream)
+        .await;
+
+    let auth = agent_auth_header(&gate.token);
+    let client = reqwest::Client::new();
+
+    let refs = client
+        .get(format!(
+            "{}/{OWNER}/{REPO}.git/info/refs?service=git-upload-pack",
+            gate.base_url()
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refs.status(), 200);
+
+    let up = client
+        .post(format!(
+            "{}/{OWNER}/{REPO}.git/git-upload-pack",
+            gate.base_url()
+        ))
+        .header("authorization", &auth)
+        .header("content-type", "application/x-git-upload-pack-request")
+        .body(flush())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(up.status(), 200);
+
+    // One audit record per read request, matching the audit_push shape.
+    let lines = gate.audit_lines();
+    let refs_audit = lines
+        .iter()
+        .find(|l| l["action"] == "git.info-refs")
+        .expect("info/refs request is audited");
+    assert_eq!(refs_audit["decision"], "forward");
+    assert_eq!(refs_audit["agent"], AGENT);
+    assert_eq!(refs_audit["repo"], REPO_FULL);
+    assert!(
+        refs_audit["basis"]
+            .as_str()
+            .unwrap()
+            .contains("service=git-upload-pack"),
+        "{refs_audit:?}"
+    );
+
+    let up_audit = lines
+        .iter()
+        .find(|l| l["action"] == "git.upload-pack")
+        .expect("upload-pack request is audited");
+    assert_eq!(up_audit["decision"], "forward");
+    assert_eq!(up_audit["agent"], AGENT);
+    assert_eq!(up_audit["repo"], REPO_FULL);
+    assert_eq!(
+        up_audit["basis"], "service=git-upload-pack",
+        "{up_audit:?}"
+    );
+
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l["action"] == "git.info-refs" || l["action"] == "git.upload-pack")
+            .count(),
+        2,
+        "exactly one record per read request"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Body cap (final-review fix 4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_limit_receive_pack_body_is_413_github_shaped_without_upstream() {
+    let gate = spawn_gate_with_limit(ApprovalOutcome::Approved, 1024).await;
+
+    let body = vec![b'x'; 2048]; // over the 1 KiB test cap
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "{}/{OWNER}/{REPO}.git/git-receive-pack",
+            gate.base_url()
+        ))
+        .header("authorization", agent_auth_header(&gate.token))
+        .header("content-type", "application/x-git-receive-pack-request")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    let v: serde_json::Value = serde_json::from_slice(&resp.bytes().await.unwrap()).unwrap();
+    assert_eq!(v["message"], "Payload too large");
+
+    let requests = gate.upstream_requests().await;
+    assert!(
+        requests.is_empty(),
+        "over-limit push must not reach upstream: {requests:?}"
+    );
+
+    let pushes = gate.push_audit();
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    assert_eq!(pushes[0]["decision"], "deny");
+    assert_eq!(pushes[0]["basis"], "payload too large");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn under_limit_receive_pack_body_still_forwards() {
+    let gate = spawn_gate_with_limit(ApprovalOutcome::Approved, 64 * 1024).await;
+
+    let old = "1234567890abcdef1234567890abcdef12345678";
+    let new = "fedcba0987654321fedcba0987654321fedcba09";
+    mount_receive_flow(
+        &gate,
+        &[("refs/heads/main", old)],
+        &format!("/repos/{REPO_FULL}/compare/{old}...{new}"),
+        r#"{"status":"diverged"}"#,
+    )
+    .await;
+
+    let mut body = pkt(&format!("{old} {new} refs/heads/main\0report-status"));
+    body.extend_from_slice(&flush());
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "{}/{OWNER}/{REPO}.git/git-receive-pack",
+            gate.base_url()
+        ))
+        .header("authorization", agent_auth_header(&gate.token))
+        .header("content-type", "application/x-git-receive-pack-request")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "under-limit push still flows");
+    assert_eq!(gate.receive_pack_hits(&gate.upstream_requests().await).len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Path grammar: bare `.` segments (final-review fix 5)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bare_dot_segments_are_rejected_with_400() {
+    let gate = spawn_gate(ApprovalOutcome::Approved).await;
+    let auth = agent_auth_header(&gate.token);
+    // A bare `.` segment survives the old grammar but URL
+    // normalization desyncs the gated repo key from the upstream
+    // path — it must 400 like `..` does. `.git`-as-repo (empty after
+    // the suffix strip) likewise.
+    for path in [
+        format!("/git/./{REPO}.git/info/refs?service=git-upload-pack"),
+        format!("/git/{OWNER}/./info/refs?service=git-upload-pack"),
+        format!("/git/{OWNER}/.git/info/refs?service=git-upload-pack"),
+    ] {
+        let status = raw_get_status(gate.port, &path, &auth);
+        assert_eq!(status, 400, "path: {path}");
+    }
+    // Nothing reached upstream.
+    let requests = gate.upstream_requests().await;
+    assert!(requests.is_empty(), "{requests:?}");
 }

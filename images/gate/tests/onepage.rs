@@ -120,6 +120,7 @@ async fn spawn() -> Gate {
             platform,
             enc_key: ENC_KEY.to_string(),
         })),
+        max_body_bytes: gate::config::DEFAULT_MAX_BODY_BYTES,
     };
     let app = router(gs);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

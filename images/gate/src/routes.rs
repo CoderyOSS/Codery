@@ -21,6 +21,7 @@ use serde_json::json;
 
 use crate::apiproxy::ApiDeps;
 use crate::audit::{Audit, AuditEntry};
+use crate::config::DEFAULT_MAX_BODY_BYTES;
 use crate::gitproxy::GitDeps;
 use crate::state::State as DbState;
 use crate::tokens::{AgentIdentity, TokenStore};
@@ -44,6 +45,9 @@ pub struct GateState {
     /// Onboarding-page dependencies (`GET /` + the one-time token form);
     /// absent only on probe-only routers.
     pub onepage: Option<Arc<crate::onepage::OnePageDeps>>,
+    /// Cap on proxied request bodies; over-limit requests get a 413
+    /// before anything is forwarded upstream.
+    pub max_body_bytes: usize,
 }
 
 impl GateState {
@@ -56,6 +60,7 @@ impl GateState {
             git: None,
             api: None,
             onepage: None,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
         }
     }
 
@@ -69,6 +74,7 @@ impl GateState {
             git: Some(Arc::new(git)),
             api: None,
             onepage: None,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
         }
     }
 

@@ -18,6 +18,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use gate::approval::{ApprovalOutcome, StubBackend};
 use gate::apiproxy::ApiDeps;
 use gate::audit::Audit;
+use gate::config::DEFAULT_MAX_BODY_BYTES;
 use gate::github::{GitHubPlatform, Platform};
 use gate::policy::{PolicyEngine, PolicyFile};
 use gate::routes::{router, GateState, RateLimiter};
@@ -151,6 +152,16 @@ async fn spawn_gate_with(
     policy_src: &str,
     machine_token: Option<&str>,
 ) -> Gate {
+    spawn_gate_full(auto, policy_src, machine_token, DEFAULT_MAX_BODY_BYTES).await
+}
+
+/// Variant with a test-chosen body cap (final-review fix 4).
+async fn spawn_gate_full(
+    auto: ApprovalOutcome,
+    policy_src: &str,
+    machine_token: Option<&str>,
+    max_body_bytes: usize,
+) -> Gate {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -209,6 +220,7 @@ async fn spawn_gate_with(
         git: None,
         api: Some(Arc::new(api)),
         onepage: None,
+        max_body_bytes,
     };
     let app = router(gs);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -895,4 +907,148 @@ mutations = \"allow\"
         audit[0]["basis"].as_str().unwrap().contains("third-party"),
         "{audit:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Response-header allowlist (final-review fix 3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_header_allowlist_survives_to_agents() {
+    let gate = spawn_gate(ApprovalOutcome::Approved).await;
+    Mock::given(method("GET"))
+        .and(path("/repos/octo/hello/issues"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(r#"[{"number":1}]"#.as_bytes().to_vec(), "application/json")
+                .append_header(
+                    "Link",
+                    r#"<https://api.github.com/repos/octo/hello/issues?page=2>; rel="next""#,
+                )
+                .append_header("Location", "https://api.github.com/elsewhere")
+                .append_header("ETag", r#"W/"abc123""#)
+                .append_header("Retry-After", "30")
+                .append_header("X-RateLimit-Limit", "5000")
+                .append_header("X-RateLimit-Remaining", "4998")
+                .append_header("X-RateLimit-Reset", "1700000000")
+                .append_header("X-RateLimit-Used", "2")
+                .append_header("X-Internal-Only", "drop-me"),
+        )
+        .mount(&gate.upstream)
+        .await;
+
+    let resp = gate
+        .send("GET", "/api/v3/repos/octo/hello/issues", b"")
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let h = resp.headers();
+
+    // The allowlisted set survives: pagination, redirects, caching,
+    // backoff and the rate-limit budget agents (`gh api --paginate` in
+    // particular) depend on.
+    assert!(
+        h.get("link")
+            .map(|v| v.to_str().unwrap())
+            .unwrap()
+            .contains("rel=\"next\""),
+        "pagination Link survives: {:?}",
+        h.get("link")
+    );
+    assert_eq!(
+        h.get("x-ratelimit-remaining").map(|v| v.to_str().unwrap()),
+        Some("4998"),
+        "rate-limit budget survives"
+    );
+    assert_eq!(
+        h.get("x-ratelimit-limit").map(|v| v.to_str().unwrap()),
+        Some("5000")
+    );
+    assert_eq!(
+        h.get("x-ratelimit-reset").map(|v| v.to_str().unwrap()),
+        Some("1700000000")
+    );
+    assert_eq!(
+        h.get("x-ratelimit-used").map(|v| v.to_str().unwrap()),
+        Some("2")
+    );
+    assert_eq!(
+        h.get("location").map(|v| v.to_str().unwrap()),
+        Some("https://api.github.com/elsewhere")
+    );
+    assert_eq!(h.get("etag").map(|v| v.to_str().unwrap()), Some(r#"W/"abc123""#));
+    assert_eq!(h.get("retry-after").map(|v| v.to_str().unwrap()), Some("30"));
+    assert_eq!(
+        h.get("content-type").map(|v| v.to_str().unwrap()),
+        Some("application/json"),
+        "content-type still passes back"
+    );
+    // Non-allowlisted headers stay dropped.
+    assert!(
+        h.get("x-internal-only").is_none(),
+        "headers outside the allowlist must not leak back"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Body cap (final-review fix 4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_limit_body_is_413_github_shaped_without_upstream() {
+    let gate = spawn_gate_full(
+        ApprovalOutcome::Approved,
+        DEFAULT_POLICY,
+        Some(MACHINE_TOKEN),
+        1024,
+    )
+    .await;
+    mount_membership(&gate, "octo", r#"{"state":"active"}"#).await;
+    mount_post(&gate, "/repos/octo/hello/issues", 201, r#"{"number":1}"#).await;
+
+    let body = vec![b'a'; 2048]; // over the 1 KiB test cap
+    let resp = gate
+        .send("POST", "/api/v3/repos/octo/hello/issues", &body)
+        .await;
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let v = Gate::body_json(resp).await;
+    assert_eq!(v["message"], "Payload too large");
+
+    // Nothing reached upstream — the cap fires before any upstream work
+    // (not even the credential probe).
+    let requests = gate.upstream_requests().await;
+    assert!(
+        requests.is_empty(),
+        "over-limit body must not be forwarded: {requests:?}"
+    );
+
+    let audit = gate.api_audit();
+    assert_eq!(audit.len(), 1, "{audit:?}");
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["basis"], "payload too large");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn under_limit_body_still_forwards() {
+    let gate = spawn_gate_full(
+        ApprovalOutcome::Approved,
+        DEFAULT_POLICY,
+        Some(MACHINE_TOKEN),
+        64 * 1024,
+    )
+    .await;
+    mount_membership(&gate, "octo", r#"{"state":"active"}"#).await;
+    mount_post(&gate, "/repos/octo/hello/issues", 201, r#"{"number":5}"#).await;
+
+    let body = vec![b'a'; 2048]; // well under the 64 KiB test cap
+    let resp = gate
+        .send("POST", "/api/v3/repos/octo/hello/issues", &body)
+        .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "under-limit body flows");
+    let requests = gate.upstream_requests().await;
+    let hits: Vec<_> = requests
+        .iter()
+        .filter(|r| r.url.path() == "/repos/octo/hello/issues")
+        .collect();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(&hits[0].body, &body, "full body forwarded");
 }
