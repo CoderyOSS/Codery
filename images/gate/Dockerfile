@@ -2,8 +2,8 @@
 FROM rust:1-slim AS build
 WORKDIR /src
 RUN rustup target add x86_64-unknown-linux-musl
-# Manifests first so the dependency layers cache; the dev-container files
-# .cargo/config.toml and rust-toolchain.toml are intentionally not copied.
+# Manifests first so the dependency layers cache; no cargo config or
+# toolchain pin is committed — the image uses its own default toolchain.
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src \
     && echo 'fn main() {}' > src/main.rs \
