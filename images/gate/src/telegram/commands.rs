@@ -1,6 +1,7 @@
 //! Telegram control-plane commands (GATE-006): `/pending` lists unresolved
 //! holds with resume/cancel buttons, `/block` and `/unblock` flip the
-//! repo kill switch, `/status` renders cheap read-only gate state, and
+//! repo kill switch, `/status` renders cheap read-only gate state,
+//! `/elevate` opens the repo's elevation flow by hand, and
 //! `/token mint|revoke|list` drives the agent-token lifecycle (GATE-003).
 //! All handlers are allowlist-gated upstream (the transport drops strangers
 //! before any handler runs); replies edit the command's message in place.
@@ -34,7 +35,7 @@ use crate::types::Role;
 /// here — the guided walkthrough owns it (its replies edit the command
 /// bubble and may fresh-send on a stale resume); the dispatcher yields it.
 const UNKNOWN_COMMAND: &str =
-    "Unknown command. Available: /pending, /status, /block owner/repo, /unblock owner/repo, /token mint|revoke|list, /grant owner/repo [role], /revoke owner/repo, /rotate, /disconnect, /setup";
+    "Unknown command. Available: /pending, /status, /block owner/repo, /unblock owner/repo, /token mint|revoke|list, /grant owner/repo [role], /elevate owner/repo role, /revoke owner/repo, /rotate, /disconnect, /setup";
 
 /// Usage line for /block and /unblock.
 const BLOCK_USAGE: &str = "Usage: /block owner/repo — or /unblock owner/repo";
@@ -46,6 +47,12 @@ const GRANT_USAGE: &str =
 /// Usage line for /revoke (GATE-010 §10): the lower-or-remove menu.
 const REVOKE_USAGE: &str =
     "Usage: /revoke owner/repo — lowers the machine account's role to Write, or removes it entirely";
+
+/// Usage line for /elevate (GATE-006, GATE-010): the operator-side
+/// elevation trigger — repo grammar + a gap tier. `read` is not a gap
+/// (baseline access) and `admin` needs the proxy triggers (GATE-010 keeps
+/// hand-raised elevations below the settings tier), so triage/write/maintain.
+const ELEVATE_USAGE: &str = "Usage: /elevate owner/repo role — role: triage|write|maintain";
 
 /// Usage line for /token and its subcommands; also the rejection reply for
 /// malformed or invalid token names.
@@ -116,6 +123,15 @@ impl UpdateHandler for Commands {
             // build (a flows row + two signed buttons); the conversation
             // starts on a button press, in the background.
             let reply = self.revoke_reply(arg);
+            let _ = api.edit_message(to, reply).await;
+            return;
+        }
+        if cmd == "elevate" {
+            // Operator-side elevation trigger (GATE-006, GATE-010):
+            // creates/adopts the repo's elevation flow — the sweep sends
+            // the consent message and the verify loop takes over. Sync:
+            // only a local row + reply.
+            let reply = self.elevate_reply(arg, &rest);
             let _ = api.edit_message(to, reply).await;
             return;
         }
@@ -233,6 +249,55 @@ impl Commands {
             ));
         }
         crate::telegram::grant::revoke_menu_reply(deps, &repo)
+    }
+
+    /// /elevate owner/repo role (GATE-006, GATE-010): validate, then open
+    /// (or join) the repo's elevation flow — the SAME row the proxies
+    /// create on a role gap — so the sweep batches it, sends the consent
+    /// message and the verify loop takes over. The confirmation names the
+    /// flow's current state (DETECTED for a fresh flow; the joined flow's
+    /// state otherwise), so a re-issue reads as a join, not a duplicate.
+    fn elevate_reply(&self, arg: Option<&str>, rest: &[&str]) -> SendRequest {
+        let Some(repo_arg) = arg else {
+            return (ELEVATE_USAGE.to_string(), Vec::new()).into();
+        };
+        let Some(repo) = valid_repo(repo_arg) else {
+            return (
+                format!("'{repo_arg}' is not owner/repo. {ELEVATE_USAGE}"),
+                Vec::new(),
+            )
+                .into();
+        };
+        let needed = match rest.first() {
+            Some(word) => match word.to_ascii_lowercase().as_str() {
+                "triage" => Role::Triage,
+                "write" => Role::Write,
+                "maintain" => Role::Maintain,
+                _ => {
+                    return (
+                        format!("Unknown role '{word}'. {ELEVATE_USAGE}"),
+                        Vec::new(),
+                    )
+                        .into();
+                }
+            },
+            None => return (ELEVATE_USAGE.to_string(), Vec::new()).into(),
+        };
+        let (flow_id, flow_state) = {
+            let guard = self.deps.state.lock().expect("state lock must be poison-free");
+            let id = crate::telegram::elevation::open_or_join_flow(
+                &guard,
+                &repo,
+                "/elevate (operator request)",
+                needed,
+            );
+            let state = guard.flow_state(&id).ok().flatten().unwrap_or_default();
+            (id, state)
+        };
+        SendRequest::text(format!(
+            "Elevation flow {flow_id} for {repo} is {flow_state} (needed: {needed}) \
+             — the consent message with the grant buttons follows in this chat."
+        ))
     }
 
     /// /pending: every unresolved hold — id, repo, class, age — with
@@ -562,6 +627,89 @@ mod tests {
         assert_eq!(role_from_arg("none"), None, "none is not a grant target");
         assert_eq!(role_from_arg("emperor"), None);
         assert_eq!(role_from_arg(""), None);
+    }
+
+    #[test]
+    fn elevate_validates_args_and_opens_or_joins_one_flow() {
+        let state = Arc::new(Mutex::new(
+            State::open(":memory:").expect("open"),
+        ));
+        let audit_path = std::env::temp_dir().join(format!(
+            "gate-elevate-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let deps = Arc::new(CommandDeps {
+            state: state.clone(),
+            audit: Arc::new(Audit::open(&audit_path)),
+            machine_token: Arc::new(|| None),
+            lifecycle: None,
+            grant: None,
+            reduction: None,
+        });
+        let commands = Commands { deps: deps.clone() };
+
+        // Bad args: usage replies, and NOTHING opens.
+        let reply = commands.elevate_reply(Some("acme"), &["write"]);
+        assert!(reply.text.contains("not owner/repo"), "{}", reply.text);
+        for args in [
+            (None, vec![]),                    // no repo at all
+            (Some("acme/api"), vec![]),        // role missing
+            (Some("acme/api"), vec!["emperor"]), // unknown role
+            (Some("acme/api"), vec!["admin"]), // admin is not a hand-raise tier
+            (Some("acme/api"), vec!["read"]),  // read is not a gap tier
+        ] {
+            let reply = commands.elevate_reply(args.0, &args.1);
+            assert!(
+                reply.text.contains("Usage: /elevate"),
+                "args {args:?} ⇒ usage: {}",
+                reply.text
+            );
+        }
+        {
+            let guard = deps.state.lock().unwrap();
+            assert!(
+                guard.flows_list("elevation").unwrap().is_empty(),
+                "rejections must not open a flow"
+            );
+        }
+
+        // Valid: opens the DETECTED row and names the state in the reply.
+        let reply = commands.elevate_reply(Some("acme/api"), &["Write"]);
+        assert!(reply.text.contains("DETECTED"), "{}", reply.text);
+        let flow_id = {
+            let guard = deps.state.lock().unwrap();
+            let rows = guard.flows_list("elevation").unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].flow_state, "DETECTED");
+            let p = crate::telegram::elevation::ElevationPayload::from_json(&rows[0].payload_json);
+            assert_eq!(p.repo, "acme/api");
+            assert_eq!(p.needed_role, "write");
+            assert_eq!(p.actions.len(), 1);
+            rows[0].id.clone()
+        };
+        assert!(reply.text.contains(&flow_id), "reply names the flow: {}", reply.text);
+
+        // Re-issue: joins the SAME flow (role raised, action appended, no
+        // duplicate row), and the reply names the joined state.
+        let reply = commands.elevate_reply(Some("acme/api"), &["maintain"]);
+        assert!(
+            reply.text.contains("DETECTED") && reply.text.contains(&flow_id),
+            "same open flow: {}",
+            reply.text
+        );
+        {
+            let guard = deps.state.lock().unwrap();
+            let rows = guard.flows_list("elevation").unwrap();
+            assert_eq!(rows.len(), 1, "join, never duplicate");
+            let p = crate::telegram::elevation::ElevationPayload::from_json(&rows[0].payload_json);
+            assert_eq!(p.needed_role, "maintain", "raised to the max");
+            assert_eq!(p.actions.len(), 2, "the gap joined the action list");
+        }
+        let _ = std::fs::remove_file(&audit_path);
     }
 
     #[test]

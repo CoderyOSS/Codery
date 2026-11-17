@@ -655,6 +655,46 @@ async fn upstream_403_admin_rights_maps_to_permission_pending_with_flow_row() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upstream_403_admin_rights_on_non_repo_path_opens_no_flow() {
+    let gate = spawn_gate(ApprovalOutcome::Approved).await;
+    mount_post(
+        &gate,
+        "/orgs/acme/hooks",
+        403,
+        r#"{"message":"Must have admin rights to Organization."}"#,
+    )
+    .await;
+
+    let resp = gate
+        .send("POST", "/api/v3/orgs/acme/hooks", br#"{"name":"web"}"#)
+        .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let v = Gate::body_json(resp).await;
+    // The exact permission_pending shape still reaches the agent.
+    assert_eq!(v["error"], "permission_pending", "{v}");
+    let elevation_id = v["elevation_id"].as_str().expect("elevation_id").to_string();
+    assert!(!elevation_id.is_empty());
+    assert_eq!(v["needs_role"], "admin");
+
+    // But NO flow row exists: a non-repo-scoped path has no flow key, and
+    // the old `"-"` row could never verify — it just sat until expiry.
+    assert!(gate.flows().is_empty(), "no flow row: {:?}", gate.flows());
+    let resp = gate
+        .send("GET", &format!("/proxy/elevations/{elevation_id}"), b"")
+        .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "nothing backs the id");
+
+    // The deny is audited.
+    let audit = gate.api_audit();
+    let last = audit.last().unwrap();
+    assert_eq!(last["decision"], "deny");
+    assert!(
+        last["basis"].as_str().unwrap().contains("permission_pending"),
+        "{audit:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upstream_403_missing_scope_maps_to_role_unavailable() {
     let gate = spawn_gate(ApprovalOutcome::Approved).await;
     mount_membership(&gate, "octo", r#"{"state":"active"}"#).await;

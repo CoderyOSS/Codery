@@ -13,6 +13,12 @@
 //! - restart resume keeps the same step, sends no duplicate when the step
 //!   row is younger than 1 h, resends when it is older (Review Focus 1);
 //! - step 8's checklist updates ONE message in place per repo outcome;
+//! - the step-8 grants run OFF the router dispatch: with a slow grant
+//!   (wiremock delay) the router still dispatches /pending and answers a
+//!   button press DURING the grant; [Cancel setup] clears the rows and the
+//!   grant worker bails (no resurrection, no late summary);
+//! - the setup-completion summary sends when the spawned grant worker
+//!   finishes the last repo;
 //! - `[I'm stuck]` resends with extended detail;
 //! - the one-time form's success path advances a FIRST setup (not a
 //!   rotation) to step 8 over real HTTP.
@@ -20,6 +26,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -33,10 +40,11 @@ use gate::state::{self, State as DbState};
 use gate::tasks::{KV_ROTATE_IN_PROGRESS, REMINDER_DAYS};
 use gate::telegram::commands::{register_commands, CommandDeps};
 use gate::telegram::fake::FakeTelegram;
+use gate::telegram::grant::{GrantDeps, RealGrantFlow};
 use gate::telegram::lifecycle::nonce_lookup as rotate_nonce_lookup;
 use gate::telegram::setup::{
     form_stored_hook, nonce_lookup as setup_nonce_lookup, register_setup, resume, FakeGrantFlow,
-    GrantOutcome, SetupDeps,
+    GrantFlow, GrantOutcome, SetupDeps,
 };
 use gate::telegram::{MsgRef, TelegramApi, TelegramRouter, Update};
 
@@ -60,10 +68,26 @@ struct Ctl {
     state: Arc<Mutex<DbState>>,
     upstream: MockServer,
     forwarding: Arc<AtomicBool>,
-    grant: Arc<FakeGrantFlow>,
+    /// The flow the step-8 handler consumes (fake or real machinery).
+    grant: Arc<dyn GrantFlow>,
+    /// The fake underneath `grant`, when one was wired (call-log reads).
+    fake_grant: Option<Arc<FakeGrantFlow>>,
     deps: Arc<SetupDeps>,
     router: TelegramRouter,
     _fallback: bool,
+}
+
+/// Poll a condition for up to ~5 s (10 ms steps) — the step-8 grant
+/// worker is spawned, so its outcomes and the completion summary arrive
+/// slightly after the dispatch returns.
+async fn wait_for(mut cond: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("condition not met within 5s");
 }
 
 impl Drop for Ctl {
@@ -80,7 +104,19 @@ impl Ctl {
     /// Open with a pre-scripted grant flow (the handler consumes the same
     /// Arc the assertions read).
     async fn with_grant(fallback: bool, grant: FakeGrantFlow) -> Self {
-        let grant = Arc::new(grant);
+        let fake_grant = Arc::new(grant);
+        let flow: Arc<dyn GrantFlow> = fake_grant.clone();
+        Self::with_flow_builder(fallback, move |_, _| flow, Some(fake_grant)).await
+    }
+
+    /// Open with any GrantFlow built against the harness's state +
+    /// platform (the real machinery for the off-router tests); `fake`
+    /// carries the call-log double when one is wired.
+    async fn with_flow_builder(
+        fallback: bool,
+        build: impl FnOnce(Arc<Mutex<DbState>>, Arc<dyn Platform>) -> Arc<dyn GrantFlow>,
+        fake: Option<Arc<FakeGrantFlow>>,
+    ) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -101,8 +137,9 @@ impl Ctl {
             Arc::new(|| None),
         ));
         let forwarding = Arc::new(AtomicBool::new(false));
-        let fake = Arc::new(FakeTelegram::new());
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let tg = Arc::new(FakeTelegram::new());
+        let api: Arc<dyn TelegramApi> = tg.clone();
+        let grant = build(state.clone(), platform.clone());
         let deps = Arc::new(SetupDeps {
             state: state.clone(),
             platform,
@@ -144,16 +181,25 @@ impl Ctl {
         }));
         Self {
             dir,
-            fake,
+            fake: tg,
             api,
             state,
             upstream,
             forwarding,
             grant,
+            fake_grant: fake,
             deps,
             router,
             _fallback: fallback,
         }
+    }
+
+    /// Grant-flow call log (fake-backed variants only).
+    fn grant_calls(&self) -> Vec<String> {
+        self.fake_grant
+            .as_ref()
+            .expect("fake grant flow wired")
+            .calls()
     }
 
     /// Dispatch one operator command; the reply must be exactly one edit.
@@ -291,6 +337,55 @@ impl Ctl {
         Mock::given(method("GET"))
             .and(path(format!("/users/{name}")))
             .respond_with(ResponseTemplate::new(status))
+            .mount(&self.upstream)
+            .await;
+    }
+
+    /// Step 7 → 8 through the paste intake with a passing verification.
+    async fn paste_to_step8(&self) {
+        self.drive_to_intake(0).await;
+        self.mount_verify(MACHINE_LOGIN, Some(MAIN_TOKEN)).await;
+        self.plain_text(MAIN_TOKEN).await;
+        assert_eq!(self.step(), Some(8), "paste intake lands on the repo checklist");
+    }
+
+    /// `GET /user/repository_invitations`: EVERY answer delayed `delay`
+    /// (the wiremock delay behind the slow-grant scenario); the first
+    /// `empties` calls list nothing, later calls offer invitation id 77
+    /// for `repo_full`. The grant conversation therefore sits inside
+    /// these late polls for hundreds of milliseconds.
+    async fn mount_slow_invitations(&self, delay: Duration, empties: usize, repo_full: &str) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let empty = "[]".to_string();
+        let invite = format!(r#"[{{"id":77,"repository":{{"full_name":"{repo_full}"}}}}]"#);
+        Mock::given(method("GET"))
+            .and(path("/user/repository_invitations"))
+            .respond_with(move |_req: &wiremock::Request| {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let body = if n < empties { empty.clone() } else { invite.clone() };
+                ResponseTemplate::new(200).set_body_string(body).set_delay(delay)
+            })
+            .mount(&self.upstream)
+            .await;
+    }
+
+    /// `PATCH /user/repository_invitations/77` — the auto-accept.
+    async fn mount_accept_invitation(&self) {
+        Mock::given(method("PATCH"))
+            .and(path("/user/repository_invitations/77"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&self.upstream)
+            .await;
+    }
+
+    /// `GET /repos/{owner}/{repo}` at the Write tier — the post-accept
+    /// role check the grant flow verifies against.
+    async fn mount_repo_write(&self, owner: &str, repo: &str) {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{owner}/{repo}")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"private":true,"permissions":{"admin":false,"maintain":false,"push":true,"triage":true,"pull":true}}"#,
+            ))
             .mount(&self.upstream)
             .await;
     }
@@ -461,10 +556,13 @@ async fn happy_path_reaches_step_eight_and_finishes_with_summary() {
     );
     let checklist_ref = c.pget("msg").expect("step 8 ask becomes the checklist anchor");
 
-    // Step 8: two repos, one granted, one pending — in-place updates.
+    // Step 8: two repos, one granted, one pending. The grants run in the
+    // spawned worker; when its LAST outcome lands (nothing left granting)
+    // the setup-completion summary sends and the rows clear on their own.
     c.plain_text("acme/one\ncme/two").await;
+    wait_for(|| c.grant_calls().len() == 2 && c.sent().iter().any(|r| r.text.contains("Setup complete"))).await;
     assert_eq!(
-        c.grant.calls(),
+        c.grant_calls(),
         vec!["acme/one".to_string(), "cme/two".to_string()]
     );
     let anchor: MsgRef = {
@@ -488,11 +586,12 @@ async fn happy_path_reaches_step_eight_and_finishes_with_summary() {
     assert!(final_text.contains("acme/one") && final_text.contains("✅"), "{final_text}");
     assert!(final_text.contains("cme/two") && final_text.contains("⏳"), "{final_text}");
 
-    // Finish.
-    c.press("finish").await;
+    // The completion summary: command list, ruleset reminder, guide link.
     let sent = c.sent();
     let summary = sent.last().unwrap();
     let text = &summary.text;
+    assert!(text.contains("Setup complete"), "summary sent: {text}");
+    assert!(text.contains("acme/one") && text.contains("cme/two"), "repo list: {text}");
     assert!(text.contains("/pending") && text.contains("/rotate"), "command list: {text}");
     assert!(
         text.to_lowercase().contains("ruleset") || text.to_lowercase().contains("bypass"),
@@ -506,7 +605,7 @@ async fn happy_path_reaches_step_eight_and_finishes_with_summary() {
         "finish links the setup guide: {:?}",
         summary.link_buttons
     );
-    assert_eq!(c.step(), None, "finish clears the durable rows");
+    assert_eq!(c.step(), None, "the spawned worker finished setup: rows cleared");
     assert_eq!(c.pget("main_email_hint"), None, "email hint never outlives setup");
 }
 
@@ -752,8 +851,6 @@ async fn checklist_updates_in_place_with_ok_wait_and_fail_marks() {
     c.plain_text(MAIN_TOKEN).await; // → step 8
     assert_eq!(c.step(), Some(8));
 
-    c.plain_text("acme/ok\nacme/wait\nacme/bad").await;
-
     let anchor: MsgRef = {
         let stored = c.pget("msg").unwrap();
         let (chat, msg) = stored.split_once(':').unwrap();
@@ -762,6 +859,19 @@ async fn checklist_updates_in_place_with_ok_wait_and_fail_marks() {
             message_id: msg.parse().unwrap(),
         }
     };
+    c.plain_text("acme/ok\nacme/wait\nacme/bad").await;
+    // The spawned worker updates the checklist and completes setup when
+    // the last outcome lands.
+    wait_for(|| c.grant_calls().len() == 3 && c.sent().iter().any(|r| r.text.contains("Setup complete"))).await;
+    assert_eq!(
+        c.grant_calls(),
+        vec![
+            "acme/ok".to_string(),
+            "acme/wait".to_string(),
+            "acme/bad".to_string()
+        ]
+    );
+
     let edits: Vec<_> = c
         .edits()
         .into_iter()
@@ -777,6 +887,121 @@ async fn checklist_updates_in_place_with_ok_wait_and_fail_marks() {
     assert!(final_text.contains("⏳"), "pending mark: {final_text}");
     assert!(final_text.contains("❌"), "failed mark: {final_text}");
     assert!(final_text.contains("role_unavailable"), "failure detail: {final_text}");
+}
+
+// ---------------------------------------------------------------------------
+// Step 8 grants run OFF the router dispatch (final-review fix 2): a slow
+// grant (wiremock delay on the invitation polls) must not park commands
+// or buttons; [Cancel setup] clears the rows and the grant worker bails.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_grant_leaves_router_live_and_cancel_clears_rows_worker_bails() {
+    let c = Ctl::with_flow_builder(
+        false,
+        |state, platform| {
+            Arc::new(RealGrantFlow::new(GrantDeps {
+                state,
+                platform,
+                machine_login: MACHINE_LOGIN.to_string(),
+                poll: Duration::from_millis(5),
+                reminder_after: Duration::from_secs(3600),
+                give_up_after: Duration::from_secs(3600),
+            })) as Arc<dyn GrantFlow>
+        },
+        None,
+    )
+    .await;
+    c.paste_to_step8().await;
+
+    // The slow grant: invitation polls answer ~300 ms late; the first
+    // poll lists nothing, the next one carries the invitation — so the
+    // grant stays in flight for well over half a second.
+    c.mount_slow_invitations(Duration::from_millis(300), 1, "acme/slow")
+        .await;
+    c.mount_accept_invitation().await;
+    c.mount_repo_write("acme", "slow").await;
+
+    // Send the repo: the dispatch returns after the ack render, the grant
+    // runs in the spawned worker (instructions went out, checklist shows
+    // the in-flight mark, and NOTHING parks).
+    let edits_before = c.fake.edits().len();
+    c.plain_text("acme/slow").await;
+    let ack_edits = c.fake.edits();
+    assert!(
+        ack_edits.len() > edits_before,
+        "the dispatch returned without awaiting the grant"
+    );
+    let anchor: MsgRef = {
+        let stored = c.pget("msg").unwrap();
+        let (chat, msg) = stored.split_once(':').unwrap();
+        MsgRef {
+            chat_id: chat.parse().unwrap(),
+            message_id: msg.parse().unwrap(),
+        }
+    };
+    let renders: Vec<_> = c
+        .edits()
+        .into_iter()
+        .filter(|(to, _)| *to == anchor)
+        .collect();
+    assert!(
+        renders.iter().any(|(_, r)| r.text.contains("granting…")),
+        "checklist shows the in-flight mark: {:?}",
+        renders.last().map(|(_, r)| r.text.clone())
+    );
+    wait_for(|| c.sent().iter().any(|r| r.text.contains("Granting acme/slow"))).await;
+
+    // DURING the grant: the router still dispatches /pending…
+    let reply = c.command("/pending").await;
+    assert!(
+        reply.text.contains("No pending approvals"),
+        "router answered /pending mid-grant: {}",
+        reply.text
+    );
+    // …and answers a walkthrough button press against the checklist.
+    c.press("stuck").await;
+    let stuck = c.fake.edits().last().unwrap().clone();
+    assert_eq!(stuck.0, anchor, "the press edited the checklist anchor");
+    assert!(
+        stuck.1.text.contains("Common problems"),
+        "router answered [I'm stuck] mid-grant: {}",
+        stuck.1.text
+    );
+
+    // Cancel DURING the grant: the durable rows clear immediately…
+    c.press("cancel").await;
+    assert_eq!(c.step(), None, "cancel clears the durable rows");
+    assert_eq!(c.pget("checklist"), None);
+    let edits_at_cancel = c.fake.edits().len();
+
+    // …and the worker bails: the grant itself completes (invitation
+    // accepted, registry reconciled), but the late outcome never
+    // resurrects the checklist and no completion summary sends.
+    wait_for(|| {
+        c.state
+            .lock()
+            .unwrap()
+            .registry_get("acme/slow")
+            .ok()
+            .flatten()
+            .is_some()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await; // let the worker's post-grant liveness check run
+    assert_eq!(c.step(), None, "still cleared");
+    assert_eq!(c.pget("checklist"), None, "no resurrection after the grant settles");
+    assert!(
+        !c.sent().iter().any(|r| r.text.contains("Setup complete")),
+        "a cancelled walkthrough never auto-completes: {:?}",
+        c.sent()
+    );
+    assert_eq!(
+        c.fake.edits().len(),
+        edits_at_cancel,
+        "no checklist edits after cancel: {:?}",
+        &c.fake.edits()[edits_at_cancel..]
+    );
 }
 
 // ---------------------------------------------------------------------------

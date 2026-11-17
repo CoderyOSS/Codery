@@ -636,6 +636,26 @@ async fn setup_step_eight_with_real_grant_shows_the_check_mark() {
     };
     h.router.dispatch(&update, &h.api).await;
 
+    // The grants run OFF the router dispatch (final-review fix 2): the
+    // dispatch returns after the ack render — wait for the spawned worker
+    // to land the outcome on the checklist.
+    let anchor = MsgRef {
+        chat_id: CHAT,
+        message_id: 77,
+    };
+    for _ in 0..1500 {
+        let done = h
+            .fake
+            .edits()
+            .into_iter()
+            .filter(|(to, _)| *to == anchor)
+            .any(|(_, r)| r.text.contains("acme/api ✅ granted (write)"));
+        if done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
     // The instructions went out as a fresh send; the checklist anchor was
     // edited in place from ⏳ to ✅.
     assert!(
@@ -643,10 +663,6 @@ async fn setup_step_eight_with_real_grant_shows_the_check_mark() {
         "instructions sent: {:?}",
         h.fake.sent()
     );
-    let anchor = MsgRef {
-        chat_id: CHAT,
-        message_id: 77,
-    };
     let edits: Vec<_> = h
         .fake
         .edits()

@@ -22,6 +22,7 @@ use gate::gitproxy::GitDeps;
 use gate::policy::{PolicyEngine, PolicyFile};
 use gate::routes::{router, GateState};
 use gate::state::State as DbState;
+use gate::telegram::commands::{register_commands, CommandDeps};
 use gate::telegram::elevation::{
     nonce_lookup as elevation_nonce_lookup, register_elevation, ElevationDeps, ReductionFlow,
 };
@@ -182,6 +183,20 @@ async fn spawn_gate_in(batch: Duration, poll: Duration, org: bool) -> H {
         &mut tg_router,
         Arc::new(gate::telegram::elevation::ElevationHandler::new(deps)),
     );
+    // The command dispatcher too: /elevate opens flows through the SAME
+    // open_or_join path the proxies use (the command handlers below only
+    // read text updates; the elevation handler above only reads callbacks).
+    register_commands(
+        &mut tg_router,
+        Arc::new(CommandDeps {
+            state: state.clone(),
+            audit: audit.clone(),
+            machine_token: Arc::new(|| None),
+            lifecycle: None,
+            grant: None,
+            reduction: None,
+        }),
+    );
 
     let mut git = GitDeps::new(
         state.clone(),
@@ -324,6 +339,29 @@ impl H {
             .filter(|r| r.text.contains(needle))
             .cloned()
             .collect()
+    }
+
+    /// Dispatch one operator command through the router; the reply must
+    /// be exactly one edit of the command's bubble.
+    async fn command(&self, text: &str) -> SendRequest {
+        let before = self.fake.edits().len();
+        let update = Update {
+            sender_id: Some(CHAT),
+            text: Some(text.to_string()),
+            message_ref: Some(MsgRef {
+                chat_id: CHAT,
+                message_id: 500,
+            }),
+            ..Default::default()
+        };
+        self.tg_router.dispatch(&update, &self.api.clone()).await;
+        let edits = self.fake.edits();
+        assert_eq!(
+            edits.len(),
+            before + 1,
+            "one command ⇒ exactly one reply edit: {edits:?}"
+        );
+        edits.last().unwrap().1.clone()
     }
 
     /// The `(label, callback_data)` buttons of the consent message.
@@ -816,6 +854,57 @@ async fn two_concurrent_gaps_two_seconds_apart_present_one_message() {
     let payload = h.payload_of(&flows[0].0);
     assert_eq!(payload.needed_role, "admin");
     assert_eq!(payload.actions.len(), 2, "{:?}", payload.actions);
+}
+
+// ---------------------------------------------------------------------------
+// 7. `/elevate owner/repo role` (GATE-006/GATE-010): the operator-side
+//    trigger opens/joins the SAME flow the proxies open; the sweep takes
+//    it to consent exactly like a detected gap.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn elevate_command_opens_the_flow_and_the_sweep_takes_it_to_consent() {
+    let h = spawn_gate(Duration::from_millis(30), Duration::from_millis(10)).await;
+
+    // Bad role: usage reply, nothing opened.
+    let reply = h.command("/elevate acme/api emperor").await;
+    assert!(reply.text.contains("Usage: /elevate"), "{}", reply.text);
+    assert!(h.flow_states().is_empty(), "rejections open no flow");
+
+    // Valid: the DETECTED row exists immediately, the reply names its
+    // state, and the sweep claims it — consent message out, row at
+    // AWAITING_USER_CONSENT (GATE-010 states machine).
+    let reply = h.command("/elevate acme/api maintain").await;
+    let flows = h.flow_states();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].1, "DETECTED");
+    assert!(reply.text.contains("DETECTED"), "reply names the flow state: {}", reply.text);
+    assert!(reply.text.contains(&flows[0].0), "reply names the flow id: {}", reply.text);
+    let payload = h.payload_of(&flows[0].0);
+    assert_eq!(payload.repo, "acme/api");
+    assert_eq!(payload.needed_role, "maintain");
+    assert_eq!(payload.actions.len(), 1);
+
+    wait_for(|| !h.sent_with("Role elevation needed").is_empty()).await;
+    let id = flows[0].0.clone();
+    wait_for(|| h.flow_state_of(&id).as_deref() == Some("AWAITING_USER_CONSENT")).await;
+
+    // Re-issued: joins the SAME flow (no duplicate row, no duplicate
+    // consent) and the reply names the joined state.
+    let consent_count = h.sent_with("Role elevation needed").len();
+    let reply = h.command("/elevate acme/api maintain").await;
+    assert_eq!(h.flow_states().len(), 1, "join, never duplicate");
+    assert!(
+        reply.text.contains("AWAITING_USER_CONSENT"),
+        "reply names the joined flow state: {}",
+        reply.text
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        h.sent_with("Role elevation needed").len(),
+        consent_count,
+        "no duplicate consent message"
+    );
 }
 
 // ---------------------------------------------------------------------------

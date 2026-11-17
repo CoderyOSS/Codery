@@ -249,7 +249,7 @@ codery-net DNS/TLS probe, and the empty-`GH_HOST` check all still apply
    no prompt — and elevated grants are walked back per policy; the
    change lands in the audit log.
 7. **"Grant until done, then remove."** `/grant <owner>/<repo>
-   maintainer` → do the elevated thing → `/revoke <owner>/<repo>`.
+   maintain` → do the elevated thing → `/revoke <owner>/<repo>`.
    **Expected:** the grant lands (invitation auto-accepted), the
    elevated action works while held, and revoke walks the agent back to
    its base role (e.g. `write`).

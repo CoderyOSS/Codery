@@ -27,9 +27,12 @@
 //! form `{GATE_PUBLIC_URL}/setup/token?nonce=…`, or the paste fallback —
 //! pastes are deleted instantly; intake accepts them in BOTH modes: a
 //! token sent into chat must vanish whether or not a form URL exists)
-//! · 8 repo checklist (`owner/repo` lines through the grant flow, ONE
-//! message updated in place per repo) → finish summary + command list +
-//! ruleset-backstop reminder.
+//! · 8 repo checklist (`owner/repo` lines through the grant flow — the
+//! grants run OFF the router dispatch in a spawned worker that updates
+//! ONE message in place per repo and sends the setup-completion summary
+//! when the last outcome lands; a mid-grant `[Cancel setup]` clears the
+//! rows and the worker bails on its liveness check) → finish summary +
+//! command list + ruleset-backstop reminder.
 //!
 //! Steps 6 and 7 are a PAIR delivered together (a documented flow
 //! ruling): step 6 cannot be API-verified and carries no Done (GATE-011
@@ -676,6 +679,39 @@ fn save_checklist(state: &Mutex<DbState>, entries: &[(String, GrantOutcome)]) {
     }
 }
 
+/// The checklist's in-flight mark: a fresh step-8 repo line before its
+/// grant settles. The spawned grant worker treats any entry still carrying
+/// it as "another batch is mid-grant" and leaves the completion summary to
+/// whichever worker writes the last outcome.
+const INFLIGHT_DETAIL: &str = "granting…";
+
+/// Checklist entries against an already-held lock — the spawned grant
+/// worker reads AND writes inside its liveness scope so a concurrent
+/// cancel can never interleave.
+fn load_checklist_guarded(guard: &DbState) -> Vec<(String, GrantOutcome)> {
+    guard
+        .setup_get(KEY_CHECKLIST)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<Vec<(String, GrantOutcome)>>(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Setup is parked on step 8 — the spawned grant worker's liveness check
+/// against an already-held lock.
+fn step8_live_guarded(guard: &DbState) -> bool {
+    guard
+        .setup_get(KEY_STEP)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u8>().ok())
+        == Some(8)
+}
+
+fn step8_live(state: &Mutex<DbState>) -> bool {
+    step_now(state) == Some(8)
+}
+
 /// The finish summary: reachable repos, the command list, and the
 /// ruleset-backstop reminder with a link to the setup guide (GATE-011
 /// step 8).
@@ -1099,7 +1135,10 @@ impl SetupHandler {
     }
 
     /// Step 8: `owner/repo` lines through the grant flow, ONE checklist
-    /// message updated in place per repo outcome.
+    /// message updated in place per repo outcome. The grants run in a
+    /// spawned worker (final-review fix 2): the router dispatch returns
+    /// after the ack render, so commands and buttons stay live while a
+    /// real grant polls GitHub for as long as it takes.
     async fn step8_repos(&self, text: &str, chat: i64, api: Arc<dyn TelegramApi>) {
         let deps = &self.deps;
         let mut entries = load_checklist(&deps.state);
@@ -1125,7 +1164,7 @@ impl SetupHandler {
             entries.push((
                 repo.clone(),
                 GrantOutcome::Pending {
-                    detail: "granting…".to_string(),
+                    detail: INFLIGHT_DETAIL.to_string(),
                 },
             ));
         }
@@ -1136,14 +1175,7 @@ impl SetupHandler {
             api: api.clone(),
             chat_id: chat,
         };
-        for repo in &fresh {
-            let outcome = deps.grant.grant(repo, &notify).await;
-            if let Some(slot) = entries.iter_mut().find(|(r, _)| r == repo) {
-                slot.1 = outcome;
-            }
-            save_checklist(&deps.state, &entries);
-            self.render_step8(&api).await; // in-place update per repo
-        }
+        tokio::spawn(run_step8_grants(deps.clone(), api, notify, fresh));
     }
 
     // -- shared plumbing ----------------------------------------------------
@@ -1233,12 +1265,7 @@ impl SetupHandler {
 
     /// Re-render step 8 (ask + checklist) onto the stored anchor.
     async fn render_step8(&self, api: &Arc<dyn TelegramApi>) {
-        let deps = &self.deps;
-        let Some(anchor) = stored_anchor(&deps.state) else {
-            return;
-        };
-        let ctx = StepCtx::load(&deps.state, &deps.machine_login, &deps.gate_public_url);
-        let _ = api.edit_message(anchor, ctx.req(8)).await;
+        render_step8_for(&self.deps, api).await;
     }
 
     /// Finish (step 8's `[Finish setup]`): summary + command list +
@@ -1369,6 +1396,84 @@ impl SetupHandler {
                 }
             }
         }
+    }
+}
+
+/// Re-render step 8 (ask + checklist) onto the stored anchor — shared by
+/// the handler and the spawned grant worker (the anchor row is durable, so
+/// the worker renders from the same truth).
+async fn render_step8_for(deps: &SetupDeps, api: &Arc<dyn TelegramApi>) {
+    let Some(anchor) = stored_anchor(&deps.state) else {
+        return;
+    };
+    let ctx = StepCtx::load(&deps.state, &deps.machine_login, &deps.gate_public_url);
+    let _ = api.edit_message(anchor, ctx.req(8)).await;
+}
+
+/// The spawned step-8 grant worker (final-review fix 2): grants run OFF
+/// the router dispatch — a real grant polls GitHub for up to days, and an
+/// inline await parked every command and button for that whole wait. Per
+/// repo outcome the checklist updates in place via the durable anchor.
+/// Liveness (`step == 8`) is checked BEFORE starting each grant and again
+/// before each write — in one lock scope with the write, so a mid-grant
+/// `[Cancel setup]` stays cleared and a late outcome never resurrects
+/// rows. When this batch's last outcome lands and no entry is still
+/// granting, the setup-completion summary sends and the durable rows
+/// clear (the `[Finish setup]` ending, reached on its own).
+async fn run_step8_grants(
+    deps: Arc<SetupDeps>,
+    api: Arc<dyn TelegramApi>,
+    notify: NotifyHandle,
+    repos: Vec<String>,
+) {
+    for repo in &repos {
+        if !step8_live(&deps.state) {
+            return; // cancelled/finished before this grant could start
+        }
+        let outcome = deps.grant.grant(repo, &notify).await;
+        {
+            let guard = deps.state.lock().expect("state lock must be poison-free");
+            if !step8_live_guarded(&guard) {
+                return; // cancelled/finished mid-grant: the rows stay cleared
+            }
+            let mut entries = load_checklist_guarded(&guard);
+            let Some(slot) = entries.iter_mut().find(|(r, _)| r == repo) else {
+                return; // checklist replaced under us: nothing to update
+            };
+            slot.1 = outcome;
+            if let Ok(json) = serde_json::to_string(&entries) {
+                let _ = guard.setup_set(KEY_CHECKLIST, &json);
+            }
+        }
+        render_step8_for(&deps, &api).await; // in-place update per repo
+    }
+    // Completion: decide AND clear under one lock, so a concurrent batch
+    // can never double-send — its liveness check fails after the clear.
+    let summary = {
+        let guard = deps.state.lock().expect("state lock must be poison-free");
+        if !step8_live_guarded(&guard) {
+            None
+        } else {
+            let entries = load_checklist_guarded(&guard);
+            if entries.iter().any(|(_, o)| o.detail() == INFLIGHT_DETAIL) {
+                None // another batch is still granting; it completes setup
+            } else {
+                let username = guard
+                    .setup_get(KEY_USERNAME)
+                    .ok()
+                    .flatten()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| deps.machine_login.clone());
+                let _ = guard.setup_clear();
+                Some(finish_summary(&username, &entries).replying_to(MsgRef {
+                    chat_id: notify.chat_id,
+                    message_id: 0,
+                }))
+            }
+        }
+    };
+    if let Some(req) = summary {
+        let _ = notify.send(req).await;
     }
 }
 

@@ -749,12 +749,19 @@ pub fn map_upstream_error(
         403 => {
             if body.contains("admin rights") {
                 let needed = min_role(Action::Api(classify_api(method, &format!("/{path}"))));
-                let id = crate::telegram::elevation::open_or_join_flow(
-                    state,
-                    repo.as_deref().unwrap_or("-"),
-                    path,
-                    needed,
-                );
+                // A flow can only ever verify on a repo-scoped path (the
+                // flow key is the repo): on anything else NO row is
+                // opened — the old `"-"` flow could never leave VERIFYING
+                // and just sat until expiry. The agent still gets the
+                // exact permission_pending shape (its id has no row, so
+                // the elevation endpoint answers "no such flow"); the
+                // deny itself is audited by the forwarding path.
+                let id = match repo {
+                    Some(repo) => crate::telegram::elevation::open_or_join_flow(
+                        state, &repo, path, needed,
+                    ),
+                    None => crate::state::uuid_v4(),
+                };
                 Err(AgentError::permission_pending(id, role_name(needed)))
             } else if let Some(scope) = missing_scope(headers) {
                 Err(AgentError::role_unavailable(&scope))
