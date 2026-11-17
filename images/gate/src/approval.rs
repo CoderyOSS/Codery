@@ -1,7 +1,9 @@
 //! Approval backend (GATE-005/006): dangerous operations are persisted as
-//! `pending` rows and wait for a human decision. Every unresolved hold fails
-//! closed as `TimedOut` — both at the request's deadline inside `wait` and
-//! at backend init via the restart sweep — so a restart can never silently
+//! `pending` rows and wait for a human decision. A hold dies with its
+//! waiter: at the request's deadline `wait` resolves it `TimedOut`, and at
+//! backend init the restart sweep resolves EVERY row still without an
+//! outcome as `TimedOut` — the process that would have consumed a later
+//! decision is gone, so a post-restart approve/deny can never silently
 //! resurrect a hold. Cross-task wake is by polling: `resolve` only writes
 //! the row, `wait` re-reads it, so a control plane in another task needs no
 //! channel into the waiter.
@@ -217,30 +219,22 @@ pub fn resolve_pending(
     Ok(changed)
 }
 
-/// Restart sweep (GATE-005, fail closed): every approval row left without an
-/// outcome whose deadline has passed resolves as `TimedOut`. Returns how
-/// many rows were resolved.
-pub fn sweep_expired_pending(state: &State, audit: &Audit) -> Result<usize> {
-    let rows: Vec<(String, String, i64)> = {
-        let mut stmt = state.conn().prepare(
-            "SELECT id, payload_json, created_at FROM pending
-             WHERE outcome IS NULL AND kind LIKE 'approval%'",
-        )?;
-        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+/// Restart sweep (GATE-005, fail closed): EVERY approval row left without
+/// an outcome resolves as `TimedOut`. The waiter died in the restart and no
+/// live consumer exists, so any later decision on a surviving row would be
+/// a phantom approval in the audit trail. Returns how many rows were
+/// resolved.
+pub fn sweep_unresolved_pending(state: &State, audit: &Audit) -> Result<usize> {
+    let ids: Vec<String> = {
+        let mut stmt = state
+            .conn()
+            .prepare("SELECT id FROM pending WHERE outcome IS NULL AND kind LIKE 'approval%'")?;
+        let mapped = stmt.query_map([], |r| r.get(0))?;
         mapped.collect::<Result<Vec<_>, _>>()?
     };
     let mut swept = 0;
-    for (id, payload_json, created_at) in rows {
-        let parsed: Option<PendingPayload> = serde_json::from_str(&payload_json).ok();
-        let (created_ms, timeout_ms) = match parsed {
-            Some(p) => (p.created_ms, p.timeout_ms),
-            // Corrupt payload: fall back to the row's own clock at the
-            // default window; still fails closed.
-            None => (created_at as u64 * 1000, APPROVAL_TIMEOUT_SECS * 1000),
-        };
-        if now_ms() >= created_ms.saturating_add(timeout_ms) {
-            swept += resolve_pending(state, audit, &id, ApprovalOutcome::TimedOut)? as usize;
-        }
+    for id in ids {
+        swept += resolve_pending(state, audit, &id, ApprovalOutcome::TimedOut)? as usize;
     }
     Ok(swept)
 }
@@ -309,9 +303,9 @@ pub struct StubBackend {
 }
 
 impl StubBackend {
-    /// Build the stub, sweeping expired unresolved holds first (GATE-005:
-    /// on backend init, restart resolves stale holds as `TimedOut` — no
-    /// live waiter required).
+    /// Build the stub, sweeping every unresolved hold first (GATE-005: on
+    /// backend init, restart resolves them as `TimedOut` — no live waiter
+    /// required).
     pub fn new(
         state: Arc<Mutex<State>>,
         audit: Arc<Audit>,
@@ -319,7 +313,7 @@ impl StubBackend {
     ) -> Result<Self> {
         {
             let guard = state.lock().expect("state lock");
-            sweep_expired_pending(&guard, &audit)?;
+            sweep_unresolved_pending(&guard, &audit)?;
         }
         Ok(Self { auto, state, audit })
     }
@@ -631,12 +625,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_on_init_resolves_expired_rows_fail_closed() {
+    async fn sweep_on_init_resolves_all_unresolved_rows_fail_closed() {
         let dir = unique_tmp_dir("restart");
         let db_path = dir.join("state.db");
         let (audit_path, audit) = temp_audit("restart");
 
-        // "Previous run": an expired hold and a fresh one, both unresolved.
+        // "Previous run": an expired hold and a fresh, unexpired one, both
+        // unresolved — neither has a live waiter after the restart.
         {
             let state = State::open(db_path.to_str().unwrap()).unwrap();
             for (id, created_ms, timeout_ms) in [
@@ -666,7 +661,8 @@ mod tests {
             }
         }
 
-        // "Restart": backend init sweeps without any live waiter.
+        // "Restart": backend init sweeps every unresolved hold, expired or
+        // not — the waiter died, so no decision can resurrect either.
         let state = Arc::new(Mutex::new(
             State::open(db_path.to_str().unwrap()).unwrap(),
         ));
@@ -678,7 +674,15 @@ mod tests {
             let (_, _, expired) = row_state(&guard, "hold-expired");
             let (_, _, fresh) = row_state(&guard, "hold-fresh");
             assert_eq!(expired, Some(ApprovalOutcome::TimedOut), "fail closed");
-            assert_eq!(fresh, None, "unexpired hold stays pending");
+            assert_eq!(
+                fresh, Some(ApprovalOutcome::TimedOut),
+                "unexpired hold is orphaned by the restart too"
+            );
+            // A post-restart control-plane approve must be a no-op: the
+            // sweep already decided the row (phantom approval prevented).
+            let phantom =
+                resolve_pending(&guard, &audit, "hold-fresh", ApprovalOutcome::Approved).unwrap();
+            assert!(!phantom, "resolved row is not resolvable after restart");
         }
 
         // The expired hold's wait concludes immediately as TimedOut.
@@ -688,7 +692,7 @@ mod tests {
         // Sweeping an already-swept store resolves nothing further.
         let swept = {
             let guard = state.lock().unwrap();
-            sweep_expired_pending(&guard, &audit).unwrap()
+            sweep_unresolved_pending(&guard, &audit).unwrap()
         };
         assert_eq!(swept, 0, "idempotent");
 
@@ -697,9 +701,10 @@ mod tests {
             .iter()
             .filter(|l| l["decision"] == "timed_out")
             .collect();
-        assert!(
-            !timed_out.is_empty(),
-            "restart-resolved hold is audited: {lines:?}"
+        assert_eq!(
+            timed_out.len(),
+            2,
+            "both restart-resolved holds are audited: {lines:?}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
