@@ -529,6 +529,52 @@ async fn reminder_3_days_fires_once() {
 }
 
 #[tokio::test]
+async fn reminder_send_failure_leaves_marker_unset_and_retries_next_sweep() {
+    let c = Ctl::open().await;
+    c.store_token(OLD_TOKEN);
+    let soon = gate::tasks::format_expires(state::now() + 13 * DAY);
+    mount_good_user(&c.upstream, OLD_TOKEN, Some(&soon)).await;
+
+    // First sweep: the Telegram send fails — the marker must NOT be
+    // written (an undelivered reminder must never be lost).
+    c.fake.fail_next_sends(1);
+    c.tick().await;
+    assert!(!c.marked(14), "undelivered reminder stays unmarked");
+    assert!(
+        c.notices().is_empty(),
+        "failed sends record nothing: {:?}",
+        c.notices()
+    );
+
+    // Second sweep: delivery succeeds — the reminder is sent and only now
+    // marked, so restarts will not re-send it.
+    c.tick().await;
+    assert!(c.marked(14), "marker written only after a confirmed send");
+    assert_eq!(c.notices().len(), 1, "retry delivered the reminder");
+    c.tick().await;
+    assert_eq!(c.notices().len(), 1, "delivered reminder never re-sends");
+}
+
+#[tokio::test]
+async fn reminder_without_a_channel_is_never_marked() {
+    let c = Ctl::open().await;
+    c.store_token(OLD_TOKEN);
+    let soon = gate::tasks::format_expires(state::now() + 13 * DAY);
+    mount_good_user(&c.upstream, OLD_TOKEN, Some(&soon)).await;
+    // No bot/chat configured: the verify still runs (forwarding on), but
+    // the reminder has nowhere to go and must stay eligible (unmarked).
+    let silent_deps = gate::tasks::LifecycleDeps {
+        notify: None,
+        ..c.deps.clone()
+    };
+
+    daily_tick(&silent_deps).await;
+
+    assert!(c.forwarding_on(), "verify still passes without a channel");
+    assert!(!c.marked(14), "no channel ⇒ nothing marked");
+}
+
+#[tokio::test]
 async fn reminder_1_day_and_expired_fire_once() {
     let c = Ctl::open().await;
     c.store_token(OLD_TOKEN);

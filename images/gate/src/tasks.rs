@@ -10,9 +10,12 @@
 //!   24 h interval): re-verifies, stamps `token_last_verified_at` (kv,
 //!   surfaced on /status later), then checks expiry reminders.
 //! - **Expiry reminders**: 14/3/1 days before `token_expires_at`, one
-//!   reminder per tick (tightest eligible threshold), each marked
-//!   `reminder_sent:{days}` in kv so restarts never re-send; the message
-//!   carries a signed `[Start /rotate]` button.
+//!   reminder per tick (tightest eligible threshold); the message carries
+//!   a signed `[Start /rotate]` button. `reminder_sent:{days}` is written
+//!   ONLY after a confirmed send (`send_notice` returns `Ok`) — a failed
+//!   delivery or a missing channel leaves the reminder unmarked, so the
+//!   next daily sweep retries it instead of it being lost, and restarts
+//!   never re-send a reminder that WAS delivered.
 //! - **Post-store completion** ([`apply_stored_token`] +
 //!   [`notify_rotate_complete`]): called from the one-time form's success
 //!   path. Persists the fresh expiry, resets the reminder cycle, and —
@@ -113,20 +116,32 @@ pub fn check_failed_text(err: &VerifyError, expected_login: &str) -> String {
     }
 }
 
-/// Gate-initiated notice: a fresh send into the operator chat. A missing
-/// or failing transport is logged to stderr and swallowed — lifecycle
-/// checks must never crash on notification problems.
-async fn send_notice(deps: &LifecycleDeps, req: SendRequest) {
-    let Some((api, chat)) = &deps.notify else {
-        return;
+/// Gate-initiated notice: a fresh send into the operator chat. Reports the
+/// outcome: `Err` when no channel is configured or the transport failed
+/// (both logged to stderr). Fire-and-forget callers (startup/daily
+/// notices) may ignore the result — checks never crash on notification
+/// problems — but CALLERS THAT MARK DELIVERY IN KV (the expiry-reminder
+/// sweep) must write their marker only on `Ok`, so an undelivered notice
+/// stays eligible and the next sweep retries it.
+async fn send_notice(
+    notify: &Option<(Arc<dyn TelegramApi>, i64)>,
+    req: SendRequest,
+) -> anyhow::Result<()> {
+    let Some((api, chat)) = notify else {
+        eprintln!("lifecycle: no telegram channel configured — notice skipped");
+        anyhow::bail!("no telegram channel configured");
     };
     let anchored = req.replying_to(MsgRef {
         chat_id: *chat,
         message_id: 0,
     });
-    if let Err(e) = api.send_message(anchored).await {
-        eprintln!("lifecycle: notice delivery failed: {e}");
-    }
+    api.send_message(anchored)
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            eprintln!("lifecycle: notice delivery failed: {e}");
+            e
+        })
 }
 
 /// Persist a successful verification: the last-verified stamp and the
@@ -172,24 +187,11 @@ pub async fn notify_rotate_complete(
          Now open the tokens page and DELETE the old token, so it cannot be reused.",
         vt.login
     );
-    send_notice_deps(notify, SendRequest::text(text).with_link_button("Open tokens page", crate::github::TOKENS_LIST_URL)).await;
-}
-
-/// Notice send for callers that hold only the notify pair (the form path).
-async fn send_notice_deps(
-    notify: &Option<(Arc<dyn TelegramApi>, i64)>,
-    req: SendRequest,
-) {
-    let Some((api, chat)) = notify else {
-        return;
-    };
-    let anchored = req.replying_to(MsgRef {
-        chat_id: *chat,
-        message_id: 0,
-    });
-    if let Err(e) = api.send_message(anchored).await {
-        eprintln!("lifecycle: notice delivery failed: {e}");
-    }
+    let _ = send_notice(
+        notify,
+        SendRequest::text(text).with_link_button("Open tokens page", crate::github::TOKENS_LIST_URL),
+    )
+    .await;
 }
 
 /// The startup credential check (GATE-004 §6.3). Runs BEFORE the server
@@ -200,8 +202,8 @@ pub async fn startup_check(deps: &LifecycleDeps) {
     match deps.load_token() {
         Err(e) => {
             deps.set_forwarding(false);
-            send_notice(
-                deps,
+            let _ = send_notice(
+                &deps.notify,
                 SendRequest::text(format!(
                     "Machine credential could not be read ({e}) — forwarding DISABLED. \
                      Check GATE_TOKEN_ENC_KEY."
@@ -211,8 +213,8 @@ pub async fn startup_check(deps: &LifecycleDeps) {
         }
         Ok(None) => {
             deps.set_forwarding(false);
-            send_notice(
-                deps,
+            let _ = send_notice(
+                &deps.notify,
                 SendRequest::text(
                     "No machine token stored — forwarding is DISABLED. \
                      Run /setup to connect the machine account.",
@@ -228,8 +230,8 @@ pub async fn startup_check(deps: &LifecycleDeps) {
             }
             Err(e) => {
                 deps.set_forwarding(false);
-                send_notice(
-                    deps,
+                let _ = send_notice(
+                    &deps.notify,
                     SendRequest::text(format!(
                         "Machine credential FAILED verification: {} — forwarding DISABLED. \
                          Run /rotate to replace the token.",
@@ -249,8 +251,8 @@ pub async fn daily_tick(deps: &LifecycleDeps) {
     match deps.load_token() {
         Err(e) => {
             deps.set_forwarding(false);
-            send_notice(
-                deps,
+            let _ = send_notice(
+                &deps.notify,
                 SendRequest::text(format!(
                     "Machine credential could not be read ({e}) — forwarding DISABLED. \
                      Check GATE_TOKEN_ENC_KEY."
@@ -267,8 +269,8 @@ pub async fn daily_tick(deps: &LifecycleDeps) {
             }
             Err(e) => {
                 deps.set_forwarding(false);
-                send_notice(
-                    deps,
+                let _ = send_notice(
+                    &deps.notify,
                     SendRequest::text(format!(
                         "Machine credential FAILED daily verification: {} — forwarding DISABLED. \
                          Run /rotate to replace the token.",
@@ -337,9 +339,13 @@ async fn maybe_send_reminders(deps: &LifecycleDeps) {
             .with_inline_button("Start /rotate", crate::telegram::lifecycle::ROTATE_FLOW, n, "start"),
         None => SendRequest::text(body),
     };
-    send_notice(deps, req).await;
-    let guard = deps.state.lock().expect("state lock must be poison-free");
-    let _ = guard.kv_set(&reminder_key(days), "1");
+    // The marker is written ONLY on a confirmed send: a failed delivery
+    // (or a missing channel) leaves the reminder unmarked, so the next
+    // daily sweep retries it instead of it being lost forever.
+    if send_notice(&deps.notify, req).await.is_ok() {
+        let guard = deps.state.lock().expect("state lock must be poison-free");
+        let _ = guard.kv_set(&reminder_key(days), "1");
+    }
 }
 
 /// Seconds per day — expiry arithmetic granularity.
