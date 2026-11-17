@@ -2,9 +2,11 @@
 // HTTP server in later tasks (GATE-005/GATE-007); unused until then.
 #![allow(dead_code)]
 
+mod audit;
 mod config;
 mod pktline;
 mod policy;
+mod state;
 mod types;
 
 #[tokio::main]
