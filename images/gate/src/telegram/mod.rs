@@ -370,10 +370,37 @@ impl TelegramRouter {
 
 /// Real transport against the Telegram Bot API. Long-polls with
 /// `timeout=50`; every call carries a 60s HTTP timeout. The bot token is
-/// embedded in the URL path (Telegram's scheme) and is never logged.
+/// embedded in the URL path (Telegram's scheme) and never logged: every
+/// error leaving this client is rewritten to a token-free summary (see
+/// [`redacted_error`]).
 pub struct TelegramClient {
     http: reqwest::Client,
     base: String,
+}
+
+/// Classify a reqwest transport error into a token-free kind word. Reads
+/// ONLY the error kind probes — never `Display`/source text, which embeds
+/// the full request URL (`…/bot<TOKEN>/…`).
+fn transport_kind(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() {
+        "timed out"
+    } else if e.is_connect() {
+        "connection failed"
+    } else if e.is_redirect() {
+        "redirect loop"
+    } else if e.is_body() || e.is_decode() {
+        "bad response"
+    } else {
+        "network error"
+    }
+}
+
+/// Token-safe error for ANY transport failure: reqwest error Display
+/// embeds the request URL, and the URL path carries the bot token, so raw
+/// error text must never reach a log line. Only the Bot API method name
+/// and the error kind survive (e.g. `getUpdates: transport timed out`).
+fn redacted_error(method: &str, e: &reqwest::Error) -> anyhow::Error {
+    anyhow!("{method}: transport {}", transport_kind(e))
 }
 
 impl TelegramClient {
@@ -393,16 +420,29 @@ impl TelegramClient {
     }
 
     /// POST one Bot API call and unwrap the `{ok: true, result}` envelope.
+    /// Transport failures are rewritten to token-free summaries before
+    /// they escape ([`redacted_error`]); the only free text ever included
+    /// in an error is Telegram's own response `description` — the token
+    /// lives in the request URL, never in a response body.
     async fn call(&self, method: &str, body: Value) -> Result<Value> {
-        let response = self.http.post(self.url(method)).json(&body).send().await?;
+        let response = self
+            .http
+            .post(self.url(method))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| redacted_error(method, &e))?;
         let status = response.status();
-        let payload: Value = response.json().await?;
+        let payload: Value = response
+            .json()
+            .await
+            .map_err(|e| redacted_error(method, &e))?;
         if payload.get("ok").and_then(Value::as_bool) != Some(true) {
             let description = payload
                 .get("description")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown telegram error");
-            return Err(anyhow!("telegram {method} failed (http {status}): {description}"));
+            return Err(anyhow!("{method}: status {status} ({description})"));
         }
         Ok(payload)
     }
@@ -781,6 +821,42 @@ mod tests {
             "lowercase hex only: {a}"
         );
         assert_ne!(a, b, "nonces must be random per call");
+    }
+
+    // --- error redaction (F1): the bot token must never reach a log line ---
+
+    #[tokio::test]
+    async fn transport_errors_are_redacted_and_never_carry_the_bot_token() {
+        // Synthetic error-shaped payload: a real reqwest error from a
+        // refused loopback connect, whose Display embeds the full URL —
+        // including a token-shaped secret in the path — exactly the shape
+        // that would leak `bot<TOKEN>` if an error were logged raw.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // no listener ⇒ the connect below refuses instantly
+
+        let err = reqwest::get(format!(
+            "http://127.0.0.1:{port}/botS3cr3tT0ken123/getUpdates"
+        ))
+        .await
+        .expect_err("connect to a dead port must fail");
+        let raw = err.to_string();
+        assert!(
+            raw.contains("botS3cr3tT0ken123"),
+            "sanity: raw reqwest errors embed the url: {raw}"
+        );
+
+        let summary = redacted_error("getUpdates", &err).to_string();
+        assert_eq!(summary, "getUpdates: transport connection failed");
+        assert!(!summary.contains("bot"), "no bot substring survives: {summary}");
+        assert!(
+            !summary.contains("S3cr3tT0ken123"),
+            "no token substring survives: {summary}"
+        );
+        assert!(
+            !summary.contains("127.0.0.1"),
+            "no url fragment survives: {summary}"
+        );
     }
 
     // --- poll loop ---
