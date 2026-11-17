@@ -152,6 +152,38 @@ impl State {
         )?;
         Ok(())
     }
+
+    /// Insert or refresh a control-flow row (`flows`): elevations, setup
+    /// runs, and everything a control plane tracks across restarts.
+    pub fn flow_insert(
+        &self,
+        id: &str,
+        kind: &str,
+        flow_state: &str,
+        payload_json: &str,
+    ) -> anyhow::Result<()> {
+        self.conn().execute(
+            "INSERT INTO flows(id, kind, state, payload_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                kind = excluded.kind,
+                state = excluded.state,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at",
+            rusqlite::params![id, kind, flow_state, payload_json, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Current `state` string for flow `id` (`None` when the id is
+    /// unknown). Plan-B control planes rewrite the state column as a flow
+    /// progresses; readers only ever need the latest.
+    pub fn flow_state(&self, id: &str) -> anyhow::Result<Option<String>> {
+        self.conn()
+            .query_row("SELECT state FROM flows WHERE id = ?1", [id], |r| r.get(0))
+            .optional()
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +278,21 @@ mod tests {
         assert_eq!(row.granted_role, "write");
         assert_eq!(row.intended_role, "maintain");
         assert_eq!(row.via, "oauth-web");
+    }
+
+    #[test]
+    fn flow_insert_get_roundtrip() {
+        let s = State::open(":memory:").unwrap();
+        assert_eq!(s.flow_state("flow-1").unwrap(), None);
+        s.flow_insert("flow-1", "elevation", "DETECTED", r#"{"repo":"octo/x"}"#)
+            .unwrap();
+        assert_eq!(s.flow_state("flow-1").unwrap().as_deref(), Some("DETECTED"));
+        // Upsert refreshes state in place (Plan B writes transitions).
+        s.flow_insert("flow-1", "elevation", "GRANTED", r#"{"repo":"octo/x"}"#)
+            .unwrap();
+        assert_eq!(s.flow_state("flow-1").unwrap().as_deref(), Some("GRANTED"));
+        // Other ids untouched; unknown ids stay None.
+        assert_eq!(s.flow_state("flow-2").unwrap(), None);
     }
 
     #[test]

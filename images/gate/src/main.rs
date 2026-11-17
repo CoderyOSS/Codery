@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use gate::apiproxy::ApiDeps;
 use gate::approval::{ApprovalOutcome, StubBackend, APPROVAL_TIMEOUT_SECS};
 use gate::audit::Audit;
 use gate::config::Config;
@@ -39,15 +40,29 @@ async fn main() -> anyhow::Result<()> {
 
     let git = GitDeps::new(
         state.clone(),
+        platform.clone(),
+        policy.clone(),
+        backend.clone(),
+        cfg.machine_login.clone(),
+        machine_token.clone(),
+        Duration::from_secs(APPROVAL_TIMEOUT_SECS),
+    )?;
+
+    // The API proxy shares every dependency with the git proxy: one
+    // platform (single place holding api_base + token custody), one
+    // policy engine, one approval backend, one registry.
+    let api = ApiDeps::new(
+        state.clone(),
         platform,
         policy,
         backend,
-        cfg.machine_login.clone(),
         machine_token,
         Duration::from_secs(APPROVAL_TIMEOUT_SECS),
     )?;
 
-    let app = routes::router(GateState::with_git(state, audit, git));
+    let mut gate_state = GateState::with_git(state, audit, git);
+    gate_state.api = Some(Arc::new(api));
+    let app = routes::router(gate_state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await?;
     eprintln!(

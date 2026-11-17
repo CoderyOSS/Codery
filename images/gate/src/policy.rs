@@ -29,6 +29,15 @@ impl ClassPolicy {
     }
 }
 
+/// The `[api]` section: mutation policy for the GitHub-API proxy. Unset ⇒
+/// own-sphere API mutations default to `approve` (a hold, never a silent
+/// forward).
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+pub struct ApiPolicy {
+    #[serde(default)]
+    mutations: Option<Decision>,
+}
+
 /// The bind-mounted policy file: global defaults plus per-repo overrides.
 ///
 /// ```toml
@@ -37,6 +46,9 @@ impl ClassPolicy {
 ///
 /// [repos."owner/repo"]
 /// tag-delete = "deny"
+///
+/// [api]
+/// mutations = "approve"
 /// ```
 #[derive(Debug, Default, Deserialize)]
 pub struct PolicyFile {
@@ -44,6 +56,8 @@ pub struct PolicyFile {
     defaults: ClassPolicy,
     #[serde(default)]
     repos: HashMap<String, ClassPolicy>,
+    #[serde(default)]
+    api: ApiPolicy,
 }
 
 impl PolicyFile {
@@ -57,6 +71,7 @@ impl PolicyFile {
 pub struct PolicyEngine {
     defaults: ClassPolicy,
     repos: HashMap<String, ClassPolicy>,
+    api: ApiPolicy,
 }
 
 impl PolicyEngine {
@@ -64,6 +79,7 @@ impl PolicyEngine {
         Self {
             defaults: file.defaults,
             repos: file.repos.clone(),
+            api: file.api,
         }
     }
 
@@ -83,6 +99,16 @@ impl PolicyEngine {
             .for_class(class)
             .or_else(|| self.defaults.for_class(class))
             .unwrap_or(Decision::Deny)
+    }
+
+    /// API-mutation verdict (task 8): own-sphere mutations consult the
+    /// `[api] mutations` section, defaulting to `approve`; third-party
+    /// mutations always require approval (GATE-005).
+    pub fn decide_api(&self, own_sphere: bool) -> Decision {
+        if !own_sphere {
+            return Decision::Approve;
+        }
+        self.api.mutations.unwrap_or(Decision::Approve)
     }
 }
 
@@ -193,5 +219,50 @@ tag-delete = \"allow\"
         assert_eq!(f.defaults.tag_delete, Some(Decision::Approve));
         let widget = f.repos.get("acme/widget").expect("override present");
         assert_eq!(widget.tag_delete, Some(Decision::Deny));
+    }
+
+    #[test]
+    fn api_mutations_default_to_approve_when_section_absent() {
+        let e = engine(SAMPLE);
+        assert_eq!(e.decide_api(true), Decision::Approve);
+        // An empty file behaves identically.
+        assert_eq!(engine("").decide_api(true), Decision::Approve);
+    }
+
+    #[test]
+    fn api_mutations_section_is_honored_for_own_sphere() {
+        let deny = engine("[api]\nmutations = \"deny\"\n");
+        assert_eq!(deny.decide_api(true), Decision::Deny);
+        let allow = engine("[api]\nmutations = \"allow\"\n");
+        assert_eq!(allow.decide_api(true), Decision::Allow);
+        let approve = engine("[api]\nmutations = \"approve\"\n");
+        assert_eq!(approve.decide_api(true), Decision::Approve);
+    }
+
+    #[test]
+    fn api_mutations_third_party_always_approves() {
+        // Even an explicit deny cannot third-party a mutation out of the
+        // approval flow (GATE-005).
+        let e = engine("[api]\nmutations = \"deny\"\n");
+        assert_eq!(e.decide_api(false), Decision::Approve);
+    }
+
+    #[test]
+    fn api_section_coexists_with_git_policy() {
+        let e = engine("\
+[defaults]
+push = \"allow\"
+
+[repos.\"acme/widget\"]
+tag-delete = \"deny\"
+
+[api]
+mutations = \"allow\"
+");
+        // Git classes unchanged...
+        assert_eq!(e.decide("acme/widget", Class::TagDelete, true), Decision::Deny);
+        assert_eq!(e.decide("acme/widget", Class::Push, true), Decision::Allow);
+        // ...and the API section parsed alongside.
+        assert_eq!(e.decide_api(true), Decision::Allow);
     }
 }

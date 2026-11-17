@@ -50,6 +50,11 @@ pub trait Platform: Send + Sync {
     /// Is the machine account an active member of `org`? Anything but a
     /// 200 with `state == "active"` is false (fail closed).
     async fn org_member(&self, org: &str) -> bool;
+
+    /// Verify the machine credential at request time: GET /user with the
+    /// custody token. `None` when custody is empty or the upstream rejects
+    /// the token — the API proxy forwards NOTHING in that state.
+    async fn user_login(&self) -> Option<String>;
 }
 
 /// The authenticated caller's access to a repo (GATE-008).
@@ -134,6 +139,12 @@ struct RepoResponse {
     private: bool,
     #[serde(default)]
     permissions: PermissionsObj,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserResponse {
+    #[serde(default)]
+    login: String,
 }
 
 /// REST client for GitHub with per-request machine-token injection. The
@@ -330,6 +341,25 @@ impl Platform for GitHubPlatform {
         match response.json::<MembershipResponse>().await {
             Ok(m) => m.state == "active",
             Err(_) => false,
+        }
+    }
+
+    async fn user_login(&self) -> Option<String> {
+        // Empty custody ⇒ no credential, without an upstream round trip.
+        let token = (self.token)()?;
+        let url = self.api_base.join("user").ok()?;
+        let response = match self.client.get(url).bearer_auth(token).send().await {
+            Ok(response) => response,
+            Err(_) => return None,
+        };
+        if response.status() != StatusCode::OK {
+            return None;
+        }
+        let body: UserResponse = response.json().await.ok()?;
+        if body.login.is_empty() {
+            None
+        } else {
+            Some(body.login)
         }
     }
 }
@@ -747,5 +777,46 @@ mod tests {
         membership_mock(&server, 200, "<html>nope</html>").await;
         let p = platform_at(&server);
         assert!(!p.org_member("acme").await);
+    }
+
+    #[tokio::test]
+    async fn user_login_returns_the_login_on_200() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(header("authorization", "Bearer s3cr3t"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"login":"gate-machine"}"#),
+            )
+            .mount(&server)
+            .await;
+        let p = platform_with_token(&server, Some("s3cr3t"));
+        assert_eq!(p.user_login().await, Some("gate-machine".to_string()));
+    }
+
+    #[tokio::test]
+    async fn user_login_is_none_when_upstream_rejects() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string(r#"{"message":"Bad credentials"}"#),
+            )
+            .mount(&server)
+            .await;
+        let p = platform_with_token(&server, Some("revoked-token"));
+        assert_eq!(p.user_login().await, None);
+    }
+
+    #[tokio::test]
+    async fn user_login_is_none_without_any_upstream_call_when_custody_empty() {
+        // No mocks mounted: if the platform called upstream it would be
+        // recorded, and a default 404 would yield None — the point is that
+        // empty custody short-circuits BEFORE any request.
+        let server = MockServer::start().await;
+        let p = platform_at(&server);
+        assert_eq!(p.user_login().await, None);
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests.is_empty(), "no round trip without custody");
     }
 }

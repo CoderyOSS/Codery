@@ -3,8 +3,10 @@
 //! axum server.
 
 pub mod approval;
+pub mod apiproxy;
 pub mod audit;
 pub mod config;
+pub mod errors;
 pub mod github;
 pub mod gitproxy;
 pub mod pktline;
