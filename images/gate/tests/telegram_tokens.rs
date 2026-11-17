@@ -62,7 +62,8 @@ impl Harness {
                 audit: audit.clone(),
                 machine_token,
                 lifecycle: None,
-            grant: None,
+                grant: None,
+                reduction: None,
             }),
         );
         Self {

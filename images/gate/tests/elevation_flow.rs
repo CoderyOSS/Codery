@@ -743,6 +743,24 @@ async fn temporary_grant_auto_starts_the_reduction() {
     assert_eq!(h.registry_row().intended_role, "read");
     assert_eq!(h.registry_row().granted_role, "maintain");
 
+    // The success copy matches the actual behavior: the seam fires at DONE
+    // (reduction starts NOW) — it must not promise a later trigger.
+    let success = h
+        .sent_with("temporary grant")
+        .into_iter()
+        .find(|m| m.text.contains("Read"))
+        .expect("temporary-grant success message");
+    assert!(
+        !success.text.contains("once you confirm"),
+        "no promise of a later trigger (seam fires at DONE): {}",
+        success.text
+    );
+    assert!(
+        success.text.contains("now"),
+        "the copy says the reduction starts now: {}",
+        success.text
+    );
+
     // And the retried request succeeds while the temporary grant holds.
     Mock::given(method("PUT"))
         .and(path("/repos/acme/api/topics"))
@@ -753,6 +771,11 @@ async fn temporary_grant_auto_starts_the_reduction() {
         .send("PUT", "/api/v3/repos/acme/api/topics", br#"{"names":["go"]}"#)
         .await;
     assert_eq!(resp.status(), 204, "the temporary grant carries the retry");
+
+    // §9.2 bookkeeping: a successful retried request marks work_done=1 on
+    // the temp elevation flow (the reduction still proceeds at DONE — this
+    // is a record, not a second trigger).
+    wait_for(|| h.payload_of(&id).work_done == Some(1)).await;
 }
 
 // ---------------------------------------------------------------------------

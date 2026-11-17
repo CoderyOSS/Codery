@@ -46,19 +46,58 @@
 //! [`crate::github::collaborator_settings_url`] — every `github.com`
 //! literal stays in the adapter (same posture as `SIGNUP_URL` & co); UI
 //! copy in this layer carries the URL but never a literal.
+//!
+//! # Reduction (GATE-010 §10, task 9)
+//!
+//! Temporary grants reduce automatically: the elevation's
+//! [`crate::telegram::elevation::ReductionFlow`] seam fires at DONE and
+//! [`RealReductionFlow`] starts the reduction conversation —
+//! `start_reduction(deps, repo, target)`:
+//!
+//! 1. **Instructions** — GATE-010 §10 wording ("Change {login} on {repo}
+//!    back to {role}: click its role and choose {role}") + ONE
+//!    `[Open collaborator settings]` link button. A target of `None` is a
+//!    full REMOVAL: the instructions name the trash icon instead (there is
+//!    no role to choose off a repo).
+//! 2. **Poll-verify** — `repo_permissions` every [`ReductionDeps::poll`]
+//!    (GATE-010: 5 s). Reaching the target ⇒ registry row updated
+//!    (granted = target, `via` preserved) + ONE ✅ confirmation. The user
+//!    instead REMOVING the agent (404/NoAccess, or an all-false
+//!    permission answer) ⇒ treated as FULLY reduced: the row is
+//!    none-marked per B6's keep-row ruling (`granted_role = none`,
+//!    `intended_role`/`via` preserved so /status shows "access removed")
+//!    with a "removed entirely" confirmation. A wrong-but-changed role
+//!    gets one difference message per distinct role; polling continues.
+//! 3. **Durability** — every reduction is a `flows` row
+//!    (`kind='reduction'`, `REDUCING → DONE | EXPIRED`); the sweep
+//!    ([`run_reduction_sweep`]) expires stale rows after
+//!    [`ReductionDeps::expire_after`] (GATE-010: 24 h no-progress),
+//!    reusing the elevation sweep's shape.
+//!
+//! # `/revoke {owner}/{repo}` (GATE-010 §10)
+//!
+//! One menu, two signed buttons: **[Lower to Write]** starts the reduction
+//! conversation targeting Write; **[Remove completely]** targets `None`
+//! (the trash-icon removal). Both verify against `repo_permissions` and
+//! confirm here. The menu is itself a `flows` row (`kind='revoke'`,
+//! `AWAITING_CHOICE → DECIDED`), nonce-validated like every signed
+//! button; a second press never double-applies.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
-use crate::github::Platform;
+use crate::audit::{Audit, AuditEntry};
+use crate::github::{Platform, RepoAccessError};
 use crate::registry::RegistryDeps;
-use crate::rolemapping::role_name;
+use crate::rolemapping::{role_from_name, role_name};
 use crate::state::{self, State as DbState};
 use crate::telegram::send::SendRequest;
 use crate::telegram::setup::{GrantFlow, GrantOutcome, NotifyHandle};
-use crate::telegram::TelegramApi;
+use crate::telegram::{nonce, NonceLookup, TelegramApi, TelegramRouter, Update, UpdateHandler};
 use crate::types::Role;
 
 /// Seconds per day — the offer debounce bucket.
@@ -359,6 +398,566 @@ pub fn outcome_text(repo: &str, machine_login: &str, outcome: &GrantOutcome) -> 
         GrantOutcome::Pending { detail } => format!("⏳ {repo}: {detail}"),
         GrantOutcome::Failed { reason } => format!("❌ {repo}: {reason}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reduction (GATE-010 §10, task 9): temporary-grant reductions AND the
+// `/revoke` removals all run through this machinery.
+// ---------------------------------------------------------------------------
+
+/// `flows.kind` for reductions — temporary-grant reductions and the
+/// removal polls `/revoke` starts.
+pub const REDUCTION_FLOW_KIND: &str = "reduction";
+/// `flows.kind` for the `/revoke` choice menu (the decision row).
+pub const REVOKE_FLOW_KIND: &str = "revoke";
+
+/// Open state of a reduction flow: instructions out, polling.
+pub const REDUCTION_STATE_REDUCING: &str = "REDUCING";
+/// Terminal: GitHub reported the target role (or the removal landed).
+pub const REDUCTION_STATE_DONE: &str = "DONE";
+/// The sweep's no-progress expiry.
+pub const REDUCTION_STATE_EXPIRED: &str = "EXPIRED";
+
+/// The `/revoke` menu waiting for its choice.
+pub const REVOKE_STATE_AWAITING_CHOICE: &str = "AWAITING_CHOICE";
+/// The menu was decided; the reduction flow carries on the work.
+pub const REVOKE_STATE_DECIDED: &str = "DECIDED";
+/// A menu nobody pressed for the whole expiry window.
+pub const REVOKE_STATE_EXPIRED: &str = "EXPIRED";
+
+const ACTION_LOWER: &str = "lower";
+const ACTION_REMOVE: &str = "remove";
+
+/// JSON payload of a reduction flow row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReductionPayload {
+    /// The repo being reduced (`owner/repo`) — the flow key.
+    #[serde(default)]
+    pub repo: String,
+    /// Registry spelling of the role to reduce TO (`none` = full removal).
+    #[serde(default)]
+    pub target_role: String,
+}
+
+impl ReductionPayload {
+    fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("reduction payload must serialize")
+    }
+
+    fn from_json(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+}
+
+/// JSON payload of a revoke-menu row: the signed buttons' anchor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokePayload {
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub nonce: Option<String>,
+}
+
+impl RevokePayload {
+    fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("revoke payload must serialize")
+    }
+
+    fn from_json(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+}
+
+/// Everything the reduction conversation, the `/revoke` menu and their
+/// sweep read. Cloneable (arcs + strings); durations shrink in tests.
+#[derive(Clone)]
+pub struct ReductionDeps {
+    pub state: Arc<Mutex<DbState>>,
+    pub platform: Arc<dyn Platform>,
+    /// The machine account login named in every message.
+    pub machine_login: String,
+    /// `(api, chat_id)` for gate-initiated sends; `None` ⇒ conversations
+    /// cannot start (nobody to instruct) — rows expire with the sweep.
+    pub notify: Option<(Arc<dyn TelegramApi>, i64)>,
+    /// Verify-poll cadence (GATE-010: 5 s).
+    pub poll: Duration,
+    /// No-progress expiry for reduction rows and revoke menus
+    /// (GATE-010: 24 h — the elevation sweep's value).
+    pub expire_after: Duration,
+    pub audit: Arc<Audit>,
+}
+
+/// The real reducer behind the elevation module's [`crate::telegram::
+/// elevation::ReductionFlow`] seam (temporary grants call it at DONE) and
+/// the machinery `/revoke` drives directly. `main.rs` wires this in.
+pub struct RealReductionFlow {
+    pub deps: ReductionDeps,
+}
+
+impl RealReductionFlow {
+    pub fn new(deps: ReductionDeps) -> Self {
+        Self { deps }
+    }
+}
+
+#[async_trait]
+impl crate::telegram::elevation::ReductionFlow for RealReductionFlow {
+    async fn reduce(&self, repo: &str, to: Role) {
+        // Fire-and-forget: DONE is durable and the agent is unblocked; the
+        // reduction conversation polls in its own task.
+        let deps = self.deps.clone();
+        let repo = repo.to_string();
+        tokio::spawn(async move {
+            start_reduction(&deps, &repo, to).await;
+        });
+    }
+}
+
+/// Insert the durable reduction row (`kind='reduction'`, REDUCING)
+/// WITHOUT starting the conversation. `start_reduction` = this +
+/// [`run_reduction`]; the sweep test (and future restart-resume work) can
+/// open rows directly.
+pub fn open_reduction_row(deps: &ReductionDeps, repo: &str, to: Role) -> String {
+    let id = state::uuid_v4();
+    let payload = ReductionPayload {
+        repo: repo.to_string(),
+        target_role: role_name(to).to_string(),
+    };
+    let guard = deps.state.lock().expect("state lock must be poison-free");
+    let _ = guard.flow_insert(
+        &id,
+        REDUCTION_FLOW_KIND,
+        REDUCTION_STATE_REDUCING,
+        &payload.to_json(),
+    );
+    id
+}
+
+/// Run the full reduction conversation for `repo` (GATE-010 §10): insert
+/// the durable flow row, send the instructions, poll `repo_permissions`
+/// until the target lands (or the agent was removed entirely) and confirm.
+/// Returns the flow id once the conversation is terminal. Callers that
+/// cannot afford to block (button handlers) spawn it — see
+/// [`RealReductionFlow::reduce`].
+pub async fn start_reduction(deps: &ReductionDeps, repo: &str, to: Role) -> String {
+    let id = open_reduction_row(deps, repo, to);
+    run_reduction(deps.clone(), id.clone()).await;
+    id
+}
+
+/// The reduction conversation: instructions → poll-verify → registry
+/// update + ✅. The row is the coordination point — the sweep may expire
+/// it mid-conversation, which this loop respects (it bails when the row
+/// leaves REDUCING).
+async fn run_reduction(deps: ReductionDeps, flow_id: String) {
+    let (repo, target) = {
+        let guard = deps.state.lock().expect("state lock must be poison-free");
+        let row = match guard.flow_get(&flow_id) {
+            Ok(Some(row)) if row.flow_state == REDUCTION_STATE_REDUCING => row,
+            _ => return, // expired/cancelled between insert and start
+        };
+        let payload = ReductionPayload::from_json(&row.payload_json);
+        (payload.repo, payload.target_role)
+    };
+    let Some(target) = role_from_name(&target) else {
+        return; // unparsable target: leave the row for the sweep to expire
+    };
+    // Without a channel there is nobody to instruct; the row expires.
+    if deps.notify.is_none() {
+        return;
+    }
+    let Some((owner, name)) = repo.split_once('/') else {
+        let guard = deps.state.lock().expect("state lock must be poison-free");
+        let _ = guard.flow_insert(
+            &flow_id,
+            REDUCTION_FLOW_KIND,
+            REDUCTION_STATE_DONE,
+            &ReductionPayload {
+                repo,
+                target_role: role_name(target).to_string(),
+            }
+            .to_json(),
+        );
+        return;
+    };
+    let settings_url = crate::github::collaborator_settings_url(owner, name);
+    let instructions = if target == Role::None {
+        SendRequest::text(removal_text(&deps.machine_login, &repo))
+    } else {
+        SendRequest::text(reduction_text(&deps.machine_login, &repo, target))
+    };
+    let _ = crate::tasks::send_notice(
+        &deps.notify,
+        instructions.with_link_button("Open collaborator settings", settings_url),
+    )
+    .await;
+
+    // Wrong-but-changed roles get ONE difference message each (the grant
+    // and elevation flows' pattern), then polling continues silently.
+    let mut told: Vec<Role> = Vec::new();
+    loop {
+        tokio::time::sleep(deps.poll).await;
+        let live = {
+            let guard = deps.state.lock().expect("state lock must be poison-free");
+            guard.flow_state(&flow_id).ok().flatten().as_deref()
+                == Some(REDUCTION_STATE_REDUCING)
+        };
+        if !live {
+            return; // the sweep expired the flow mid-conversation
+        }
+        match deps.platform.repo_permissions(owner, name).await {
+            Ok(access) if access.role == target => {
+                // A None target IS a removal (there is nothing lower):
+                // route through finish_removed so the row keeps its
+                // intended_role and the copy says "removed entirely".
+                if target == Role::None {
+                    finish_removed(&deps, &flow_id, &repo).await;
+                } else {
+                    finish_reduced(&deps, &flow_id, &repo, target).await;
+                }
+                return;
+            }
+            // Removed entirely: 404 (invisible ⇒ no access) or an all-false
+            // permission answer. Both read as "the agent is off the repo".
+            Err(RepoAccessError::NoAccess) => {
+                finish_removed(&deps, &flow_id, &repo).await;
+                return;
+            }
+            Ok(access) if access.role == Role::None => {
+                finish_removed(&deps, &flow_id, &repo).await;
+                return;
+            }
+            Ok(access) if !told.contains(&access.role) => {
+                told.push(access.role);
+                let _ = crate::tasks::send_notice(
+                    &deps.notify,
+                    SendRequest::text(wrong_target_text(
+                        &deps.machine_login,
+                        &repo,
+                        access.role,
+                        target,
+                    ))
+                    .with_link_button(
+                        "Open collaborator settings",
+                        crate::github::collaborator_settings_url(owner, name),
+                    ),
+                )
+                .await;
+            }
+            _ => {} // unchanged, a repeat wrong role, or an upstream hiccup
+        }
+    }
+}
+
+/// Target reached: registry row moves to the target (granted = intended =
+/// target, `via` preserved), flow DONE, ✅ confirmation, audit entry
+/// (GATE-010: temporary reductions are recorded). The registry write is a
+/// direct reconcile (NOT `registry::refresh`): the observed role is fresh
+/// from the very poll that verified the reduction, and a refresh here
+/// would fire the generic UNEXPECTED-drop notice right before this flow's
+/// own ✅ — two messages for one intended event.
+async fn finish_reduced(deps: &ReductionDeps, flow_id: &str, repo: &str, target: Role) {
+    {
+        let guard = deps.state.lock().expect("state lock must be poison-free");
+        let via = guard
+            .registry_get(repo)
+            .ok()
+            .flatten()
+            .map(|r| r.via)
+            .unwrap_or_else(|| "reduction".to_string());
+        let _ = guard.registry_upsert(repo, role_name(target), role_name(target), &via);
+        if let Ok(Some(row)) = guard.flow_get(flow_id) {
+            let _ = guard.flow_insert(
+                flow_id,
+                REDUCTION_FLOW_KIND,
+                REDUCTION_STATE_DONE,
+                &row.payload_json,
+            );
+        }
+    }
+    deps.audit.record(AuditEntry {
+        ts: state::now(),
+        agent: None,
+        repo: repo.to_string(),
+        action: "access.reduction".to_string(),
+        decision: format!("reduced to {}", role_name(target)),
+        basis: format!("reduction flow {flow_id}: verified via repo_permissions"),
+        approver: None,
+    });
+    let _ = crate::tasks::send_notice(
+        &deps.notify,
+        SendRequest::text(format!(
+            "✅ {repo}: {} is back to {target} — verified and recorded.",
+            deps.machine_login
+        )),
+    )
+    .await;
+}
+
+/// The agent was removed entirely (NoAccess / all-false permissions):
+/// treated as FULLY reduced. Registry: B6's keep-row ruling — the row is
+/// KEPT none-marked (`granted_role = none`, `intended_role`/`via`
+/// preserved) so /status shows "access removed"; deletion was considered
+/// and rejected there because it loses `intended_role`. Confirmed with the
+/// "removed entirely" wording.
+async fn finish_removed(deps: &ReductionDeps, flow_id: &str, repo: &str) {
+    {
+        let guard = deps.state.lock().expect("state lock must be poison-free");
+        if let Some(row) = guard.registry_get(repo).ok().flatten() {
+            let _ = guard.registry_upsert(repo, "none", &row.intended_role, &row.via);
+        } else {
+            let _ = guard.registry_upsert(repo, "none", "none", "reduction");
+        }
+        if let Ok(Some(row)) = guard.flow_get(flow_id) {
+            let _ = guard.flow_insert(
+                flow_id,
+                REDUCTION_FLOW_KIND,
+                REDUCTION_STATE_DONE,
+                &row.payload_json,
+            );
+        }
+    }
+    deps.audit.record(AuditEntry {
+        ts: state::now(),
+        agent: None,
+        repo: repo.to_string(),
+        action: "access.reduction".to_string(),
+        decision: "removed entirely".to_string(),
+        basis: format!("reduction flow {flow_id}: GitHub reports no access"),
+        approver: None,
+    });
+    let _ = crate::tasks::send_notice(
+        &deps.notify,
+        SendRequest::text(format!(
+            "✅ {repo}: {} was removed entirely — no access left; the registry \
+             records it as removed.",
+            deps.machine_login
+        )),
+    )
+    .await;
+}
+
+// -- reduction sweep (the elevation sweep's shape, reduction rows) ------------
+
+/// The reduction sweep: expires stale reduction rows and un-pressed
+/// `/revoke` menus. Runs whether or not the bot is configured — expiry
+/// must always make progress.
+pub async fn run_reduction_sweep(
+    deps: ReductionDeps,
+    mut shutdown: watch::Receiver<bool>,
+    interval: Duration,
+) {
+    shutdown.borrow_and_update();
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => return,
+            _ = tokio::time::sleep(interval) => {
+                reduction_sweep_tick(&deps).await;
+            }
+        }
+    }
+}
+
+/// One sweep pass: expire every reduction row still REDUCING and every
+/// revoke menu still AWAITING_CHOICE whose last progress is older than
+/// `expire_after`. Terminal rows are never touched. Returns how many rows
+/// were expired.
+pub async fn reduction_sweep_tick(deps: &ReductionDeps) -> usize {
+    let mut rows = Vec::new();
+    for kind in [REDUCTION_FLOW_KIND, REVOKE_FLOW_KIND] {
+        let guard = deps.state.lock().expect("state lock must be poison-free");
+        rows.extend(guard.flows_list(kind).unwrap_or_default());
+    }
+    let now = state::now();
+    let cutoff = now.saturating_sub(deps.expire_after.as_secs() as i64);
+    let mut expired = 0;
+    for row in rows {
+        let open = row.flow_state == REDUCTION_STATE_REDUCING
+            || row.flow_state == REVOKE_STATE_AWAITING_CHOICE;
+        if open && row.updated_at < cutoff {
+            let guard = deps.state.lock().expect("state lock must be poison-free");
+            let kind = if row.kind == REDUCTION_FLOW_KIND {
+                REDUCTION_FLOW_KIND
+            } else {
+                REVOKE_FLOW_KIND
+            };
+            let expired_state = if kind == REDUCTION_FLOW_KIND {
+                REDUCTION_STATE_EXPIRED
+            } else {
+                REVOKE_STATE_EXPIRED
+            };
+            if guard.flow_insert(&row.id, kind, expired_state, &row.payload_json).is_ok() {
+                expired += 1;
+            }
+        }
+    }
+    expired
+}
+
+// -- /revoke: the lower-or-remove menu -----------------------------------------
+
+/// Build the `/revoke {owner}/{repo}` menu (GATE-010 §10): one durable
+/// `flows` row (kind='revoke') anchored to two signed buttons —
+/// [Lower to Write] and [Remove completely]. Sync: everything here is a
+/// local row + message build.
+pub fn revoke_menu_reply(deps: &ReductionDeps, repo: &str) -> SendRequest {
+    let id = state::uuid_v4();
+    let nonce = nonce();
+    let payload = RevokePayload {
+        repo: repo.to_string(),
+        nonce: Some(nonce.clone()),
+    };
+    {
+        let guard = deps.state.lock().expect("state lock must be poison-free");
+        let _ = guard.flow_insert(
+            &id,
+            REVOKE_FLOW_KIND,
+            REVOKE_STATE_AWAITING_CHOICE,
+            &payload.to_json(),
+        );
+    }
+    let login = &deps.machine_login;
+    SendRequest::text(format!(
+        "Revoke access on {repo} — pick one:\n\
+         • [Lower to Write]: change {login}'s role back to Write — the usual agent \
+          tier; pushes and pull requests keep working.\n\
+         • [Remove completely]: remove {login} from {repo} entirely — the agent \
+          loses all access.\n\
+         I verify whichever you pick against GitHub and confirm here."
+    ))
+    .with_inline_button("Lower to Write", &id, &nonce, ACTION_LOWER)
+    .with_inline_button("Remove completely", &id, &nonce, ACTION_REMOVE)
+}
+
+/// The nonce resolver for the router's callback validation: revoke menu id
+/// → the payload nonce.
+pub fn revoke_nonce_lookup(state: Arc<Mutex<DbState>>) -> NonceLookup {
+    Arc::new(move |flow| {
+        let guard = state.lock().expect("state lock must be poison-free");
+        let row = guard.flow_get(flow).ok().flatten()?;
+        if row.kind != REVOKE_FLOW_KIND {
+            return None;
+        }
+        RevokePayload::from_json(&row.payload_json).nonce
+    })
+}
+
+/// Register the `/revoke` button handler on a router.
+pub fn register_revoke(router: &mut TelegramRouter, deps: ReductionDeps) {
+    router.register(Arc::new(RevokeHandler { deps }));
+}
+
+/// The `/revoke` menu button handler: [Lower to Write] starts the
+/// reduction conversation targeting Write; [Remove completely] targets
+/// `None` (the trash-icon removal). Both verify and confirm through
+/// [`run_reduction`]. A press on anything but an AWAITING_CHOICE menu is
+/// ignored — never double-apply.
+struct RevokeHandler {
+    deps: ReductionDeps,
+}
+
+#[async_trait]
+impl UpdateHandler for RevokeHandler {
+    async fn handle(&self, update: Update, api: Arc<dyn TelegramApi>) {
+        let Some(callback) = &update.callback else {
+            return;
+        };
+        // Signed triple: `{flow_id}:{nonce}:{action}` — the router has
+        // already validated the nonce; the action is the third part.
+        let mut parts = callback.data.splitn(3, ':');
+        let flow_id = parts.next().unwrap_or("").to_string();
+        let _nonce = parts.next().unwrap_or("");
+        let action = parts.next().unwrap_or("").to_string();
+        let target = match action.as_str() {
+            ACTION_LOWER => Role::Write,
+            ACTION_REMOVE => Role::None,
+            _ => return, // not a revoke button
+        };
+        let repo = {
+            let guard = self.deps.state.lock().expect("state lock must be poison-free");
+            match guard.flow_get(&flow_id).ok().flatten() {
+                Some(row) if row.kind == REVOKE_FLOW_KIND => {
+                    RevokePayload::from_json(&row.payload_json).repo
+                }
+                _ => return,
+            }
+        };
+        // Decide-once: write DECIDED first; a racing second press reads a
+        // decided row and returns without starting anything.
+        {
+            let guard = self.deps.state.lock().expect("state lock must be poison-free");
+            let decided = match guard.flow_get(&flow_id) {
+                Ok(Some(row)) if row.flow_state == REVOKE_STATE_AWAITING_CHOICE => {
+                    guard
+                        .flow_insert(&flow_id, REVOKE_FLOW_KIND, REVOKE_STATE_DECIDED, &row.payload_json)
+                        .is_ok()
+                }
+                _ => false,
+            };
+            if !decided {
+                return;
+            }
+        }
+        let lower = target != Role::None;
+        self.deps.audit.record(AuditEntry {
+            ts: state::now(),
+            agent: None,
+            repo: repo.clone(),
+            action: "access.revoke".to_string(),
+            decision: if lower { "lower".to_string() } else { "remove".to_string() },
+            basis: format!("revoke menu {flow_id}: {repo}"),
+            approver: Some(callback.from_id.to_string()),
+        });
+        let verb = if lower { "Reducing" } else { "Removing" };
+        if let Some(to) = update.message_ref {
+            let _ = api
+                .edit_message(
+                    to,
+                    SendRequest::text(format!(
+                        "{verb} {repo} — the instructions are on the way; I'll \
+                         verify against GitHub and confirm here."
+                    )),
+                )
+                .await;
+        }
+        // The conversation must never run on the router's dispatch loop —
+        // it polls until the operator acts on GitHub — so it spawns (same
+        // posture as the /grant command handler).
+        let deps = self.deps.clone();
+        tokio::spawn(async move {
+            start_reduction(&deps, &repo, target).await;
+        });
+    }
+}
+
+// -- reduction copy --------------------------------------------------------------
+
+/// GATE-010 §10 wording for a role reduction (verbatim shape).
+fn reduction_text(login: &str, repo: &str, target: Role) -> String {
+    format!(
+        "Change {login} on {repo} back to {target}: click its role and choose {target} \
+         on the collaborator settings page (button below). I check every few seconds \
+         and confirm here when it lands."
+    )
+}
+
+/// Full-removal instructions: there is no role to choose OFF a repo, so the
+/// copy names the trash icon instead.
+fn removal_text(login: &str, repo: &str) -> String {
+    format!(
+        "Removing {login} from {repo} entirely: open the collaborator settings \
+         (button below), press the 🗑 trash icon next to {login} and confirm the \
+         removal. I check every few seconds and confirm here when it lands."
+    )
+}
+
+/// Wrong-but-changed role during a reduction: name found vs target.
+fn wrong_target_text(login: &str, repo: &str, found: Role, target: Role) -> String {
+    format!(
+        "{login} now has {found} on {repo}, but it should go back to {target} — open \
+         the collaborator settings and change {login}'s role to {target}. I keep \
+         checking."
+    )
 }
 
 #[cfg(test)]

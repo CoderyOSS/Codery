@@ -206,6 +206,7 @@ async fn spawn_gate_with_chat(approval_timeout: Duration, ask_chat: Option<i64>)
             machine_token,
             lifecycle: None,
             grant: None,
+            reduction: None,
         }),
     );
     let (tx, rx) = tokio::sync::mpsc::channel(64);

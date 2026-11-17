@@ -166,6 +166,7 @@ impl Ctl {
                 machine_token,
                 lifecycle: Some(deps.clone().into()),
                 grant: None,
+                reduction: None,
             }),
         );
         register_lifecycle(&mut router, deps.clone().into());
@@ -725,13 +726,82 @@ async fn disconnect_erases_custody_disables_forwarding_and_instructs_manual_dele
     );
     assert!(
         text.contains("revoke"),
-        "reply notes /revoke per-repo cleanup comes later: {}",
+        "reply points at /revoke for verified per-repo cleanup: {}",
         reply.text
     );
     let audit = std::fs::read_to_string(c.dir.join("audit.jsonl")).unwrap();
     assert!(
         audit.contains("custody.disconnect"),
         "disconnect audited: {audit}"
+    );
+}
+
+/// Task 9 (GATE-010 §10): /disconnect completes with per-repo removal
+/// links — every registry row with access gets its collaborator-settings
+/// link so the operator can strip the machine account everywhere.
+#[tokio::test]
+async fn disconnect_lists_per_repo_removal_links_from_the_registry() {
+    let c = Ctl::open().await;
+    c.store_token(OLD_TOKEN);
+    {
+        let guard = c.state.lock().unwrap();
+        guard
+            .registry_upsert("acme/api", "write", "write", "collaborator")
+            .unwrap();
+        guard
+            .registry_upsert("acme/blog", "read", "read", "org_team")
+            .unwrap();
+        guard
+            .registry_upsert("acme/gone", "none", "write", "collaborator")
+            .unwrap();
+    }
+
+    let reply = c.command("/disconnect").await;
+
+    assert!(
+        reply.text.contains("Per-repo cleanup"),
+        "the reply carries the per-repo cleanup section: {}",
+        reply.text
+    );
+    assert!(
+        !reply.text.contains("arrives in a later update"),
+        "the placeholder sentence is gone: {}",
+        reply.text
+    );
+    // One link button per row that still has access; none-rows are skipped.
+    for repo in ["acme/api", "acme/blog"] {
+        assert!(
+            reply.link_buttons.iter().any(|(label, url)| label.as_str() == repo
+                && url.as_str() == format!("https://github.com/{repo}/settings/access")),
+            "link button for {repo}: {:?}",
+            reply.link_buttons
+        );
+    }
+    assert!(
+        !reply
+            .link_buttons
+            .iter()
+            .any(|(label, _)| label.as_str() == "acme/gone"),
+        "a none-row needs no removal link: {:?}",
+        reply.link_buttons
+    );
+    assert!(
+        reply
+            .link_buttons
+            .iter()
+            .any(|(label, _)| label == "Open tokens page"),
+        "the manual token-deletion link stays: {:?}",
+        reply.link_buttons
+    );
+    // Empty registry ⇒ the section explains there is nothing to clean.
+    let c2 = Ctl::open().await;
+    c2.store_token(OLD_TOKEN);
+    let bare = c2.command("/disconnect").await;
+    assert!(
+        bare.text.contains("no per-repo cleanup")
+            || bare.text.to_lowercase().contains("nothing to clean"),
+        "empty registry explains the noop: {}",
+        bare.text
     );
 }
 

@@ -1,5 +1,6 @@
-//! Integration: repo grant flow (GATE-010 §7.2, task 7). The real grant
-//! machinery behind `/grant`, setup step 8 and the proxy's grant offer:
+//! Integration: repo grant flow (GATE-010 §7.2, task 7) and the reduction
+//! machinery (GATE-010 §10, task 9). The real grant machinery behind
+//! `/grant`, setup step 8 and the proxy's grant offer:
 //!
 //! - invite appears after 2 polls ⇒ PATCH called with the right id ⇒ role
 //!   confirmed ⇒ Granted outcome + registry row via collaborator;
@@ -13,6 +14,11 @@
 //!   message (`kv grant_offer:{repo}:{date}`);
 //! - setup step 8 with the REAL flow (wiremock-backed) ⇒ ✅ in checklist;
 //! - `/grant owner/repo [role]` runs the same flow end-to-end.
+//!
+//! Reduction (task 9): temp-grant reduction back to the target role ⇒
+//! registry + ✅; agent removed entirely ⇒ none-marked row + "removed
+//! entirely" confirmation; `/revoke owner/repo` menu with
+//! [Lower to Write] / [Remove completely], both verified paths.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -28,7 +34,9 @@ use gate::state::State as DbState;
 use gate::telegram::commands::{register_commands, CommandDeps};
 use gate::telegram::fake::FakeTelegram;
 use gate::telegram::grant::{
-    grant_offer_key, maybe_offer_grant, start_grant, GrantDeps, RealGrantFlow,
+    grant_offer_key, maybe_offer_grant, open_reduction_row, reduction_sweep_tick,
+    register_revoke, revoke_nonce_lookup, start_grant, start_reduction, GrantDeps, RealGrantFlow,
+    ReductionDeps, REDUCTION_FLOW_KIND, REDUCTION_STATE_DONE, REVOKE_STATE_EXPIRED,
 };
 use gate::telegram::setup::{register_setup, GrantOutcome, NotifyHandle, SetupDeps};
 use gate::telegram::{MsgRef, TelegramApi, TelegramRouter, Update};
@@ -51,6 +59,7 @@ struct H {
     api: Arc<dyn TelegramApi>,
     upstream: MockServer,
     deps: GrantDeps,
+    audit: Arc<Audit>,
 }
 
 impl Drop for H {
@@ -67,7 +76,7 @@ impl H {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("gate-grant-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let _audit = Arc::new(Audit::open(&dir.join("audit.jsonl")));
+        let audit = Arc::new(Audit::open(&dir.join("audit.jsonl")));
         let state = Arc::new(Mutex::new(DbState::open(":memory:").unwrap()));
         let upstream = MockServer::start().await;
         let base = reqwest::Url::parse(&upstream.uri()).unwrap();
@@ -93,7 +102,32 @@ impl H {
             api,
             upstream,
             deps,
+            audit,
         }
+    }
+
+    /// ReductionDeps with test-scale durations over the same fixtures.
+    fn reduction_deps(&self) -> ReductionDeps {
+        ReductionDeps {
+            state: self.state.clone(),
+            platform: {
+                let base = reqwest::Url::parse(&self.upstream.uri()).unwrap();
+                Arc::new(GitHubPlatform::with_bases(
+                    base.clone(),
+                    base,
+                    Arc::new(|| None),
+                )) as Arc<dyn Platform>
+            },
+            machine_login: LOGIN.to_string(),
+            notify: Some((self.api.clone(), CHAT)),
+            poll: Duration::from_millis(10),
+            expire_after: Duration::from_secs(3600),
+            audit: self.audit.clone(),
+        }
+    }
+
+    fn audit_text(&self) -> String {
+        std::fs::read_to_string(self.dir.join("audit.jsonl")).unwrap()
     }
 
     fn notify(&self) -> NotifyHandle {
@@ -202,6 +236,18 @@ impl H {
         Mock::given(method("GET"))
             .and(path("/repos/acme/api"))
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&self.upstream)
+            .await;
+    }
+
+    /// `GET /repos/acme/api`: 404 — the agent was removed entirely (or the
+    /// repo vanished; indistinguishable ⇒ no access either way).
+    async fn mount_repo_404(&self) {
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/api"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_string(r#"{"message":"Not Found"}"#),
+            )
             .mount(&self.upstream)
             .await;
     }
@@ -680,6 +726,7 @@ async fn spawn_cmd_gate() -> CmdH {
             machine_token,
             lifecycle: None,
             grant: Some((grant, CHAT)),
+            reduction: None,
         }),
     );
     CmdH {
@@ -828,5 +875,496 @@ async fn unknown_command_listing_names_grant() {
         reply.text.contains("/grant"),
         "the unknown-command listing mentions /grant: {}",
         reply.text
+    );
+    assert!(
+        reply.text.contains("/revoke"),
+        "the unknown-command listing mentions /revoke: {}",
+        reply.text
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Reduction (GATE-010 §10, task 9): temp grants reduce back to the target.
+// ---------------------------------------------------------------------------
+
+/// Poll until `cond` holds (10 ms steps, ~15 s budget).
+async fn wait_for(mut cond: impl FnMut() -> bool) {
+    for _ in 0..1500 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("condition not met within 15s");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reduction_flow_back_to_write_updates_registry_and_confirms() {
+    let h = H::open().await;
+    // Temp-grant shape: elevated to Maintain, reduction target Write.
+    h.state
+        .lock()
+        .unwrap()
+        .registry_upsert(REPO, "maintain", "write", "elevation")
+        .unwrap();
+    // GitHub still shows Maintain twice, then the operator lowers to Write.
+    h.mount_repo_role_then(2, Role::Maintain, Role::Write).await;
+
+    let deps = h.reduction_deps();
+    let id = start_reduction(&deps, REPO, Role::Write).await;
+
+    wait_for(|| {
+        h.state
+            .lock()
+            .unwrap()
+            .registry_get(REPO)
+            .unwrap()
+            .map(|r| r.granted_role == "write")
+            .unwrap_or(false)
+    })
+    .await;
+    let row = h.row(REPO);
+    assert_eq!(row.granted_role, "write");
+    assert_eq!(row.intended_role, "write", "intended lands at the target");
+    assert_eq!(row.via, "elevation", "via is preserved by the reduction");
+
+    // §10 wording: exact-change instruction + the settings link button.
+    let instructions = h.sent_with("click its role and choose Write");
+    assert_eq!(instructions.len(), 1, "{:?}", h.fake.sent());
+    assert!(
+        instructions[0]
+            .text
+            .contains(&format!("Change {LOGIN} on {REPO} back to Write")),
+        "{}",
+        instructions[0].text
+    );
+    assert_eq!(
+        instructions[0].link_buttons,
+        vec![(
+            "Open collaborator settings".to_string(),
+            "https://github.com/acme/api/settings/access".to_string()
+        )],
+        "{:?}",
+        instructions[0].link_buttons
+    );
+    // Exactly one ✅ confirmation.
+    let confirms = h.sent_with("✅");
+    assert_eq!(confirms.len(), 1, "{:?}", h.fake.sent());
+    assert!(
+        confirms[0].text.contains("back to Write") && confirms[0].text.contains(REPO),
+        "{}",
+        confirms[0].text
+    );
+    // The flow row reached DONE.
+    let flows = h
+        .state
+        .lock()
+        .unwrap()
+        .flows_list(REDUCTION_FLOW_KIND)
+        .unwrap();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].id, id);
+    assert_eq!(flows[0].flow_state, REDUCTION_STATE_DONE);
+    // The reduction is audited (GATE-010: temporary reductions are recorded).
+    assert!(
+        h.audit_text().contains("access.reduction"),
+        "reduction audited: {}",
+        h.audit_text()
+    );
+}
+
+#[tokio::test]
+async fn reduction_flow_removed_entirely_none_marks_and_confirms() {
+    let h = H::open().await;
+    h.state
+        .lock()
+        .unwrap()
+        .registry_upsert(REPO, "maintain", "write", "elevation")
+        .unwrap();
+    // The operator removed the agent entirely: 404 forever.
+    h.mount_repo_404().await;
+
+    let deps = h.reduction_deps();
+    start_reduction(&deps, REPO, Role::Write).await;
+
+    wait_for(|| {
+        h.state
+            .lock()
+            .unwrap()
+            .registry_get(REPO)
+            .unwrap()
+            .map(|r| r.granted_role == "none")
+            .unwrap_or(false)
+    })
+    .await;
+    // B6 keep-row ruling: none-marked, intended_role preserved.
+    let row = h.row(REPO);
+    assert_eq!(row.granted_role, "none");
+    assert_eq!(row.intended_role, "write", "intended survives the removal");
+    assert_eq!(row.via, "elevation");
+    // "removed entirely" confirmation.
+    let confirms = h.sent_with("removed entirely");
+    assert_eq!(confirms.len(), 1, "{:?}", h.fake.sent());
+    assert!(confirms[0].text.contains("✅"), "{}", confirms[0].text);
+    let flows = h
+        .state
+        .lock()
+        .unwrap()
+        .flows_list(REDUCTION_FLOW_KIND)
+        .unwrap();
+    assert_eq!(flows[0].flow_state, REDUCTION_STATE_DONE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reduction_sweep_expires_stale_reduction_rows_and_menus() {
+    let h = H::open().await;
+    let mut deps = h.reduction_deps();
+    deps.expire_after = Duration::from_millis(300);
+    // A reduction row and an un-pressed menu go stale; a terminal row and
+    // a DONE conversation never expire.
+    let stale_reduction = open_reduction_row(&deps, REPO, Role::Write);
+    let menu = menu_row_id(&deps);
+    let done_row = open_reduction_row(&deps, REPO, Role::None);
+    h.state
+        .lock()
+        .unwrap()
+        .flow_insert(&done_row, REDUCTION_FLOW_KIND, REDUCTION_STATE_DONE, "{}")
+        .unwrap();
+    // state timestamps are whole seconds: sleep past a boundary so the
+    // rows are genuinely older than the (sub-second) expiry window.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    let expired = reduction_sweep_tick(&deps).await;
+    assert_eq!(expired, 2, "the stale row and the stale menu expire");
+    let state_of = |id: &str| {
+        h.state
+            .lock()
+            .unwrap()
+            .flow_state(id)
+            .unwrap()
+            .expect("row present")
+    };
+    assert_eq!(state_of(&stale_reduction), "EXPIRED");
+    assert_eq!(state_of(&menu), REVOKE_STATE_EXPIRED);
+    assert_eq!(state_of(&done_row), REDUCTION_STATE_DONE, "terminal stays");
+
+    // A second pass has nothing left to expire.
+    assert_eq!(reduction_sweep_tick(&deps).await, 0);
+}
+
+/// Extract the flow id from a revoke menu's signed button data (the sweep
+/// test only cares about the row lifecycle, not the message).
+fn menu_row_id(deps: &ReductionDeps) -> String {
+    let req = gate::telegram::grant::revoke_menu_reply(deps, REPO);
+    let (_, data) = req.inline_buttons.first().expect("menu carries buttons");
+    data.split(':')
+        .next()
+        .expect("flow id is the first part")
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reduction_flow_to_none_is_a_removal_with_trash_icon_instructions() {
+    let h = H::open().await;
+    h.state
+        .lock()
+        .unwrap()
+        .registry_upsert(REPO, "write", "none", "collaborator")
+        .unwrap();
+    h.mount_repo_404().await;
+
+    let deps = h.reduction_deps();
+    start_reduction(&deps, REPO, Role::None).await;
+
+    wait_for(|| {
+        h.state
+            .lock()
+            .unwrap()
+            .registry_get(REPO)
+            .unwrap()
+            .map(|r| r.granted_role == "none")
+            .unwrap_or(false)
+    })
+    .await;
+    // Removal instructions name the trash icon, not a role to choose.
+    let instructions = h.sent_with("trash");
+    assert_eq!(instructions.len(), 1, "{:?}", h.fake.sent());
+    assert!(
+        !instructions[0].text.contains("choose"),
+        "no role wording on a removal: {}",
+        instructions[0].text
+    );
+    let confirms = h.sent_with("removed entirely");
+    assert_eq!(confirms.len(), 1, "{:?}", h.fake.sent());
+}
+
+// ---------------------------------------------------------------------------
+// /revoke {owner}/{repo}: lower-or-remove menu, both verified paths.
+// ---------------------------------------------------------------------------
+
+struct RevokeH {
+    dir: PathBuf,
+    state: Arc<Mutex<DbState>>,
+    fake: Arc<FakeTelegram>,
+    api: Arc<dyn TelegramApi>,
+    upstream: MockServer,
+    router: TelegramRouter,
+}
+
+impl Drop for RevokeH {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+async fn spawn_revoke_gate() -> RevokeH {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("gate-revoke-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let audit = Arc::new(Audit::open(&dir.join("audit.jsonl")));
+    let state = Arc::new(Mutex::new(DbState::open(":memory:").unwrap()));
+    let upstream = MockServer::start().await;
+    let base = reqwest::Url::parse(&upstream.uri()).unwrap();
+    let platform: Arc<dyn Platform> = Arc::new(GitHubPlatform::with_bases(
+        base.clone(),
+        base,
+        Arc::new(|| None),
+    ));
+    let fake = Arc::new(FakeTelegram::new());
+    let api: Arc<dyn TelegramApi> = fake.clone();
+    let reduction = Arc::new(ReductionDeps {
+        state: state.clone(),
+        platform,
+        machine_login: LOGIN.to_string(),
+        notify: Some((api.clone(), CHAT)),
+        poll: Duration::from_millis(10),
+        expire_after: Duration::from_secs(3600),
+        audit: audit.clone(),
+    });
+    let machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync> = Arc::new(|| None);
+    let mut router = TelegramRouter::new();
+    register_commands(
+        &mut router,
+        Arc::new(CommandDeps {
+            state: state.clone(),
+            audit: audit.clone(),
+            machine_token,
+            lifecycle: None,
+            grant: None,
+            reduction: Some(reduction.clone()),
+        }),
+    );
+    register_revoke(&mut router, (*reduction).clone());
+    router.set_nonce_lookup(revoke_nonce_lookup(state.clone()));
+    RevokeH {
+        dir,
+        state,
+        fake,
+        api,
+        upstream,
+        router,
+    }
+}
+
+impl RevokeH {
+    async fn command(&self, text: &str) -> gate::telegram::send::SendRequest {
+        let before = self.fake.edits().len();
+        let update = Update {
+            sender_id: Some(CHAT),
+            text: Some(text.to_string()),
+            message_ref: Some(MsgRef {
+                chat_id: CHAT,
+                message_id: 500,
+            }),
+            ..Default::default()
+        };
+        self.router.dispatch(&update, &self.api).await;
+        let edits = self.fake.edits();
+        assert_eq!(edits.len(), before + 1, "one command ⇒ one reply: {edits:?}");
+        edits.last().unwrap().1.clone()
+    }
+
+    /// Press the labelled button on the /revoke menu.
+    async fn press_menu(&self, label: &str) {
+        let menu = self
+            .fake
+            .edits()
+            .iter()
+            .map(|(_, r)| r.clone())
+            .find(|r| r.text.contains("Revoke access on"))
+            .expect("menu message");
+        let data = menu
+            .inline_buttons
+            .iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, d)| d.clone())
+            .unwrap_or_else(|| panic!("no '{label}' button on the menu"));
+        let update = Update {
+            sender_id: Some(CHAT),
+            callback: Some(gate::telegram::Callback {
+                id: "cbq-1".to_string(),
+                data,
+                from_id: CHAT,
+            }),
+            message_ref: Some(MsgRef {
+                chat_id: CHAT,
+                message_id: 500,
+            }),
+            ..Default::default()
+        };
+        self.router.dispatch(&update, &self.api).await;
+    }
+
+    async fn mount_repo_role_then(&self, lower_calls: usize, lower: Role, final_role: Role) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let lower_body = permissions_body(lower);
+        let final_body = permissions_body(final_role);
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/api"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if n < lower_calls {
+                    ResponseTemplate::new(200).set_body_string(lower_body.clone())
+                } else {
+                    ResponseTemplate::new(200).set_body_string(final_body.clone())
+                }
+            })
+            .mount(&self.upstream)
+            .await;
+    }
+
+    async fn mount_repo_404(&self) {
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/api"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_string(r#"{"message":"Not Found"}"#),
+            )
+            .mount(&self.upstream)
+            .await;
+    }
+
+    fn row(&self) -> gate::state::RegistryRow {
+        self.state
+            .lock()
+            .unwrap()
+            .registry_get(REPO)
+            .expect("registry read")
+            .expect("row present")
+    }
+
+    fn sent_with(&self, needle: &str) -> Vec<gate::telegram::send::SendRequest> {
+        self.fake
+            .sent()
+            .iter()
+            .filter(|r| r.text.contains(needle))
+            .cloned()
+            .collect()
+    }
+
+    async fn wait_for(&self, mut cond: impl FnMut() -> bool) {
+        for _ in 0..1500 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition not met within 15s");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_menu_lower_path_runs_the_reduction_to_write() {
+    let h = spawn_revoke_gate().await;
+    h.state
+        .lock()
+        .unwrap()
+        .registry_upsert(REPO, "maintain", "maintain", "elevation")
+        .unwrap();
+    h.mount_repo_role_then(2, Role::Maintain, Role::Write).await;
+
+    let menu = h.command(&format!("/revoke {REPO}")).await;
+    assert!(
+        menu.text.contains("Lower to Write") && menu.text.contains("Remove completely"),
+        "menu names both options: {}",
+        menu.text
+    );
+
+    h.press_menu("Lower to Write").await;
+
+    h.wait_for(|| h.row().granted_role == "write").await;
+    let row = h.row();
+    assert_eq!(row.granted_role, "write");
+    assert_eq!(row.intended_role, "write", "intended lands at Write");
+    let confirms = h.sent_with("✅");
+    assert_eq!(confirms.len(), 1, "{:?}", h.fake.sent());
+    // Exactly ONE reduction flow for the single press (no double-apply).
+    let flows = h
+        .state
+        .lock()
+        .unwrap()
+        .flows_list(REDUCTION_FLOW_KIND)
+        .unwrap();
+    assert_eq!(flows.len(), 1, "{flows:?}");
+    let audit = std::fs::read_to_string(h.dir.join("audit.jsonl")).unwrap();
+    assert!(
+        audit.contains("access.revoke") && audit.contains("lower"),
+        "the decision is audited: {audit}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_menu_remove_path_polls_to_no_access_and_none_marks() {
+    let h = spawn_revoke_gate().await;
+    h.state
+        .lock()
+        .unwrap()
+        .registry_upsert(REPO, "write", "write", "collaborator")
+        .unwrap();
+    h.mount_repo_404().await;
+
+    let _menu = h.command(&format!("/revoke {REPO}")).await;
+    h.press_menu("Remove completely").await;
+
+    h.wait_for(|| h.row().granted_role == "none").await;
+    let row = h.row();
+    assert_eq!(row.granted_role, "none");
+    assert_eq!(row.intended_role, "write", "B6: intended survives");
+    // Removal instructions went out (trash icon), then the confirmation.
+    let instructions = h.sent_with("trash");
+    assert_eq!(instructions.len(), 1, "{:?}", h.fake.sent());
+    let confirms = h.sent_with("removed entirely");
+    assert_eq!(confirms.len(), 1, "{:?}", h.fake.sent());
+    assert!(confirms[0].text.contains("✅"), "{}", confirms[0].text);
+}
+
+#[tokio::test]
+async fn revoke_command_usage_and_validation() {
+    let h = spawn_revoke_gate().await;
+
+    let bare = h.command("/revoke").await;
+    assert!(
+        bare.text.contains("Usage: /revoke owner/repo"),
+        "bare /revoke answers usage: {}",
+        bare.text
+    );
+    let bad = h.command("/revoke not-a-repo").await;
+    assert!(
+        bad.text.contains("owner/repo"),
+        "bad repo format names the grammar: {}",
+        bad.text
+    );
+    let unknown = h.command("/revoke acme/neverregistered").await;
+    assert!(
+        unknown.text.contains("No registry entry"),
+        "unregistered repo ⇒ nothing to revoke: {}",
+        unknown.text
+    );
+    assert!(
+        h.fake.sent().is_empty(),
+        "validation never starts a flow: {:?}",
+        h.fake.sent()
     );
 }

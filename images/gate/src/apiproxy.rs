@@ -540,6 +540,14 @@ async fn forward_and_respond(
     };
     match mapping {
         Ok(()) => {
+            // §9.2 bookkeeping (task 9): a 2xx on a repo-scoped request
+            // means the (possibly retried) action SUCCEEDED — record
+            // work_done=1 on the repo's temporary elevation flow if one
+            // exists. A record only: the reduction proceeds at DONE.
+            if (200..300).contains(&status) && repo_label != "-" {
+                let guard = gs.state.lock().expect("state lock must be poison-free");
+                crate::telegram::elevation::mark_work_done(&guard, &repo_label);
+            }
             audit_api(
                 &gs.audit,
                 agent,

@@ -34,7 +34,7 @@ use crate::types::Role;
 /// here — the guided walkthrough owns it (its replies edit the command
 /// bubble and may fresh-send on a stale resume); the dispatcher yields it.
 const UNKNOWN_COMMAND: &str =
-    "Unknown command. Available: /pending, /status, /block owner/repo, /unblock owner/repo, /token mint|revoke|list, /grant owner/repo [role], /rotate, /disconnect, /setup";
+    "Unknown command. Available: /pending, /status, /block owner/repo, /unblock owner/repo, /token mint|revoke|list, /grant owner/repo [role], /revoke owner/repo, /rotate, /disconnect, /setup";
 
 /// Usage line for /block and /unblock.
 const BLOCK_USAGE: &str = "Usage: /block owner/repo — or /unblock owner/repo";
@@ -42,6 +42,10 @@ const BLOCK_USAGE: &str = "Usage: /block owner/repo — or /unblock owner/repo";
 /// Usage line for /grant (GATE-010): repo grammar + optional tier.
 const GRANT_USAGE: &str =
     "Usage: /grant owner/repo [role] — role: read|triage|write|maintain|admin (default write)";
+
+/// Usage line for /revoke (GATE-010 §10): the lower-or-remove menu.
+const REVOKE_USAGE: &str =
+    "Usage: /revoke owner/repo — lowers the machine account's role to Write, or removes it entirely";
 
 /// Usage line for /token and its subcommands; also the rejection reply for
 /// malformed or invalid token names.
@@ -55,12 +59,15 @@ const TOKEN_USAGE: &str = "Usage: /token mint <name> | /token revoke <name> | /t
 /// absent ⇒ both answer the usage reply (no bot, no lifecycle). `grant`
 /// carries the grant-flow machinery (GATE-010) plus the chat id it
 /// reports into: present ⇒ /grant runs the real flow, absent ⇒ usage.
+/// `reduction` carries the reduction/revoke machinery (GATE-010 §10,
+/// task 9): present ⇒ /revoke runs the real menu, absent ⇒ usage.
 pub struct CommandDeps {
     pub state: Arc<Mutex<State>>,
     pub audit: Arc<Audit>,
     pub machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     pub lifecycle: Option<Arc<crate::tasks::LifecycleDeps>>,
     pub grant: Option<(Arc<RealGrantFlow>, i64)>,
+    pub reduction: Option<Arc<crate::telegram::grant::ReductionDeps>>,
 }
 
 /// Register the command dispatcher on a router.
@@ -101,6 +108,14 @@ impl UpdateHandler for Commands {
             // for the hours a real invitation wait can take. The reply
             // edits in place like every other command.
             let reply = self.grant_reply(arg, &rest, &api);
+            let _ = api.edit_message(to, reply).await;
+            return;
+        }
+        if cmd == "revoke" {
+            // Reduction/removal menu (GATE-010 §10, task 9): sync menu
+            // build (a flows row + two signed buttons); the conversation
+            // starts on a button press, in the background.
+            let reply = self.revoke_reply(arg);
             let _ = api.edit_message(to, reply).await;
             return;
         }
@@ -186,6 +201,38 @@ impl Commands {
                 .await;
         });
         SendRequest::text(ack)
+    }
+
+    /// /revoke owner/repo (GATE-010 §10, task 9): validate, then build the
+    /// lower-or-remove menu. The menu row is durable; the conversation
+    /// starts only on a button press ([Lower to Write] / [Remove
+    /// completely], handled in `grant::RevokeHandler`). An unregistered
+    /// repo has nothing to revoke — the registry is the work list.
+    fn revoke_reply(&self, arg: Option<&str>) -> SendRequest {
+        let Some(deps) = self.deps.reduction.as_ref() else {
+            return (REVOKE_USAGE.to_string(), Vec::new()).into();
+        };
+        let Some(repo_arg) = arg else {
+            return (REVOKE_USAGE.to_string(), Vec::new()).into();
+        };
+        let Some(repo) = valid_repo(repo_arg) else {
+            return (
+                format!("'{repo_arg}' is not owner/repo. {REVOKE_USAGE}"),
+                Vec::new(),
+            )
+                .into();
+        };
+        let registered = {
+            let guard = self.deps.state.lock().expect("state lock must be poison-free");
+            guard.registry_get(&repo).ok().flatten().is_some()
+        };
+        if !registered {
+            return SendRequest::text(format!(
+                "No registry entry for {repo} — nothing to revoke. Only registered \
+                 repos are managed; /grant {repo} adds one."
+            ));
+        }
+        crate::telegram::grant::revoke_menu_reply(deps, &repo)
     }
 
     /// /pending: every unresolved hold — id, repo, class, age — with
@@ -545,6 +592,7 @@ mod tests {
             machine_token: Arc::new(|| None),
             lifecycle: None,
             grant: None,
+            reduction: None,
         });
         let commands = Commands { deps };
         let (text, buttons) = commands.status_reply();

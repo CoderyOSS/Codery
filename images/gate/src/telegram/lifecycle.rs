@@ -3,9 +3,11 @@
 //! steps of the setup flow with the OLD token still live — a prefilled
 //! token-page link plus a one-time form link; the form's success path
 //! performs the atomic swap (see `crate::tasks`). `/disconnect` stops
-//! forwarding immediately, erases custody and instructs the operator to
-//! delete the GitHub-side token by hand (the gate has no API for that;
-//! `/revoke` per-repo cleanup arrives with the per-repo lifecycle task).
+//! forwarding immediately, erases custody, instructs the operator to
+//! delete the GitHub-side token by hand (the gate has no API for that)
+//! and lists a per-repo removal link for every registry row that still
+//! holds access (GATE-010 §10, task 9; `/revoke owner/repo` runs the same
+//! removal with verification).
 //!
 //! Rotate state machine (kept deliberately two-state):
 //! 1. `/rotate` (or the reminder button) requires a stored token, mints a
@@ -95,10 +97,15 @@ pub fn rotate_reply(deps: &LifecycleDeps, approver: Option<i64>) -> SendRequest 
 
 /// `/disconnect`: forwarding off immediately, custody erased, expiry +
 /// reminders + pending rotate state cleared, manual GitHub-side deletion
-/// instructed. The approver id (when known) lands in the audit entry.
+/// instructed, plus per-repo removal links (GATE-010 §10, task 9): every
+/// registry row that still holds access gets its collaborator-settings
+/// link so the operator can strip the machine account everywhere (the
+/// gate has no API for repo memberships; `/revoke owner/repo` runs the
+/// same removal with verification). The approver id (when known) lands in
+/// the audit entry.
 pub fn disconnect_reply(deps: &LifecycleDeps, approver: Option<i64>) -> SendRequest {
     deps.set_forwarding(false);
-    {
+    let cleanup: Vec<String> = {
         let guard = deps.state.lock().expect("state lock must be poison-free");
         let store = MachineTokenStore::new(&guard, &deps.enc_key);
         let _ = store.erase();
@@ -113,7 +120,16 @@ pub fn disconnect_reply(deps: &LifecycleDeps, approver: Option<i64>) -> SendRequ
         for days in crate::tasks::REMINDER_DAYS {
             let _ = guard.kv_delete(&crate::tasks::reminder_key(days));
         }
-    }
+        // Per-repo cleanup work list (GATE-010 §10): rows that still hold
+        // access. A none-row is already removed — no link for it.
+        guard
+            .registry_all()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.granted_role != "none")
+            .map(|r| r.repo)
+            .collect()
+    };
     deps.audit.record(AuditEntry {
         ts: state::now(),
         agent: None,
@@ -123,13 +139,37 @@ pub fn disconnect_reply(deps: &LifecycleDeps, approver: Option<i64>) -> SendRequ
         basis: "telegram command".to_string(),
         approver: approver.map(|id| id.to_string()),
     });
-    SendRequest::text(
+    let mut text = String::from(
         "Machine token disconnected. Forwarding is disabled immediately — agents now get \
          'machine credential unavailable'.\n\n\
-         Delete the revoked token on GitHub yourself: the gate has no API to remove it \
-         server-side. Per-repo cleanup (/revoke) arrives in a later update.",
-    )
-    .with_link_button("Open tokens page", TOKENS_LIST_URL)
+         Delete the revoked token on GitHub yourself — the gate has no API to remove it \
+         server-side (tokens page button below).\n\n",
+    );
+    if cleanup.is_empty() {
+        text.push_str(
+            "The registry lists no repos with access — there is nothing to clean up \
+             per-repo.\n\nToken deletion on the API side was covered above.",
+        );
+    } else {
+        text.push_str(&format!(
+            "Per-repo cleanup: remove {login} from every repo it still has access to. \
+             Open each repo's collaborator settings below, press the trash icon next to \
+             {login} and confirm the removal — or run /revoke owner/repo here and I'll \
+             verify each removal. Token deletion on the API side was covered above; \
+             these links are for the repo memberships.",
+            login = deps.machine_login
+        ));
+    }
+    let mut req = SendRequest::text(text).with_link_button("Open tokens page", TOKENS_LIST_URL);
+    for repo in &cleanup {
+        if let Some((owner, name)) = repo.split_once('/') {
+            req = req.with_link_button(
+                repo.clone(),
+                crate::github::collaborator_settings_url(owner, name),
+            );
+        }
+    }
+    req
 }
 
 /// The nonce resolver for the router's callback validation: the lifecycle

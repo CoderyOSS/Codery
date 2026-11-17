@@ -19,10 +19,12 @@ use gate::tasks::{run_daily_loop, startup_check, DAILY_INTERVAL, LifecycleDeps};
 use gate::telegram::approvals::{register_approvals, TelegramApprovalBackend};
 use gate::telegram::commands::{register_commands, CommandDeps};
 use gate::telegram::elevation::{
-    nonce_lookup as elevation_nonce_lookup, register_elevation, ElevationDeps,
-    ElevationHandler, NullReductionFlow,
+    nonce_lookup as elevation_nonce_lookup, register_elevation, ElevationDeps, ElevationHandler,
 };
-use gate::telegram::grant::{GrantOfferDeps, RealGrantFlow};
+use gate::telegram::grant::{
+    register_revoke, revoke_nonce_lookup, GrantOfferDeps, RealGrantFlow, RealReductionFlow,
+    ReductionDeps,
+};
 use gate::telegram::lifecycle::{register_lifecycle, nonce_lookup as rotate_nonce_lookup};
 use gate::telegram::setup::{
     nonce_lookup as setup_nonce_lookup, register_setup, resume as setup_resume, SetupDeps,
@@ -163,11 +165,33 @@ async fn main() -> anyhow::Result<()> {
         audit: audit.clone(),
     });
 
+    // Reduction machinery (GATE-010 §10, task 9): the real reducer behind
+    // the elevation seam — temporary grants reduce automatically at DONE,
+    // /revoke drives the same conversation, the sweep expires stale
+    // reduction rows and un-pressed menus (24 h no-progress, the
+    // elevation expiry value). The sweep is always spawned (expiry must
+    // progress); the conversation only exists with the bot.
+    let reduction_deps = Arc::new(ReductionDeps {
+        state: state.clone(),
+        platform: platform.clone(),
+        machine_login: machine_login.clone(),
+        notify: telegram_notify.clone(),
+        poll: Duration::from_secs(cfg.flow_poll_secs),
+        expire_after: Duration::from_secs(cfg.elevation_expire_secs),
+        audit: audit.clone(),
+    });
+    let (_reduction_shutdown_tx, reduction_shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(gate::telegram::grant::run_reduction_sweep(
+        (*reduction_deps).clone(),
+        reduction_shutdown_rx,
+        Duration::from_secs(cfg.flow_poll_secs),
+    ));
+
     // Elevation sweep (GATE-010 §8–9, task 8): expires stale elevation
     // flows after 24 h and takes over DETECTED rows (proxy pre-flight AND
     // the 403 error mapping feed the same rows) — consent asks go to the
-    // operator chat when the bot is configured. The reduction seam is the
-    // Task-9 placeholder until B9 ships the real reducer.
+    // operator chat when the bot is configured. Temporary grants reduce
+    // through the real reducer (task 9).
     let elevation_deps = Arc::new(ElevationDeps {
         state: state.clone(),
         platform: platform.clone(),
@@ -177,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
         poll: Duration::from_secs(cfg.flow_poll_secs),
         reminder_after: Duration::from_secs(cfg.elevation_reminder_secs),
         expire_after: Duration::from_secs(cfg.elevation_expire_secs),
-        reduction: Arc::new(NullReductionFlow),
+        reduction: Arc::new(RealReductionFlow::new((*reduction_deps).clone())),
         audit: audit.clone(),
     });
     let (_elevation_shutdown_tx, elevation_shutdown_rx) = tokio::sync::watch::channel(false);
@@ -219,16 +243,19 @@ async fn main() -> anyhow::Result<()> {
         let rotate = rotate_nonce_lookup(state.clone());
         let setup = setup_nonce_lookup(state.clone());
         let elevation = elevation_nonce_lookup(state.clone());
+        let revoke = revoke_nonce_lookup(state.clone());
         router.set_nonce_lookup(Arc::new(move |flow| {
             approvals(flow)
                 .or_else(|| rotate(flow))
                 .or_else(|| setup(flow))
                 .or_else(|| elevation(flow))
+                .or_else(|| revoke(flow))
         }));
         register_elevation(
             &mut router,
             Arc::new(ElevationHandler::new((*elevation_deps).clone())),
         );
+        register_revoke(&mut router, (*reduction_deps).clone());
         register_commands(
             &mut router,
             Arc::new(CommandDeps {
@@ -237,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
                 machine_token: machine_token.clone(),
                 lifecycle: Some(lifecycle_deps.clone()),
                 grant: cfg.telegram_chat_id.map(|chat| (grant_flow.clone(), chat)),
+                reduction: Some(reduction_deps.clone()),
             }),
         );
         register_lifecycle(&mut router, lifecycle_deps.clone());

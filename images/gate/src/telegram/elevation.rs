@@ -46,22 +46,23 @@
 //! `[Not now]` cancels; the sweep expires any flow without progress for
 //! [`ElevationDeps::expire_after`] (GATE-010: 24 h).
 //!
-//! # THE REDUCTION SEAM (for Task 9 / B9 — binding shape)
+//! # THE REDUCTION SEAM (task 9 — filled in `grant.rs`)
 //!
 //! Temporary grants ("grant until done, then remove") end with an
-//! automatic role REDUCTION back to `intended_role`. That machinery is
-//! Task 9's deliverable; this module only defines the seam it will fill:
+//! automatic role REDUCTION back to `intended_role`. The seam fires at
+//! DONE (the binding ruling — the agent's retry is already unblocked and
+//! the reducer owns its outcome), fire-and-forget:
 //!
 //! * the [`ReductionFlow`] trait (async, dyn-safe, called with the repo and
 //!   the role to reduce to);
-//! * [`NullReductionFlow`], the placeholder wired by `main.rs` until Task 9
-//!   lands the real reducer (org role demotion / collaborator removal);
-//! * the call site in [`run_elevation_flow`]: fired after DONE is written,
-//!   fire-and-forget — the agent's retry is already unblocked and Task 9
-//!   owns reporting the reduction outcome.
+//! * [`NullReductionFlow`], the no-op placeholder;
+//! * the call site in [`run_elevation_flow`]: fired after DONE is written.
 //!
-//! Swap the wiring in `main.rs` to `RealReductionFlow` when Task 9 lands;
-//! nothing in this module changes.
+//! `main.rs` wires [`crate::telegram::grant::RealReductionFlow`] as the
+//! reducer (GATE-010 §10: instructions + poll-verify + registry update).
+//! When a forwarded request on a temporarily-elevated repo answers 2xx,
+//! the apiproxy records that through [`mark_work_done`] — bookkeeping
+//! only, the reduction still proceeds at DONE.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -153,6 +154,12 @@ pub struct ElevationPayload {
     /// Distinct wrong roles already reported (one message each).
     #[serde(default)]
     pub wrong_roles: Vec<String>,
+    /// §9.2 bookkeeping: set to 1 when the apiproxy observed a 2xx on a
+    /// retried/forwarded request for this repo while the temporary grant
+    /// held ("the triggering request succeeded"). A RECORD ONLY — the
+    /// reduction always proceeds at DONE (B9 ruling: no second trigger).
+    #[serde(default)]
+    pub work_done: Option<i64>,
 }
 
 impl ElevationPayload {
@@ -270,19 +277,19 @@ pub struct ElevationDeps {
     pub audit: Arc<Audit>,
 }
 
-// -- the reduction seam (Task 9 fills this — see module docs) ------------------
+// -- the reduction seam (task 9 — filled in `grant.rs`, see module docs) -------
 
 /// Temporary-grant reduction seam: after a "grant until done, then remove"
-/// elevation completes, reduce `repo` back to `to`. Task 9 (B9) ships the
-/// real reducer behind this trait; `main.rs` swaps the wiring — this module
-/// only defines the seam and the call site.
+/// elevation completes, reduce `repo` back to `to`. The real reducer is
+/// [`crate::telegram::grant::RealReductionFlow`] (wired in `main.rs`);
+/// [`NullReductionFlow`] remains the no-op placeholder.
 #[async_trait]
 pub trait ReductionFlow: Send + Sync {
     async fn reduce(&self, repo: &str, to: Role);
 }
 
-/// Placeholder until Task 9: logs the intent and does nothing. Temporary
-/// grants still work end-to-end; only the automatic removal is deferred.
+/// Placeholder for deployments without the reducer: logs the intent and
+/// does nothing.
 pub struct NullReductionFlow;
 
 #[async_trait]
@@ -291,6 +298,34 @@ impl ReductionFlow for NullReductionFlow {
         eprintln!(
             "elevation: reduction deferred (no reducer wired): {repo} back to {to}"
         );
+    }
+}
+
+/// Mark `work_done = 1` on every temporary elevation flow of `repo` that is
+/// still open or DONE — the apiproxy calls this when a forwarded request on
+/// a temporarily-elevated repo answered 2xx (§9.2 "after the triggering
+/// request succeeds"). Best-effort bookkeeping: it never errors, never
+/// touches non-temporary flows, and never starts anything — the reduction
+/// proceeds at DONE regardless.
+pub fn mark_work_done(state: &DbState, repo: &str) {
+    let rows = match state.flows_list(FLOW_KIND) {
+        Ok(rows) => rows,
+        Err(_) => return,
+    };
+    for row in rows {
+        if row.flow_state != STATE_DONE && !is_active_state(&row.flow_state) {
+            continue;
+        }
+        let mut payload = ElevationPayload::from_json(&row.payload_json);
+        if payload.repo != repo
+            || payload.temporary != Some(true)
+            || payload.work_done == Some(1)
+        {
+            continue;
+        }
+        payload.work_done = Some(1);
+        // Quiet patch: bookkeeping must not move the flow's clock.
+        let _ = state.flow_patch_quiet(&row.id, &row.flow_state, &payload.to_json());
     }
 }
 
@@ -675,10 +710,12 @@ fn success_text(login: &str, repo: &str, needed: Role, temporary: bool, back_to:
     if temporary {
         match back_to {
             Some(to) => text.push_str(&format!(
-                " This is a temporary grant — I'll reduce the role back to {to} once you confirm the work is done."
+                " This is a temporary grant — I'm reducing the role back to {to} now; \
+                 watch for the reduction steps below."
             )),
             None => text.push_str(
-                " This is a temporary grant — the role will be reduced again afterwards.",
+                " This is a temporary grant — I'm removing the access again now; \
+                 watch for the reduction steps below.",
             ),
         }
     }
@@ -1012,8 +1049,74 @@ mod tests {
         assert!(r.contains("only reminder"), "{r}");
         let s = success_text("rob-agent", "acme/api", Role::Maintain, false, None);
         assert!(s.contains("The agent will retry its request"), "{s}");
+        // Temporary grant: the seam fires AT DONE (task 9) — the copy says
+        // the reduction starts now and must not promise a later trigger.
         let t = success_text("rob-agent", "acme/api", Role::Maintain, true, Some(Role::Read));
-        assert!(t.contains("reduce the role back to Read"), "{t}");
+        assert!(t.contains("back to Read"), "{t}");
+        assert!(t.contains("now"), "reduction starts at DONE: {t}");
+        assert!(
+            !t.contains("once you confirm"),
+            "no promise of a later trigger: {t}"
+        );
+        let n = success_text("rob-agent", "acme/api", Role::Maintain, true, None);
+        assert!(n.contains("now"), "{n}");
+        assert!(!n.contains("once you confirm"), "{n}");
+    }
+
+    #[test]
+    fn mark_work_done_records_success_only_on_this_repos_temporary_flows() {
+        let s = DbState::open(":memory:").unwrap();
+        let mut temp = payload("acme/api", "maintain", &[]);
+        temp.temporary = Some(true);
+        temp.intended_role = Some("read".to_string());
+        let mut other = payload("acme/other", "write", &[]);
+        other.temporary = Some(true);
+        let mut permanent = payload("acme/api", "admin", &[]);
+        permanent.temporary = Some(false);
+        let mut cancelled = payload("acme/api", "maintain", &[]);
+        cancelled.temporary = Some(true);
+        s.flow_insert("temp-done", FLOW_KIND, STATE_DONE, &temp.to_json())
+            .unwrap();
+        s.flow_insert("temp-active", FLOW_KIND, STATE_VERIFYING, &temp.to_json())
+            .unwrap();
+        s.flow_insert("other-repo", FLOW_KIND, STATE_DONE, &other.to_json())
+            .unwrap();
+        s.flow_insert("permanent", FLOW_KIND, STATE_DONE, &permanent.to_json())
+            .unwrap();
+        s.flow_insert("cancelled", FLOW_KIND, STATE_CANCELLED, &cancelled.to_json())
+            .unwrap();
+        mark_work_done(&s, "acme/api");
+        let payload_of = |id: &str| {
+            ElevationPayload::from_json(&s.flow_get(id).unwrap().unwrap().payload_json)
+        };
+        assert_eq!(
+            payload_of("temp-done").work_done,
+            Some(1),
+            "the DONE temp flow is marked"
+        );
+        assert_eq!(
+            payload_of("temp-active").work_done,
+            Some(1),
+            "an active temp flow is marked too"
+        );
+        assert_eq!(
+            payload_of("other-repo").work_done,
+            None,
+            "other repos are untouched"
+        );
+        assert_eq!(
+            payload_of("permanent").work_done,
+            None,
+            "permanent grants carry no work_done"
+        );
+        assert_eq!(
+            payload_of("cancelled").work_done,
+            None,
+            "cancelled flows are not marked"
+        );
+        // Idempotent: a second pass changes nothing.
+        mark_work_done(&s, "acme/api");
+        assert_eq!(payload_of("temp-done").work_done, Some(1));
     }
 
     #[test]
