@@ -24,6 +24,17 @@ pub struct TokenStore<'a> {
     audit: &'a Audit,
 }
 
+/// One `/token list` row: metadata only — a name and unix-second
+/// timestamps. No hash, no raw token: secret material never leaves the
+/// store through a listing (and Debug is safe to derive for the same
+/// reason).
+#[derive(Debug, Clone)]
+pub struct TokenInfo {
+    pub name: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
 impl<'a> TokenStore<'a> {
     pub fn new(state: &'a State, audit: &'a Audit) -> Self {
         Self { state, audit }
@@ -54,8 +65,7 @@ impl<'a> TokenStore<'a> {
             repo: "-".to_string(),
             action: "token.mint".to_string(),
             decision: "allow".to_string(),
-            basis: "token minted (sha-256 hash stored, raw returned once)"
-                .to_string(),
+            basis: format!("token '{name}' minted (sha-256 hash stored, raw returned once)"),
             approver: None,
         });
         Ok(raw)
@@ -76,13 +86,48 @@ impl<'a> TokenStore<'a> {
             action: "token.revoke".to_string(),
             decision: "allow".to_string(),
             basis: if existed {
-                "token revoked".to_string()
+                format!("token '{name}' revoked")
             } else {
-                "no token existed".to_string()
+                format!("no token named '{name}' existed")
             },
             approver: None,
         });
         existed
+    }
+
+    /// All tokens, oldest first. Reads only metadata columns — never the
+    /// hash, and there is no raw token to read.
+    pub fn list(&self) -> Vec<TokenInfo> {
+        let Ok(mut stmt) = self.state.conn().prepare(
+            "SELECT name, created_at, last_used_at
+             FROM agent_tokens ORDER BY created_at, name",
+        ) else {
+            return Vec::new();
+        };
+        let mapped = stmt.query_map([], |r| {
+            Ok(TokenInfo {
+                name: r.get(0)?,
+                created_at: r.get(1)?,
+                last_used_at: r.get(2)?,
+            })
+        });
+        match mapped {
+            Ok(rows) => rows.collect::<Result<Vec<_>, _>>().unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Whether a token row exists under `name` — lets a mint caller tell a
+    /// fresh mint from a rotation before it happens.
+    pub fn exists(&self, name: &str) -> bool {
+        self.state
+            .conn()
+            .query_row(
+                "SELECT 1 FROM agent_tokens WHERE name = ?1",
+                [name],
+                |r| r.get::<_, i64>(0),
+            )
+            .is_ok()
     }
 
     /// Validate a raw token. The stored hex hash is decoded and compared
@@ -324,8 +369,52 @@ mod tests {
         assert!(contents.contains("token.mint"), "contents: {contents}");
         assert!(contents.contains("token.revoke"), "contents: {contents}");
         assert!(
+            contents.contains("claude-code"),
+            "audit entries carry the token NAME: {contents}"
+        );
+        assert!(
             !contents.contains(&raw),
             "raw token must never reach the audit log: {contents}"
         );
+    }
+
+    #[test]
+    fn list_returns_metadata_without_hash_or_raw() {
+        let f = Fixture::open();
+        let raw = f.store().mint("claude-code").unwrap();
+        let second = f.store().mint("other-agent").unwrap();
+        f.store().validate(&raw);
+        let rows = f.store().list();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "claude-code");
+        assert!(rows[0].created_at > 0);
+        assert!(rows[0].last_used_at.is_some(), "validated token stamped");
+        assert_eq!(rows[1].name, "other-agent");
+        assert_eq!(rows[1].last_used_at, None, "unused token unstamped");
+        let (_, hash): (String, String) = f
+            .state
+            .conn()
+            .query_row(
+                "SELECT name, hash FROM agent_tokens WHERE name = 'claude-code'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        for row in &rows {
+            let rendered = format!("{row:?}");
+            assert!(!rendered.contains(&hash), "hash never renders: {rendered}");
+            assert!(!rendered.contains(&raw), "raw never renders: {rendered}");
+            assert!(!rendered.contains(&second), "raw never renders: {rendered}");
+        }
+    }
+
+    #[test]
+    fn exists_tracks_mint_revoke_and_rotation() {
+        let f = Fixture::open();
+        assert!(!f.store().exists("claude-code"));
+        f.store().mint("claude-code").unwrap();
+        assert!(f.store().exists("claude-code"));
+        f.store().revoke("claude-code");
+        assert!(!f.store().exists("claude-code"));
     }
 }
