@@ -13,6 +13,15 @@ pub enum ActionClass {
     TagDelete,
 }
 
+/// Ancestry-dependent refinement of an update class (GATE-005): the parser
+/// can decide deletions and creations on oid shape alone; an ordinary update
+/// needs the fast-forward check before it is Push or ForcePush.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Classification {
+    Class(ActionClass),
+    NeedsAncestry,
+}
+
 /// Policy outcome for an action (GATE-005). Unconfigured defaults to Deny.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Decision {
