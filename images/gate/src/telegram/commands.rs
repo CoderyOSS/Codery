@@ -27,9 +27,11 @@ use crate::telegram::send::SendRequest;
 use crate::telegram::{TelegramApi, Update, UpdateHandler};
 use crate::tokens::TokenStore;
 
-/// Reply for commands the gate does not know.
+/// Reply for commands the gate does not know. `/setup` is NOT dispatched
+/// here — the guided walkthrough owns it (its replies edit the command
+/// bubble and may fresh-send on a stale resume); the dispatcher yields it.
 const UNKNOWN_COMMAND: &str =
-    "Unknown command. Available: /pending, /status, /block owner/repo, /unblock owner/repo, /token mint|revoke|list, /rotate, /disconnect";
+    "Unknown command. Available: /pending, /status, /block owner/repo, /unblock owner/repo, /token mint|revoke|list, /rotate, /disconnect, /setup";
 
 /// Usage line for /block and /unblock.
 const BLOCK_USAGE: &str = "Usage: /block owner/repo — or /unblock owner/repo";
@@ -78,6 +80,11 @@ impl UpdateHandler for Commands {
         let arg = words.next();
         let rest: Vec<&str> = words.collect();
         let sender = update.sender_id;
+        if cmd == "setup" {
+            // The guided walkthrough handler (telegram::setup) sees this
+            // same update and owns the reply — nothing to do here.
+            return;
+        }
         let reply: SendRequest = match (cmd, arg) {
             ("pending", _) => self.pending_reply().into(),
             ("block", Some(repo)) => self.block_reply(repo, true, sender).into(),
@@ -329,8 +336,9 @@ fn registry_rows(guard: &State) -> Vec<(String, String, String, String)> {
 }
 
 /// `owner/repo` shape check mirroring the proxy's path grammar: a single
-/// slash, both segments non-empty, no traversal.
-fn valid_repo(arg: &str) -> Option<String> {
+/// slash, both segments non-empty, no traversal. Shared with the setup
+/// walkthrough's step-8 repo-line parser.
+pub(crate) fn valid_repo(arg: &str) -> Option<String> {
     let (owner, repo) = arg.split_once('/')?;
     let segment = |s: &str| {
         !s.is_empty()

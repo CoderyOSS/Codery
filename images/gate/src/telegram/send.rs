@@ -30,6 +30,9 @@ pub fn callback_data(flow_id: &str, nonce: &str, action: &str) -> String {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SendRequest {
     pub text: String,
+    /// Telegram parse mode for `text` — `Some("HTML")` from
+    /// [`SendRequest::html`]; `None` sends plain text exactly as before.
+    pub parse_mode: Option<String>,
     /// `(label, url)` pairs rendered as URL buttons.
     pub link_buttons: Vec<(String, String)>,
     /// `(label, callback_data)` pairs rendered as signed callback buttons.
@@ -43,6 +46,17 @@ impl SendRequest {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            ..Default::default()
+        }
+    }
+
+    /// HTML-formatted message (`<b>bold</b>` etc.) — sent with Telegram's
+    /// HTML parse mode so step copy can bold GitHub's labels (GATE-011).
+    /// Callers MUST escape user-derived values (`setup`'s `esc` helper).
+    pub fn html(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            parse_mode: Some("HTML".to_string()),
             ..Default::default()
         }
     }
@@ -129,5 +143,17 @@ mod tests {
 
         let plain = SendRequest::text("no buttons here");
         assert!(plain.reply_markup().is_none(), "no buttons ⇒ no reply_markup");
+    }
+
+    #[test]
+    fn html_sets_parse_mode_and_plain_text_leaves_it_off() {
+        let rich = SendRequest::html("<b>Settings → Emails</b>");
+        assert_eq!(rich.parse_mode.as_deref(), Some("HTML"));
+        // Button helpers must preserve the parse mode.
+        let with_buttons = rich.with_link_button("Open", "https://example.com");
+        assert_eq!(with_buttons.parse_mode.as_deref(), Some("HTML"));
+
+        let plain = SendRequest::text("plain");
+        assert_eq!(plain.parse_mode, None, "legacy plain sends carry no parse mode");
     }
 }

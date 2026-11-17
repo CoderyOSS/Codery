@@ -213,6 +213,11 @@ async fn token_submit(
                     };
                     if rotating {
                         crate::tasks::notify_rotate_complete(&deps.notify, &vt).await;
+                    } else {
+                        // First setup (no rotate marker matched): advance the
+                        // guided walkthrough (GATE-011) to step 8. The hook
+                        // no-ops when no walkthrough is active.
+                        crate::telegram::setup::form_stored_hook(&gs.state, &deps.notify).await;
                     }
                     html_page(StatusCode::OK, &success_page(&deps, &vt))
                 }

@@ -29,6 +29,7 @@ pub mod approvals;
 pub mod commands;
 pub mod lifecycle;
 pub mod send;
+pub mod setup;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
@@ -465,6 +466,9 @@ impl TelegramClient {
     /// name no message.
     fn send_body(req: &SendRequest, chat_id: i64) -> Value {
         let mut body = json!({ "chat_id": chat_id, "text": req.text });
+        if let Some(mode) = &req.parse_mode {
+            body["parse_mode"] = json!(mode);
+        }
         if let Some(markup) = req.reply_markup() {
             body["reply_markup"] = markup;
         }
@@ -513,6 +517,9 @@ impl TelegramApi for TelegramClient {
             "message_id": to.message_id,
             "text": req.text,
         });
+        if let Some(mode) = &req.parse_mode {
+            body["parse_mode"] = json!(mode);
+        }
         if let Some(markup) = req.reply_markup() {
             body["reply_markup"] = markup;
         }

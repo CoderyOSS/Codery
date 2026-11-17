@@ -92,6 +92,67 @@ impl State {
             .map_err(Into::into)
     }
 
+    // -- setup_progress (GATE-011): the guided walkthrough's durable state --
+
+    /// One setup-progress value (`None` when absent).
+    pub fn setup_get(&self, key: &str) -> anyhow::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM setup_progress WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// `updated_at` of one setup-progress row (`None` when absent) — the
+    /// restart-resume "older than 1 h ⇒ resend" rule reads this on the
+    /// `step` row.
+    pub fn setup_updated_at(&self, key: &str) -> anyhow::Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT updated_at FROM setup_progress WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Upsert a setup-progress row, stamping `updated_at` with now.
+    pub fn setup_set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.setup_set_with_ts(key, value, now())
+    }
+
+    /// Upsert with an explicit timestamp (the resume test backdates the
+    /// step row past the 1 h resend threshold).
+    pub fn setup_set_with_ts(&self, key: &str, value: &str, updated_at: i64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO setup_progress(key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at",
+            rusqlite::params![key, value, updated_at],
+        )?;
+        Ok(())
+    }
+
+    /// Delete one setup-progress row; true when a row existed.
+    pub fn setup_delete(&self, key: &str) -> anyhow::Result<bool> {
+        let deleted = self
+            .conn
+            .execute("DELETE FROM setup_progress WHERE key = ?1", [key])?;
+        Ok(deleted > 0)
+    }
+
+    /// Clear every setup-progress row (`[Cancel setup]` / finish).
+    pub fn setup_clear(&self) -> anyhow::Result<()> {
+        self.conn.execute("DELETE FROM setup_progress", [])?;
+        Ok(())
+    }
+
+
     /// Insert or overwrite a kv row.
     pub fn kv_set(&self, key: &str, value: &str) -> anyhow::Result<()> {
         self.conn.execute(
@@ -332,6 +393,27 @@ mod tests {
         assert!(s.kv_delete("setup_nonce").unwrap());
         assert_eq!(s.kv_get("setup_nonce").unwrap(), None);
         assert!(!s.kv_delete("setup_nonce").unwrap(), "second delete misses");
+    }
+
+    #[test]
+    fn setup_progress_set_get_backdate_and_clear() {
+        let s = State::open(":memory:").unwrap();
+        assert_eq!(s.setup_get("step").unwrap(), None);
+        s.setup_set("step", "3").unwrap();
+        assert_eq!(s.setup_get("step").unwrap().as_deref(), Some("3"));
+        let ts = s.setup_updated_at("step").unwrap().expect("stamped now");
+        assert!(ts > 0, "upsert stamps the current time");
+
+        // Explicit timestamp (resume test backdates past the 1 h mark).
+        s.setup_set_with_ts("step", "3", ts - 7200).unwrap();
+        assert_eq!(s.setup_updated_at("step").unwrap(), Some(ts - 7200));
+
+        // Cancel/finish clears everything at once.
+        s.setup_set("username", "rob-agent").unwrap();
+        s.setup_clear().unwrap();
+        assert_eq!(s.setup_get("step").unwrap(), None);
+        assert_eq!(s.setup_get("username").unwrap(), None);
+        assert!(!s.setup_delete("step").unwrap(), "nothing left to delete");
     }
 
     #[test]

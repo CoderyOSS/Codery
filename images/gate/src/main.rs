@@ -18,6 +18,10 @@ use gate::tasks::{run_daily_loop, startup_check, DAILY_INTERVAL, LifecycleDeps};
 use gate::telegram::approvals::{register_approvals, TelegramApprovalBackend};
 use gate::telegram::commands::{register_commands, CommandDeps};
 use gate::telegram::lifecycle::{register_lifecycle, nonce_lookup as rotate_nonce_lookup};
+use gate::telegram::setup::{
+    nonce_lookup as setup_nonce_lookup, register_setup, resume as setup_resume,
+    SetupDeps, UnimplementedGrantFlow,
+};
 use gate::telegram::{run_poll_loop, TelegramClient, TelegramRouter, POLL_BACKOFF_BASE};
 
 #[tokio::main]
@@ -147,20 +151,26 @@ async fn main() -> anyhow::Result<()> {
     // without the bot. An empty allowlist keeps the loop running but drops
     // every update (fail closed). The router carries the approval button
     // handler, the command handlers (/pending /block /unblock /status
-    // /token /rotate /disconnect) and the lifecycle rotate-start button
-    // handler; callbacks are nonce-validated against the pending rows and
-    // the lifecycle rotate nonce.
+    // /token /rotate /disconnect), the lifecycle rotate-start button
+    // handler and the guided setup walkthrough (/setup, GATE-011);
+    // callbacks are nonce-validated against the pending rows, the
+    // lifecycle rotate nonce and the setup flow nonce.
     if let Some((api, backend)) = telegram {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let mut router = TelegramRouter::new();
         register_approvals(&mut router, backend.clone());
         // Composed callback validation: approval rows first, then the
-        // lifecycle rotate flow (the approval layer set its own lookup;
-        // the composed one keeps both).
+        // lifecycle rotate flow, then the setup walkthrough (the approval
+        // layer set its own lookup; the composed one keeps all three).
         let approvals = TelegramApprovalBackend::nonce_lookup(state.clone());
         let rotate = rotate_nonce_lookup(state.clone());
-        router.set_nonce_lookup(Arc::new(move |flow| approvals(flow).or_else(|| rotate(flow))));
+        let setup = setup_nonce_lookup(state.clone());
+        router.set_nonce_lookup(Arc::new(move |flow| {
+            approvals(flow)
+                .or_else(|| rotate(flow))
+                .or_else(|| setup(flow))
+        }));
         register_commands(
             &mut router,
             Arc::new(CommandDeps {
@@ -171,6 +181,22 @@ async fn main() -> anyhow::Result<()> {
             }),
         );
         register_lifecycle(&mut router, lifecycle_deps.clone());
+        // Guided setup walkthrough (GATE-011). The grant-flow seam is
+        // satisfied by the fail-closed placeholder until task B7 wires the
+        // real grant machinery into `GrantFlow` — the step-8 handler
+        // consumes the trait, not this placeholder.
+        let setup_deps = Arc::new(SetupDeps {
+            state: state.clone(),
+            platform: platform.clone(),
+            machine_login: machine_login.clone(),
+            enc_key: cfg.token_enc_key.clone(),
+            gate_public_url: cfg.public_url.clone(),
+            chat_id: cfg.telegram_chat_id.unwrap_or(0),
+            forwarding: forwarding.clone(),
+            grant: Arc::new(UnimplementedGrantFlow),
+            audit: audit.clone(),
+        });
+        register_setup(&mut router, setup_deps.clone());
         tokio::spawn(run_poll_loop(
             api.clone(),
             cfg.telegram_allowlist.clone(),
@@ -178,12 +204,15 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx,
             POLL_BACKOFF_BASE,
         ));
-        tokio::spawn(router.run(rx, api));
+        tokio::spawn(router.run(rx, api.clone()));
         gate_state.telegram_live.store(true, Ordering::Relaxed);
         eprintln!(
             "telegram control plane live ({} allowlisted approver(s))",
             cfg.telegram_allowlist.len()
         );
+        // Restart resume (GATE-011): resends the current setup step only
+        // when its progress row is older than 1 h; fresh flows stay quiet.
+        setup_resume(&setup_deps, api).await;
     }
 
     // Startup credential check (GATE-004 §6.3): runs BEFORE the server

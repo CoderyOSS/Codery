@@ -29,6 +29,7 @@ struct Inner {
     offsets_seen: Vec<i64>,
     pending_failures: usize,
     pending_send_failures: usize,
+    pending_delete_failures: usize,
     next_message_id: i32,
     next_update_id: i64,
 }
@@ -77,6 +78,15 @@ impl FakeTelegram {
             .lock()
             .expect("fake lock must be poison-free")
             .pending_send_failures = n;
+    }
+
+    /// Make the next `n` `delete_message` calls fail (e.g. the setup
+    /// walkthrough's paste-intake failure-to-delete notice).
+    pub fn fail_next_deletes(&self, n: usize) {
+        self.inner
+            .lock()
+            .expect("fake lock must be poison-free")
+            .pending_delete_failures = n;
     }
 
     /// Every outbound send, in call order.
@@ -151,11 +161,12 @@ impl TelegramApi for FakeTelegram {
     }
 
     async fn delete_message(&self, to: MsgRef) -> Result<()> {
-        self.inner
-            .lock()
-            .expect("fake lock must be poison-free")
-            .deletes
-            .push(to);
+        let mut inner = self.inner.lock().expect("fake lock must be poison-free");
+        if inner.pending_delete_failures > 0 {
+            inner.pending_delete_failures -= 1;
+            return Err(anyhow!("fake: simulated telegram outage"));
+        }
+        inner.deletes.push(to);
         Ok(())
     }
 }

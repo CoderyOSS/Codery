@@ -70,6 +70,13 @@ pub trait Platform: Send + Sync {
         token: &str,
         expected_login: &str,
     ) -> Result<VerifiedToken, VerifyError>;
+
+    /// Does `username` exist upstream? Unauthenticated
+    /// `GET /users/{username}` (GATE-011 step 2): the setup walkthrough
+    /// polls this while the operator creates the machine account. ANY
+    /// non-200 or transport failure is `false` — fail closed, "not there
+    /// yet", never an advance.
+    async fn user_exists(&self, username: &str) -> bool;
 }
 
 /// Result of a successful machine-token verification (GATE-004): the
@@ -110,6 +117,17 @@ pub const TOKEN_NEW_URL: &str = "https://github.com/settings/tokens/new?scopes=r
 /// The machine account's token list on github.com — where the operator
 /// deletes the old/revoked token by hand (the gate has no API for it).
 pub const TOKENS_LIST_URL: &str = "https://github.com/settings/tokens";
+
+/// GitHub pages the guided walkthrough (GATE-011) links per step. Like
+/// every `github.com` literal, they live only in this module.
+pub const SIGNUP_URL: &str = "https://github.com/signup";
+pub const PROFILE_SETTINGS_URL: &str = "https://github.com/settings/profile";
+pub const EMAIL_SETTINGS_URL: &str = "https://github.com/settings/emails";
+pub const SECURITY_SETTINGS_URL: &str = "https://github.com/settings/security";
+/// The public setup guide — the ruleset-backstop walkthrough the GATE-011
+/// finish message links.
+pub const SETUP_GUIDE_URL: &str =
+    "https://github.com/CoderyOSS/Codery/blob/main/docs/guides/gitauthgate-setup.md";
 
 /// The authenticated caller's access to a repo (GATE-008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -495,6 +513,21 @@ impl Platform for GitHubPlatform {
             id: body.id,
             expires,
         })
+    }
+
+    async fn user_exists(&self, username: &str) -> bool {
+        let url = match self.api_base.join(&format!("users/{username}")) {
+            Ok(url) => url,
+            Err(_) => return false,
+        };
+        // Deliberately UNAUTHENTICATED (GATE-011): this probes a public
+        // profile while the operator creates the machine account — no
+        // Authorization header may ride along.
+        let response = match self.client.get(url).send().await {
+            Ok(response) => response,
+            Err(_) => return false,
+        };
+        response.status() == StatusCode::OK
     }
 }
 
@@ -1152,5 +1185,79 @@ mod tests {
         // The mock only answers the bearer-authenticated request, so a
         // pass proves the token traveled in the Authorization header.
         assert!(p.verify_token(VERIFY_TOKEN, EXPECTED_LOGIN).await.is_ok());
+    }
+
+    // -- user_exists (GATE-011 step 2, unauthenticated) ----------------------
+
+    #[tokio::test]
+    async fn user_exists_true_on_200_false_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/rob-agent"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"login":"rob-agent","id":9}"#),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/users/ghost"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert!(p.user_exists("rob-agent").await, "200 ⇒ the account exists");
+        assert!(!p.user_exists("ghost").await, "404 ⇒ not created yet");
+    }
+
+    #[tokio::test]
+    async fn user_exists_non_200_and_transport_errors_fail_closed_false() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/rob-agent"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert!(!p.user_exists("rob-agent").await, "500 ⇒ false, never an advance");
+
+        // Dead upstream: every request fails at the transport level.
+        let uri = server.uri();
+        drop(server);
+        let dead = GitHubPlatform::with_bases(
+            Url::parse(&uri).unwrap(),
+            Url::parse("http://git.example.internal/").unwrap(),
+            Arc::new(|| None),
+        );
+        assert!(!dead.user_exists("rob-agent").await, "transport error ⇒ false");
+    }
+
+    #[tokio::test]
+    async fn user_exists_sends_no_authorization_header() {
+        let server = MockServer::start().await;
+        // The stored-token getter supplies a credential, but the probe is
+        // unauthenticated by design: only a header-less request matches.
+        Mock::given(method("GET"))
+            .and(path("/users/rob-agent"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"login":"rob-agent"}"#),
+            )
+            .mount(&server)
+            .await;
+        let with_token = GitHubPlatform::with_bases(
+            Url::parse(&server.uri()).unwrap(),
+            Url::parse("http://git.example.internal/").unwrap(),
+            Arc::new(|| Some("s3cr3t".to_string())),
+        );
+        assert!(
+            with_token.user_exists("rob-agent").await,
+            "the unauthenticated request succeeds"
+        );
+        let requests = server.received_requests().await.expect("recorded requests");
+        assert!(
+            requests
+                .iter()
+                .all(|r| !r.headers.contains_key("authorization")),
+            "user_exists must never carry credentials"
+        );
     }
 }
