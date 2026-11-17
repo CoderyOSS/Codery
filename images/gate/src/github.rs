@@ -55,7 +55,52 @@ pub trait Platform: Send + Sync {
     /// custody token. `None` when custody is empty or the upstream rejects
     /// the token — the API proxy forwards NOTHING in that state.
     async fn user_login(&self) -> Option<String>;
+
+    /// Verify a machine-account PAT at intake (GATE-004): GET /user with
+    /// the candidate token; the returned `login` must equal
+    /// `expected_login` (passed by the caller — the adapter itself holds
+    /// no notion of the machine login), `two_factor_authentication` must
+    /// be true, all required scopes present (first missing reported), and
+    /// the `github-authentication-token-expiration` header captured
+    /// (`None` = no expiry; accepting that is the CALLER's decision, with
+    /// a warning). The token is used only in the request header — never
+    /// logged, never stored by the adapter.
+    async fn verify_token(
+        &self,
+        token: &str,
+        expected_login: &str,
+    ) -> Result<VerifiedToken, VerifyError>;
 }
+
+/// Result of a successful machine-token verification (GATE-004): the
+/// machine identity and the token's expiry as GitHub reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedToken {
+    pub login: String,
+    pub id: i64,
+    /// `github-authentication-token-expiration` header value; `None` when
+    /// absent (token never expires).
+    pub expires: Option<String>,
+}
+
+/// Intake verification failure (GATE-004), in check order: wrong login,
+/// 2FA off, first missing scope, anything upstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyError {
+    /// GET /user answered, but for a different login — carries the login
+    /// found (typically the user's main account).
+    WrongLogin(String),
+    /// The machine account has `two_factor_authentication: false`.
+    TwoFactorOff,
+    /// First missing required scope, in `repo, workflow, read:org` order.
+    MissingScope(String),
+    /// Any other upstream failure; carries the HTTP status, or 0 when the
+    /// failure was at the transport level.
+    Upstream(u16),
+}
+
+/// Scopes the machine PAT must carry, in report order.
+const REQUIRED_SCOPES: &[&str] = &["repo", "workflow", "read:org"];
 
 /// The authenticated caller's access to a repo (GATE-008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +190,10 @@ struct RepoResponse {
 struct UserResponse {
     #[serde(default)]
     login: String,
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    two_factor_authentication: bool,
 }
 
 /// REST client for GitHub with per-request machine-token injection. The
@@ -361,6 +410,72 @@ impl Platform for GitHubPlatform {
         } else {
             Some(body.login)
         }
+    }
+
+    async fn verify_token(
+        &self,
+        token: &str,
+        expected_login: &str,
+    ) -> Result<VerifiedToken, VerifyError> {
+        let url = self
+            .api_base
+            .join("user")
+            .map_err(|_| VerifyError::Upstream(0))?;
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|_| VerifyError::Upstream(0))?;
+        let status = response.status();
+        if status != StatusCode::OK {
+            return Err(VerifyError::Upstream(status.as_u16()));
+        }
+        // Headers captured before the body is consumed; the token itself
+        // lives only in the request header and is never logged.
+        let scopes = response
+            .headers()
+            .get("x-oauth-scopes")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string());
+        let expires = response
+            .headers()
+            .get("github-authentication-token-expiration")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string());
+        let body: UserResponse = response
+            .json()
+            .await
+            .map_err(|_| VerifyError::Upstream(StatusCode::OK.as_u16()))?;
+
+        // Check order = report order (GATE-004): the pointed wrong-account
+        // message first, then 2FA, then scopes.
+        if body.login != expected_login {
+            return Err(VerifyError::WrongLogin(body.login));
+        }
+        if !body.two_factor_authentication {
+            return Err(VerifyError::TwoFactorOff);
+        }
+        let granted: Vec<String> = scopes
+            .map(|h| {
+                h.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(missing) = REQUIRED_SCOPES
+            .iter()
+            .find(|s| !granted.contains(&(*s).to_string()))
+        {
+            return Err(VerifyError::MissingScope(missing.to_string()));
+        }
+        Ok(VerifiedToken {
+            login: body.login,
+            id: body.id,
+            expires,
+        })
     }
 }
 
@@ -818,5 +933,183 @@ mod tests {
         assert_eq!(p.user_login().await, None);
         let requests = server.received_requests().await.unwrap();
         assert!(requests.is_empty(), "no round trip without custody");
+    }
+
+    // -- verify_token (task 9, GATE-004 intake checks) ----------------------
+
+    const VERIFY_TOKEN: &str = "ghp_verification_probe";
+    const EXPECTED_LOGIN: &str = "gate-machine";
+
+    fn ok_user_body(login: &str, two_fa: bool) -> String {
+        format!(
+            r#"{{"login":"{login}","id":4242,"two_factor_authentication":{two_fa}}}"#
+        )
+    }
+
+    async fn mount_verify(
+        server: &MockServer,
+        status: u16,
+        login: &str,
+        two_fa: bool,
+        scopes: Option<&str>,
+        expires: Option<&str>,
+        require_bearer: Option<&str>,
+    ) {
+        let mut tpl = ResponseTemplate::new(status);
+        if status == 200 {
+            tpl = tpl.set_body_string(ok_user_body(login, two_fa));
+            if let Some(s) = scopes {
+                tpl = tpl.append_header("X-OAuth-Scopes", s);
+            }
+            if let Some(e) = expires {
+                tpl = tpl.append_header("github-authentication-token-expiration", e);
+            }
+        }
+        let mut mock = Mock::given(method("GET")).and(path("/user"));
+        if let Some(bearer) = require_bearer {
+            mock = mock.and(header("authorization", format!("Bearer {bearer}")));
+        }
+        mock.respond_with(tpl).mount(server).await;
+    }
+
+    #[tokio::test]
+    async fn verify_token_success_returns_login_id_and_captured_expiry() {
+        let server = MockServer::start().await;
+        mount_verify(
+            &server,
+            200,
+            EXPECTED_LOGIN,
+            true,
+            Some("repo, workflow, read:org"),
+            Some("2027-05-01T00:00:00Z"),
+            Some(VERIFY_TOKEN),
+        )
+        .await;
+        let p = platform_at(&server);
+        let vt = p
+            .verify_token(VERIFY_TOKEN, EXPECTED_LOGIN)
+            .await
+            .expect("valid machine token must verify");
+        assert_eq!(vt.login, EXPECTED_LOGIN);
+        assert_eq!(vt.id, 4242, "id stored for commit identity (GATE-004)");
+        assert_eq!(vt.expires.as_deref(), Some("2027-05-01T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn verify_token_without_expiry_header_captures_none() {
+        let server = MockServer::start().await;
+        mount_verify(
+            &server,
+            200,
+            EXPECTED_LOGIN,
+            true,
+            Some("repo, workflow, read:org"),
+            None,
+            None,
+        )
+        .await;
+        let p = platform_at(&server);
+        let vt = p.verify_token(VERIFY_TOKEN, EXPECTED_LOGIN).await.unwrap();
+        assert_eq!(vt.expires, None, "no header ⇒ no expiry");
+    }
+
+    #[tokio::test]
+    async fn verify_token_login_mismatch_is_wrong_login_naming_found_login() {
+        let server = MockServer::start().await;
+        mount_verify(
+            &server,
+            200,
+            "robsmith",
+            true,
+            Some("repo, workflow, read:org"),
+            None,
+            None,
+        )
+        .await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.verify_token(VERIFY_TOKEN, EXPECTED_LOGIN).await,
+            Err(VerifyError::WrongLogin("robsmith".to_string())),
+            "a main-account token is rejected, naming the login found"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_token_two_factor_off_is_two_factor_off_error() {
+        let server = MockServer::start().await;
+        mount_verify(
+            &server,
+            200,
+            EXPECTED_LOGIN,
+            false,
+            Some("repo, workflow, read:org"),
+            None,
+            None,
+        )
+        .await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.verify_token(VERIFY_TOKEN, EXPECTED_LOGIN).await,
+            Err(VerifyError::TwoFactorOff)
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_token_missing_scope_names_first_missing_in_required_order() {
+        // workflow is missing; repo and read:org are present.
+        let server = MockServer::start().await;
+        mount_verify(
+            &server,
+            200,
+            EXPECTED_LOGIN,
+            true,
+            Some("repo, read:org"),
+            None,
+            None,
+        )
+        .await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.verify_token(VERIFY_TOKEN, EXPECTED_LOGIN).await,
+            Err(VerifyError::MissingScope("workflow".to_string()))
+        );
+        // No header at all: repo (first required scope) is reported.
+        let bare = MockServer::start().await;
+        mount_verify(&bare, 200, EXPECTED_LOGIN, true, None, None, None).await;
+        let p_bare = platform_at(&bare);
+        assert_eq!(
+            p_bare.verify_token(VERIFY_TOKEN, EXPECTED_LOGIN).await,
+            Err(VerifyError::MissingScope("repo".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_token_non_200_is_upstream_error_with_status() {
+        let server = MockServer::start().await;
+        mount_verify(&server, 500, "", false, None, None, None).await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.verify_token(VERIFY_TOKEN, EXPECTED_LOGIN).await,
+            Err(VerifyError::Upstream(500))
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_token_sends_the_token_as_bearer_only() {
+        let server = MockServer::start().await;
+        mount_verify(
+            &server,
+            200,
+            EXPECTED_LOGIN,
+            true,
+            Some("repo, workflow, read:org"),
+            None,
+            Some(VERIFY_TOKEN),
+        )
+        .await;
+        let p = platform_at(&server);
+        // The mock only answers the bearer-authenticated request, so a
+        // pass proves the token traveled in the Authorization header.
+        assert!(p.verify_token(VERIFY_TOKEN, EXPECTED_LOGIN).await.is_ok());
     }
 }

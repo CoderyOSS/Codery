@@ -6,8 +6,10 @@ use gate::apiproxy::ApiDeps;
 use gate::approval::{ApprovalOutcome, StubBackend, APPROVAL_TIMEOUT_SECS};
 use gate::audit::Audit;
 use gate::config::Config;
+use gate::custody::MachineTokenStore;
 use gate::github::GitHubPlatform;
 use gate::gitproxy::GitDeps;
+use gate::onepage::OnePageDeps;
 use gate::policy::{PolicyEngine, PolicyFile};
 use gate::routes::{self, GateState};
 use gate::state::State as DbState;
@@ -25,10 +27,27 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(DbState::open(&cfg.state_path)?));
     let audit = Arc::new(Audit::open(&cfg.audit_path));
 
-    // Machine-token custody lands with the setup flow (GATE-004/011); until
-    // then no credential is available and forwarding fails closed (502s).
-    let machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync> = Arc::new(|| None);
+    // Machine-token custody (GATE-004): the PAT decrypts in memory, in the
+    // request path only. A wrong GATE_TOKEN_ENC_KEY fails closed (no
+    // credential → upstream calls fail) with a note on stderr; the token
+    // itself is never logged.
+    let custody_state = state.clone();
+    let enc_key = cfg.token_enc_key.clone();
+    let machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync> = Arc::new(move || {
+        let state = custody_state
+            .lock()
+            .expect("state lock must be poison-free");
+        match MachineTokenStore::new(&state, &enc_key).load() {
+            Ok(token) => token,
+            Err(e) => {
+                eprintln!("custody load failed — forwarding disabled: {e}");
+                None
+            }
+        }
+    });
     let platform = Arc::new(GitHubPlatform::new(machine_token.clone()));
+    let gate_host = cfg.gate_host();
+    let machine_login = cfg.machine_login.clone();
 
     // Test double until the Telegram control plane swaps in the real
     // approval backend; Denied keeps holds fail closed without a decider.
@@ -53,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     // policy engine, one approval backend, one registry.
     let api = ApiDeps::new(
         state.clone(),
-        platform,
+        platform.clone(),
         policy,
         backend,
         machine_token,
@@ -62,6 +81,12 @@ async fn main() -> anyhow::Result<()> {
 
     let mut gate_state = GateState::with_git(state, audit, git);
     gate_state.api = Some(Arc::new(api));
+    gate_state.onepage = Some(Arc::new(OnePageDeps {
+        gate_host,
+        machine_login,
+        platform,
+        enc_key: cfg.token_enc_key.clone(),
+    }));
     let app = routes::router(gate_state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await?;

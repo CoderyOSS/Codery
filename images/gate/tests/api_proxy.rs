@@ -208,6 +208,7 @@ async fn spawn_gate_with(
         rate: Mutex::new(RateLimiter::default()),
         git: None,
         api: Some(Arc::new(api)),
+        onepage: None,
     };
     let app = router(gs);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

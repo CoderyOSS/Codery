@@ -41,6 +41,9 @@ pub struct GateState {
     pub rate: Mutex<RateLimiter>,
     pub git: Option<Arc<GitDeps>>,
     pub api: Option<Arc<ApiDeps>>,
+    /// Onboarding-page dependencies (`GET /` + the one-time token form);
+    /// absent only on probe-only routers.
+    pub onepage: Option<Arc<crate::onepage::OnePageDeps>>,
 }
 
 impl GateState {
@@ -52,6 +55,7 @@ impl GateState {
             rate: Mutex::new(RateLimiter::default()),
             git: None,
             api: None,
+            onepage: None,
         }
     }
 
@@ -64,6 +68,7 @@ impl GateState {
             rate: Mutex::new(RateLimiter::default()),
             git: Some(Arc::new(git)),
             api: None,
+            onepage: None,
         }
     }
 
@@ -124,18 +129,26 @@ impl RateLimiter {
 }
 
 /// The full gate surface: probe route, the git smart-HTTP proxy and the
-/// API proxy, all behind [`require_agent`].
+/// API proxy, all behind [`require_agent`] — plus, when onboarding deps
+/// are wired, the instruction page and the one-time token form mounted
+/// OUTSIDE the middleware (the agent has no gate token at intake time;
+/// the form is gated by the single-use setup nonce instead).
 pub fn router(state: GateState) -> Router {
     let state = Arc::new(state);
-    Router::new()
+    let guarded = Router::new()
         .route("/whoami", get(whoami))
         .merge(crate::gitproxy::router(state.clone()))
         .merge(crate::apiproxy::router(state.clone()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_agent,
-        ))
-        .with_state(state)
+        ));
+    let app = if state.onepage.is_some() {
+        guarded.merge(crate::onepage::router(state.clone()))
+    } else {
+        guarded
+    };
+    app.with_state(state)
 }
 
 async fn whoami(Extension(agent): Extension<AgentIdentity>) -> Json<serde_json::Value> {

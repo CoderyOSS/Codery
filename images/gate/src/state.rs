@@ -82,6 +82,32 @@ impl State {
         Ok(())
     }
 
+    /// Raw key-value rows (`kv`): machine-token ciphertext, setup-nonce
+    /// state, and other single-slot durable values that don't warrant a
+    /// table of their own.
+    pub fn kv_get(&self, key: &str) -> anyhow::Result<Option<String>> {
+        self.conn
+            .query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0))
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Insert or overwrite a kv row.
+    pub fn kv_set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO kv(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a kv row; true when a row existed.
+    pub fn kv_delete(&self, key: &str) -> anyhow::Result<bool> {
+        let deleted = self.conn.execute("DELETE FROM kv WHERE key = ?1", [key])?;
+        Ok(deleted > 0)
+    }
+
     /// Kill-switch: is pushes to `repo` blocked?
     pub fn is_blocked(&self, repo: &str) -> anyhow::Result<bool> {
         let hit: Option<i64> = self
@@ -293,6 +319,19 @@ mod tests {
         assert_eq!(s.flow_state("flow-1").unwrap().as_deref(), Some("GRANTED"));
         // Other ids untouched; unknown ids stay None.
         assert_eq!(s.flow_state("flow-2").unwrap(), None);
+    }
+
+    #[test]
+    fn kv_set_get_delete_roundtrip() {
+        let s = State::open(":memory:").unwrap();
+        assert_eq!(s.kv_get("setup_nonce").unwrap(), None);
+        s.kv_set("setup_nonce", "abc").unwrap();
+        // Upsert overwrites.
+        s.kv_set("setup_nonce", "def").unwrap();
+        assert_eq!(s.kv_get("setup_nonce").unwrap().as_deref(), Some("def"));
+        assert!(s.kv_delete("setup_nonce").unwrap());
+        assert_eq!(s.kv_get("setup_nonce").unwrap(), None);
+        assert!(!s.kv_delete("setup_nonce").unwrap(), "second delete misses");
     }
 
     #[test]
