@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gate::apiproxy::ApiDeps;
-use gate::approval::{ApprovalOutcome, StubBackend, APPROVAL_TIMEOUT_SECS};
+use gate::approval::{ApprovalBackend, ApprovalOutcome, StubBackend, APPROVAL_TIMEOUT_SECS};
 use gate::audit::Audit;
 use gate::config::Config;
 use gate::custody::MachineTokenStore;
@@ -13,6 +13,8 @@ use gate::onepage::OnePageDeps;
 use gate::policy::{PolicyEngine, PolicyFile};
 use gate::routes::{self, GateState};
 use gate::state::State as DbState;
+use gate::telegram::approvals::{register_approvals, TelegramApprovalBackend};
+use gate::telegram::commands::{register_commands, CommandDeps};
 use gate::telegram::{run_poll_loop, TelegramClient, TelegramRouter, POLL_BACKOFF_BASE};
 use std::sync::atomic::Ordering;
 
@@ -51,13 +53,33 @@ async fn main() -> anyhow::Result<()> {
     let gate_host = cfg.gate_host();
     let machine_login = cfg.machine_login.clone();
 
-    // Test double until the Telegram control plane swaps in the real
-    // approval backend; Denied keeps holds fail closed without a decider.
-    let backend = Arc::new(StubBackend::new(
-        state.clone(),
-        audit.clone(),
-        ApprovalOutcome::Denied,
-    )?);
+    // Approval backend selection (GATE-005/006): with the bot configured,
+    // dangerous holds land on the operator's Telegram chat; without it the
+    // StubBackend keeps every hold fail closed — the auto decision is
+    // Denied, so dangerous operations are rejected, never silently
+    // forwarded.
+    let telegram = cfg.telegram_bot_token.clone().map(|token| {
+        let api: Arc<dyn gate::telegram::TelegramApi> = Arc::new(TelegramClient::new(&token));
+        let backend = Arc::new(TelegramApprovalBackend::new(
+            state.clone(),
+            audit.clone(),
+            api.clone(),
+            cfg.telegram_chat_id,
+        )?);
+        Ok::<_, anyhow::Error>((api, backend))
+    });
+    let telegram = match telegram {
+        Some(t) => Some(t?),
+        None => None,
+    };
+    let backend: Arc<dyn ApprovalBackend> = match &telegram {
+        Some((_, b)) => b.clone(),
+        None => Arc::new(StubBackend::new(
+            state.clone(),
+            audit.clone(),
+            ApprovalOutcome::Denied,
+        )?),
+    };
 
     let git = GitDeps::new(
         state.clone(),
@@ -77,11 +99,11 @@ async fn main() -> anyhow::Result<()> {
         platform.clone(),
         policy,
         backend,
-        machine_token,
+        machine_token.clone(),
         Duration::from_secs(APPROVAL_TIMEOUT_SECS),
     )?;
 
-    let mut gate_state = GateState::with_git(state, audit, git);
+    let mut gate_state = GateState::with_git(state.clone(), audit.clone(), git);
     gate_state.api = Some(Arc::new(api));
     gate_state.max_body_bytes = cfg.max_body_bytes;
     gate_state.onepage = Some(Arc::new(OnePageDeps {
@@ -94,13 +116,22 @@ async fn main() -> anyhow::Result<()> {
     // Telegram control plane (GATE-006): spawn the long-poll loop ONLY
     // when a bot token is configured — core git/API serving must work
     // without the bot. An empty allowlist keeps the loop running but drops
-    // every update (fail closed); Tasks 2–5 register the real handlers on
-    // the router, so until then validated updates simply find no handler.
-    if let Some(token) = cfg.telegram_bot_token.clone() {
-        let api: Arc<dyn gate::telegram::TelegramApi> = Arc::new(TelegramClient::new(&token));
+    // every update (fail closed). The router carries the approval button
+    // handler and the command handlers (/pending /block /unblock /status);
+    // callbacks are nonce-validated against the pending rows.
+    if let Some((api, backend)) = telegram {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let router = TelegramRouter::new();
+        let mut router = TelegramRouter::new();
+        register_approvals(&mut router, backend.clone());
+        register_commands(
+            &mut router,
+            Arc::new(CommandDeps {
+                state: state.clone(),
+                audit: audit.clone(),
+                machine_token: machine_token.clone(),
+            }),
+        );
         tokio::spawn(run_poll_loop(
             api.clone(),
             cfg.telegram_allowlist.clone(),

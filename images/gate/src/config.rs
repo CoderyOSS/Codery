@@ -37,6 +37,10 @@ pub struct Config {
     /// integers; GATE-006). Empty ⇒ the loop (if spawned) drops every
     /// update — fail closed.
     pub telegram_allowlist: Vec<i64>,
+    /// Chat id approval asks are delivered to (`TELEGRAM_CHAT_ID`). Unset
+    /// with a bot token configured ⇒ asks cannot be delivered: approval
+    /// `present` errors and holds are denied — fail closed.
+    pub telegram_chat_id: Option<i64>,
 }
 
 /// Bot token as `Some` only when set and non-blank; blank ⇒ `None` (no
@@ -60,6 +64,14 @@ fn allowlist_from(v: Option<&str>) -> Vec<i64> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Parse `TELEGRAM_CHAT_ID`: trimmed integer, or `None` when unset, blank
+/// or unparsable (asks stay undeliverable — the backend fails closed).
+fn chat_id_from(v: Option<&str>) -> Option<i64> {
+    v.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse().ok())
 }
 
 impl Config {
@@ -89,6 +101,7 @@ impl Config {
             telegram_allowlist: allowlist_from(
                 env::var("TELEGRAM_ALLOWLIST").ok().as_deref(),
             ),
+            telegram_chat_id: chat_id_from(env::var("TELEGRAM_CHAT_ID").ok().as_deref()),
         })
     }
 
@@ -195,5 +208,15 @@ mod tests {
         assert_eq!(allowlist_from(Some("42,oops,7")), vec![42, 7]);
         assert_eq!(allowlist_from(Some("oops")), Vec::<i64>::new(), "garbage ⇒ empty");
         assert_eq!(allowlist_from(Some(",,")), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn telegram_chat_id_parses_or_fails_closed_to_none() {
+        assert_eq!(chat_id_from(None), None);
+        assert_eq!(chat_id_from(Some("")), None);
+        assert_eq!(chat_id_from(Some("  ")), None);
+        assert_eq!(chat_id_from(Some("junk")), None);
+        assert_eq!(chat_id_from(Some(" -100200 ")), Some(-100_200));
+        assert_eq!(chat_id_from(Some("42")), Some(42));
     }
 }

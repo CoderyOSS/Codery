@@ -25,6 +25,8 @@
 //! answered, not edited, not deleted — the gate simply never acknowledges
 //! strangers.
 
+pub mod approvals;
+pub mod commands;
 pub mod send;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -456,14 +458,19 @@ impl TelegramClient {
     }
 
     /// `sendMessage` body: target chat from the reply anchor, optional
-    /// keyboard, optional reply pin.
+    /// keyboard, optional reply pin. A zero/negative `message_id` on the
+    /// anchor means "fresh send into this chat" (gate-initiated asks) —
+    /// `reply_to_message_id` is omitted, since Telegram rejects ids that
+    /// name no message.
     fn send_body(req: &SendRequest, chat_id: i64) -> Value {
         let mut body = json!({ "chat_id": chat_id, "text": req.text });
         if let Some(markup) = req.reply_markup() {
             body["reply_markup"] = markup;
         }
         if let Some(reply) = req.reply_to {
-            body["reply_to_message_id"] = json!(reply.message_id);
+            if reply.message_id > 0 {
+                body["reply_to_message_id"] = json!(reply.message_id);
+            }
         }
         body
     }
@@ -1001,5 +1008,27 @@ mod tests {
 
         assert_eq!(Update::parse(&json!({"message": {"text": "no id"}})), None);
         assert_eq!(Update::parse(&json!({})), None, "no update_id ⇒ skipped");
+    }
+
+    #[test]
+    fn send_body_omits_reply_to_for_gate_initiated_fresh_sends() {
+        // message_id 0 anchors a fresh send into a chat (approval asks,
+        // Task 2): no reply_to_message_id may ride along — Telegram
+        // rejects ids that name no message.
+        let fresh = SendRequest::text("ask").replying_to(MsgRef {
+            chat_id: -42,
+            message_id: 0,
+        });
+        let body = TelegramClient::send_body(&fresh, -42);
+        assert_eq!(body["chat_id"], -42);
+        assert!(body.get("reply_to_message_id").is_none());
+
+        // A real reply anchor (message_id > 0) still pins the thread.
+        let reply = SendRequest::text("reply").replying_to(MsgRef {
+            chat_id: -42,
+            message_id: 7,
+        });
+        let body = TelegramClient::send_body(&reply, -42);
+        assert_eq!(body["reply_to_message_id"], 7);
     }
 }

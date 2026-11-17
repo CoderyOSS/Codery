@@ -473,6 +473,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "gate",
  "getrandom 0.3.4",
  "http-body-util",
  "reqwest",

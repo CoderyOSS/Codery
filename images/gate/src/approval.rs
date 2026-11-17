@@ -7,6 +7,13 @@
 //! resurrect a hold. Cross-task wake is by polling: `resolve` only writes
 //! the row, `wait` re-reads it, so a control plane in another task needs no
 //! channel into the waiter.
+//!
+//! Payload evolution (Task 2): rows written by the Telegram control plane
+//! additionally carry a `nonce` (the signed-callback secret baked into the
+//! Approve/Deny buttons) and a `msg` (the ask message's chat/message id, so
+//! the decision can be edited in place). Both are `#[serde(default)]`
+//! optional fields on [`PendingPayload`] — plain core payloads (no nonce,
+//! no msg) stay parseable, which is the migration: no rewrite needed.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,7 +36,7 @@ pub const APPROVAL_TIMEOUT_SECS: u64 = 300;
 
 /// Poll interval for `wait`: how often the pending row is re-read for an
 /// external decision.
-const POLL: Duration = Duration::from_millis(50);
+pub(crate) const POLL: Duration = Duration::from_millis(50);
 
 /// What is being held for approval: a receive-pack push (with the parsed
 /// ref updates and commit subjects) or a GitHub API call (with a redacted
@@ -81,28 +88,45 @@ impl ApprovalOutcome {
 }
 
 /// What the `pending.payload_json` column stores: everything `wait` needs
-/// to race the request's own deadline without the request in hand.
+/// to race the request's own deadline without the request in hand, plus —
+/// for Telegram-delivered holds — the signed-callback `nonce` and the ask
+/// message address `msg` (both optional so core-written rows parse).
 #[derive(Serialize, Deserialize)]
-struct PendingPayload {
-    agent: String,
-    repo: String,
-    class: String,
-    timeout_ms: u64,
-    created_ms: u64,
-    detail: Value,
+pub(crate) struct PendingPayload {
+    pub agent: String,
+    pub repo: String,
+    pub class: String,
+    pub timeout_ms: u64,
+    pub created_ms: u64,
+    pub detail: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msg: Option<(i64, i32)>,
+}
+
+/// One unresolved approval row as the control plane lists it (/pending).
+#[derive(Debug, Clone)]
+pub struct PendingListRow {
+    pub id: String,
+    pub repo: String,
+    pub class: String,
+    pub created_ms: u64,
+    pub nonce: Option<String>,
+    pub detail: Value,
 }
 
 /// Current unix epoch milliseconds (row deadlines are sub-second precise;
 /// the `created_at` column stays in seconds alongside the rest of the
 /// schema).
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
-fn class_str(class: ActionClass) -> &'static str {
+pub(crate) fn class_str(class: ActionClass) -> &'static str {
     match class {
         ActionClass::Push => "push",
         ActionClass::ForcePush => "force_push",
@@ -111,7 +135,7 @@ fn class_str(class: ActionClass) -> &'static str {
     }
 }
 
-fn detail_value(detail: &ApprovalDetail) -> Value {
+pub(crate) fn detail_value(detail: &ApprovalDetail) -> Value {
     match detail {
         ApprovalDetail::Push { updates, commits } => json!({
             "updates": updates
@@ -141,6 +165,16 @@ fn detail_value(detail: &ApprovalDetail) -> Value {
 /// Persist a hold as an unresolved `pending` row: the row is the durable
 /// truth a restart sees, so it carries the request's own timeout.
 pub fn persist_request(state: &State, req: &ApprovalRequest) -> Result<()> {
+    persist_request_with_nonce(state, req, None)
+}
+
+/// [`persist_request`], plus the signed-callback nonce a Telegram-delivered
+/// hold bakes into its Approve/Deny buttons.
+pub fn persist_request_with_nonce(
+    state: &State,
+    req: &ApprovalRequest,
+    nonce: Option<&str>,
+) -> Result<()> {
     let kind = match req.detail {
         ApprovalDetail::Push { .. } => "approval.push",
         ApprovalDetail::Api { .. } => "approval.api",
@@ -152,6 +186,8 @@ pub fn persist_request(state: &State, req: &ApprovalRequest) -> Result<()> {
         timeout_ms: req.timeout.as_millis() as u64,
         created_ms: now_ms(),
         detail: detail_value(&req.detail),
+        nonce: nonce.map(String::from),
+        msg: None,
     };
     state.conn().execute(
         "INSERT INTO pending(id, kind, payload_json, created_at, decided_at, outcome)
@@ -166,14 +202,19 @@ pub fn persist_request(state: &State, req: &ApprovalRequest) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a hold. Idempotent: a decided or absent row is left untouched and
-/// reported as `false` (the control plane replies "already timed out" from
-/// the row state). Every actual change is audited with `basis = "approval"`.
-pub fn resolve_pending(
+/// Resolve a hold with an optional approver identity (control-plane ruling:
+/// a Telegram user resolving a hold is audited with `approver` = their user
+/// id string and `basis` = the outcome; programmatic resolves keep the core
+/// shape, `basis = "approval"`). Idempotent: a decided or absent row is
+/// left untouched and reported as `false` — the caller replies with the
+/// row's current state and never mutates it. [`resolve_pending`] is the
+/// approver-less form core consumers use.
+pub fn resolve_pending_as(
     state: &State,
     audit: &Audit,
     id: &str,
     outcome: ApprovalOutcome,
+    approver: Option<&str>,
 ) -> Result<bool> {
     let stored: Option<(String, Option<String>)> = state
         .conn()
@@ -196,6 +237,8 @@ pub fn resolve_pending(
         timeout_ms: APPROVAL_TIMEOUT_SECS * 1000,
         created_ms: 0,
         detail: Value::Null,
+        nonce: None,
+        msg: None,
     });
     let changed = state
         .conn()
@@ -212,11 +255,26 @@ pub fn resolve_pending(
             repo: payload.repo,
             action: "approval.resolve".to_string(),
             decision: outcome.as_str().to_string(),
-            basis: "approval".to_string(),
-            approver: None,
+            basis: match approver {
+                Some(_) => outcome.as_str().to_string(),
+                None => "approval".to_string(),
+            },
+            approver: approver.map(String::from),
         });
     }
     Ok(changed)
+}
+
+/// Resolve a hold. Idempotent: a decided or absent row is left untouched and
+/// reported as `false` (the control plane replies "already timed out" from
+/// the row state). Every actual change is audited with `basis = "approval"`.
+pub fn resolve_pending(
+    state: &State,
+    audit: &Audit,
+    id: &str,
+    outcome: ApprovalOutcome,
+) -> Result<bool> {
+    resolve_pending_as(state, audit, id, outcome, None)
 }
 
 /// Restart sweep (GATE-005, fail closed): EVERY approval row left without
@@ -241,7 +299,7 @@ pub fn sweep_unresolved_pending(state: &State, audit: &Audit) -> Result<usize> {
 
 /// Insert a default-window row for `id` if `present` never ran, so `wait`
 /// always races a persisted row.
-fn ensure_row(state: &State, id: &str) {
+pub(crate) fn ensure_row(state: &State, id: &str) {
     let created_ms = now_ms();
     let payload = PendingPayload {
         agent: "-".to_string(),
@@ -250,6 +308,8 @@ fn ensure_row(state: &State, id: &str) {
         timeout_ms: APPROVAL_TIMEOUT_SECS * 1000,
         created_ms,
         detail: Value::Null,
+        nonce: None,
+        msg: None,
     };
     let _ = state.conn().execute(
         "INSERT OR IGNORE INTO pending(id, kind, payload_json, created_at, decided_at, outcome)
@@ -264,7 +324,7 @@ fn ensure_row(state: &State, id: &str) {
 
 /// Read `(created_ms, timeout_ms, decided_outcome)` for a row; a missing row
 /// or corrupt payload falls back to the default window (fail closed).
-fn row_state(state: &State, id: &str) -> (u64, u64, Option<ApprovalOutcome>) {
+pub fn row_state(state: &State, id: &str) -> (u64, u64, Option<ApprovalOutcome>) {
     let row: Option<(String, i64, Option<String>)> = state
         .conn()
         .query_row(
@@ -289,6 +349,79 @@ fn row_state(state: &State, id: &str) -> (u64, u64, Option<ApprovalOutcome>) {
         None => (created_at as u64 * 1000, APPROVAL_TIMEOUT_SECS * 1000),
     };
     (created_ms, timeout_ms, decided)
+}
+
+/// The signed-callback nonce stored on a hold's row (`None` for rows the
+/// Telegram layer never wrote — legacy payloads carry no nonce). Existing
+/// rows keep their nonce after resolution so a late press on a decided
+/// hold still reaches the handler, which then answers with the row's
+/// current state instead of changing it.
+pub fn row_nonce(state: &State, id: &str) -> Option<String> {
+    payload_of(state, id).and_then(|p| p.nonce)
+}
+
+/// The ask message address stored on a hold's row, `(chat_id, message_id)`
+/// — where the decision is edited in place.
+pub fn ask_msg_of(state: &State, id: &str) -> Option<(i64, i32)> {
+    payload_of(state, id).and_then(|p| p.msg)
+}
+
+/// Record the ask message address on a hold's row (after `send_message`
+/// returns), so a later decision can edit the message in place — across
+/// restarts too, since the row is durable.
+pub fn store_ask_msg(state: &State, id: &str, chat_id: i64, message_id: i32) -> Result<()> {
+    let Some(mut payload) = payload_of(state, id) else {
+        return Ok(());
+    };
+    payload.msg = Some((chat_id, message_id));
+    state.conn().execute(
+        "UPDATE pending SET payload_json = ?2 WHERE id = ?1",
+        rusqlite::params![id, serde_json::to_string(&payload)?],
+    )?;
+    Ok(())
+}
+
+/// Every unresolved approval hold, oldest first — the /pending listing.
+pub fn list_unresolved(state: &State) -> Result<Vec<PendingListRow>> {
+    let rows: Vec<(String, String)> = {
+        let mut stmt = state.conn().prepare(
+            "SELECT id, payload_json FROM pending
+             WHERE outcome IS NULL AND kind LIKE 'approval%'
+             ORDER BY created_at, id",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, payload_json)| {
+            let payload: PendingPayload = serde_json::from_str(&payload_json).ok()?;
+            Some(PendingListRow {
+                id,
+                repo: payload.repo,
+                class: payload.class,
+                created_ms: payload.created_ms,
+                nonce: payload.nonce,
+                detail: payload.detail,
+            })
+        })
+        .collect())
+}
+
+/// Parse a row's payload; `None` when the row is absent or the payload is
+/// corrupt.
+pub(crate) fn payload_of(state: &State, id: &str) -> Option<PendingPayload> {
+    let payload_json: String = state
+        .conn()
+        .query_row(
+            "SELECT payload_json FROM pending WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    serde_json::from_str(&payload_json).ok()
 }
 
 /// Test double (and default backend): `present` persists the hold without
@@ -646,6 +779,8 @@ mod tests {
                     timeout_ms,
                     created_ms,
                     detail: Value::Null,
+                    nonce: None,
+                    msg: None,
                 };
                 state
                     .conn()

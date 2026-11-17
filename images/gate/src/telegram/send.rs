@@ -67,6 +67,14 @@ impl SendRequest {
         self
     }
 
+    /// Append pre-rendered callback buttons — `(label, callback_data)`
+    /// pairs already in signed-triple form (command listings reuse the
+    /// nonces stored on rows).
+    pub fn buttons(mut self, buttons: Vec<(String, String)>) -> Self {
+        self.inline_buttons.extend(buttons);
+        self
+    }
+
     /// Pin the message as a reply to `to` (and target its chat on sends).
     pub fn replying_to(mut self, to: MsgRef) -> Self {
         self.reply_to = Some(to);

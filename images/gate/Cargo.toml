@@ -28,6 +28,11 @@ base64 = "0.22"
 test-util = []
 
 [dev-dependencies]
+# Self dev-dependency: compiles the crate for integration tests with
+# `test-util` on, so tests/telegram_approvals.rs can drive FakeTelegram
+# while release builds keep the test double out (plain `cargo test`
+# includes it; the feature never leaks into non-test builds).
+gate = { path = ".", features = ["test-util"] }
 wiremock = "0.6"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
