@@ -408,11 +408,19 @@ fn step_buttons(step: u8, nonce: &str) -> Vec<(String, String)> {
 
 /// The values a step's copy is rendered from (owned — built fresh from
 /// the durable rows before each render, never held across an await).
+///
+/// Two DIFFERENT nonces live here (review round 1, F1): `cb_nonce` is
+/// the short 16-hex flow nonce every inline button is signed with
+/// (`setup:{cb_nonce}:{action}` ≤ 64 bytes — Telegram's callback_data
+/// cap) and the only one callback validation knows; `form_nonce` is the
+/// 64-hex one-time FORM nonce and is used exclusively in the
+/// `/setup/token?nonce=` URL, never in button data.
 struct StepCtx {
     machine_login: String,
     username: Option<String>,
     email_hint: Option<String>,
-    nonce: Option<String>,
+    cb_nonce: String,
+    form_nonce: Option<String>,
     checklist: Option<String>,
     gate_public_url: String,
 }
@@ -429,7 +437,8 @@ impl StepCtx {
             machine_login: machine_login.to_string(),
             username: pget(state, KEY_USERNAME).filter(|v| !v.is_empty()),
             email_hint: pget(state, KEY_EMAIL_HINT).filter(|v| !v.is_empty()),
-            nonce: pget(state, KEY_NONCE).filter(|v| !v.is_empty()),
+            cb_nonce: ensure_cb_nonce(state),
+            form_nonce: pget(state, KEY_NONCE).filter(|v| !v.is_empty()),
             checklist,
             gate_public_url: gate_public_url.to_string(),
         }
@@ -438,8 +447,7 @@ impl StepCtx {
     /// One step's message: what, why, exactly what to click (GitHub's
     /// labels, bold), one link button where GitHub has a page.
     fn req(&self, step: u8) -> SendRequest {
-        let nonce = self.nonce.as_deref().unwrap_or("");
-        let buttons = step_buttons(step, nonce);
+        let buttons = step_buttons(step, &self.cb_nonce);
         let req = match step {
             0 => SendRequest::html(concat!(
                 "Let's set up a <b>machine account</b> — a separate GitHub account your ",
@@ -534,7 +542,9 @@ impl StepCtx {
                     ))
                 } else {
                     let base = self.gate_public_url.trim_end_matches('/');
-                    let link = match &self.nonce {
+                    // The FORM nonce (64-hex, single-use) belongs in the
+                    // URL only — never in callback_data.
+                    let link = match &self.form_nonce {
                         Some(n) => format!("{base}/setup/token?nonce={n}"),
                         None => format!("{base}/setup/token"),
                     };
@@ -1400,7 +1410,10 @@ pub async fn form_stored_hook(
         machine_login: String::new(),
         username: None,
         email_hint: None,
-        nonce: None,
+        // The ask carries [Finish setup]/[I'm stuck]/[Cancel setup] —
+        // signed with the CB nonce so the buttons actually work.
+        cb_nonce: ensure_cb_nonce(state),
+        form_nonce: None,
         checklist: None,
         gate_public_url: String::new(),
     };
@@ -1423,7 +1436,8 @@ mod tests {
             machine_login: "rob-agent".to_string(),
             username: None,
             email_hint: None,
-            nonce: Some("ab".repeat(32)),
+            cb_nonce: "abcd0123456789ef".to_string(),
+            form_nonce: Some("ab".repeat(32)),
             checklist: None,
             gate_public_url: "https://gag.example.com".to_string(),
         }
@@ -1473,22 +1487,41 @@ mod tests {
                 "step {step} lacks [Cancel setup]: {:?}",
                 req.inline_buttons
             );
-            let nonce = c.nonce.as_deref().unwrap();
+            // Review round 1 (F1): buttons are signed with the SHORT
+            // callback nonce — never the 64-hex form nonce — and every
+            // callback_data stays within Telegram's 64-byte cap.
+            assert_eq!(
+                c.cb_nonce.len(),
+                16,
+                "the cb nonce is 16 hex chars"
+            );
             for (label, data) in &req.inline_buttons {
-                if label != "I'm stuck" && label != "Cancel setup" {
-                    assert_eq!(
-                        data,
-                        &format!("{SETUP_FLOW}:{nonce}:{}",
-                            match label.as_str() {
-                                "Start" => "start",
-                                "Check again" => "check",
-                                "Finish setup" => "finish",
-                                _ => "done",
-                            }
-                        ),
-                        "step {step} button '{label}' is a signed triple"
-                    );
-                }
+                let action = match label.as_str() {
+                    "Start" => "start",
+                    "Check again" => "check",
+                    "Finish setup" => "finish",
+                    "I'm stuck" => "stuck",
+                    "Cancel setup" => "cancel",
+                    _ => "done",
+                };
+                assert_eq!(
+                    data,
+                    &format!("{SETUP_FLOW}:{}:{action}", c.cb_nonce),
+                    "step {step} button '{label}' is a cb-nonce-signed triple"
+                );
+                assert!(
+                    data.len() <= 64,
+                    "step {step} callback_data exceeds Telegram's 64-byte limit: {data}"
+                );
+            }
+        }
+        // The form nonce never leaks into button data.
+        for step in 0..=8u8 {
+            for (_, data) in c.req(step).inline_buttons {
+                assert!(
+                    !data.contains(&"ab".repeat(32)),
+                    "form nonce must never sign a button: {data}"
+                );
             }
         }
     }
@@ -1521,11 +1554,25 @@ mod tests {
     fn step_seven_renders_form_link_or_paste_fallback() {
         let mut c = ctx();
         let form = c.req(7);
+        let (_, form_url) = form
+            .link_buttons
+            .iter()
+            .find(|(label, _)| label.contains("form"))
+            .expect("form mode carries the form link");
         assert!(
-            form.link_buttons.iter().any(|(label, url)| label.contains("form")
-                && url.starts_with("https://gag.example.com/setup/token?nonce=")),
+            form_url.starts_with("https://gag.example.com/setup/token?nonce="),
             "form mode: {:?}",
             form.link_buttons
+        );
+        // The URL carries the 64-hex FORM nonce — and only that one.
+        assert_eq!(
+            form_url.split_once("nonce=").map(|(_, n)| n),
+            Some(c.form_nonce.as_deref().unwrap()),
+            "the one-time form nonce rides in the url"
+        );
+        assert!(
+            !form_url.contains(&c.cb_nonce),
+            "the cb nonce never appears in the form url: {form_url}"
         );
 
         c.gate_public_url = String::new();

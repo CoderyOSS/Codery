@@ -190,14 +190,19 @@ impl Ctl {
         self.router.dispatch(&update, &self.api).await;
     }
 
-    /// Press one of the walkthrough's signed buttons.
+    /// Press one of the walkthrough's buttons by ACTION: extract the
+    /// signed callback_data from the newest RENDERED outbound message
+    /// that carries it (review round 1, F1 — the harness echoes what
+    /// production would actually deliver instead of reconstructing the
+    /// wire format from state).
     async fn press(&self, action: &str) {
-        let nonce = self.kv("setup_cb_nonce").expect("setup callback nonce");
+        let data = self.rendered_button_data(action)
+            .unwrap_or_else(|| panic!("no rendered setup button for action '{action}'"));
         let update = Update {
             sender_id: Some(CHAT),
             callback: Some(gate::telegram::Callback {
                 id: "cbq-1".to_string(),
-                data: format!("setup:{nonce}:{action}"),
+                data,
                 from_id: CHAT,
             }),
             message_ref: Some(MsgRef {
@@ -207,6 +212,26 @@ impl Ctl {
             ..Default::default()
         };
         self.router.dispatch(&update, &self.api).await;
+    }
+
+    /// Newest-first search over rendered outbound messages for a setup
+    /// button performing `action`; returns its exact callback_data.
+    fn rendered_button_data(&self, action: &str) -> Option<String> {
+        let wanted = |data: &str| {
+            data.split(':').next() == Some(gate::telegram::setup::SETUP_FLOW)
+                && data.rsplit(':').next() == Some(action)
+        };
+        for (_, req) in self.fake.edits().iter().rev() {
+            if let Some((_, d)) = req.inline_buttons.iter().find(|(_, d)| wanted(d)) {
+                return Some(d.clone());
+            }
+        }
+        for req in self.fake.sent().iter().rev() {
+            if let Some((_, d)) = req.inline_buttons.iter().find(|(_, d)| wanted(d)) {
+                return Some(d.clone());
+            }
+        }
+        None
     }
 
     fn step(&self) -> Option<u8> {
@@ -753,6 +778,70 @@ async fn checklist_updates_in_place_with_ok_wait_and_fail_marks() {
 }
 
 // ---------------------------------------------------------------------------
+// Signed callbacks end-to-end: rendered presses through the real router
+// (review round 1, F1 ruling 4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wrong_nonce_bounces_at_the_router_and_a_rendered_press_advances() {
+    let c = Ctl::open(false).await;
+    let intro = c.command("/setup").await;
+    assert_eq!(c.step(), Some(0));
+    // The rendered [Start] button carries the SHORT cb nonce, within the
+    // 64-byte callback_data cap (echoed verbatim by the harness).
+    let (_, start_data) = intro
+        .inline_buttons
+        .iter()
+        .find(|(label, _)| label == "Start")
+        .expect("rendered [Start] button");
+    assert!(
+        start_data.len() <= 64,
+        "callback_data must fit Telegram's limit: {start_data}"
+    );
+    let cb_nonce = start_data
+        .split(':')
+        .nth(1)
+        .expect("signed triple")
+        .to_string();
+    assert_eq!(cb_nonce.len(), 16, "buttons sign the SHORT cb nonce");
+    assert_eq!(start_data, &format!("setup:{cb_nonce}:start"));
+
+    // Wrong-nonce press: the ROUTER rejects before any handler runs —
+    // one "no longer valid" edit, no advance, spinner answered.
+    let edits_before = c.fake.edits().len();
+    let forged = Update {
+        sender_id: Some(CHAT),
+        callback: Some(gate::telegram::Callback {
+            id: "cbq-forged".to_string(),
+            data: "setup:0000000000000000:start".to_string(),
+            from_id: CHAT,
+        }),
+        message_ref: Some(MsgRef {
+            chat_id: CHAT,
+            message_id: 77,
+        }),
+        ..Default::default()
+    };
+    c.router.dispatch(&forged, &c.api).await;
+    assert_eq!(c.step(), Some(0), "forged nonce ⇒ no advance");
+    let edits = c.fake.edits();
+    assert_eq!(edits.len(), edits_before + 1, "exactly the bounce edit");
+    assert_eq!(
+        edits.last().unwrap().1.text,
+        gate::telegram::ACTION_NO_LONGER_VALID
+    );
+    assert!(c.fake.answered().contains(&"cbq-forged".to_string()));
+
+    // Happy path: the RENDERED button, through the same router dispatch.
+    c.press("start").await;
+    assert_eq!(c.step(), Some(1), "rendered button advances end-to-end");
+    assert!(
+        c.fake.answered().contains(&"cbq-1".to_string()),
+        "spinner stopped on the valid press"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // [I'm stuck]
 // ---------------------------------------------------------------------------
 
@@ -927,18 +1016,31 @@ impl FormGate {
     }
 
     async fn press(&self, action: &str) {
-        let nonce = self
-            .state
-            .lock()
-            .unwrap()
-            .kv_get("setup_cb_nonce")
-            .unwrap()
-            .expect("setup cb nonce");
+        // Review round 1 (F1): echo a RENDERED button's callback_data —
+        // never reconstruct the signed triple from state.
+        let wanted = |data: &str| {
+            data.split(':').next() == Some(gate::telegram::setup::SETUP_FLOW)
+                && data.rsplit(':').next() == Some(action)
+        };
+        let data = self
+            .fake
+            .edits()
+            .iter()
+            .rev()
+            .find_map(|(_, req)| req.inline_buttons.iter().find(|(_, d)| wanted(d)).map(|(_, d)| d.clone()))
+            .or_else(|| {
+                self.fake
+                    .sent()
+                    .iter()
+                    .rev()
+                    .find_map(|req| req.inline_buttons.iter().find(|(_, d)| wanted(d)).map(|(_, d)| d.clone()))
+            })
+            .unwrap_or_else(|| panic!("no rendered setup button for action '{action}'"));
         let update = Update {
             sender_id: Some(CHAT),
             callback: Some(gate::telegram::Callback {
                 id: "cbq-1".to_string(),
-                data: format!("setup:{nonce}:{action}"),
+                data,
                 from_id: CHAT,
             }),
             message_ref: Some(MsgRef {
