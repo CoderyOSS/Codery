@@ -10,6 +10,7 @@
 #   browser  playwright headless browser backend — agent browser automation
 #   design   opendesign design workspace (opendesign.<domain>)
 #   db       dbgate     database client (dbgate.<domain>)
+#   gag      gitauthgate GitHub gate (gag.<domain>)
 #
 # Degrades gracefully: a tool that isn't in the list simply doesn't exist —
 # paseo's browser tools fail fast, opendesign previews error until `browser`
@@ -42,6 +43,10 @@ services:
       PLAYWRIGHT_WS_ENDPOINT: ws://playwright:3000/
       # dockhand.* agent MCP credential
       DOCKHAND_API_TOKEN: ${DOCKHAND_API_TOKEN:-}
+      # gate agent wiring (GATE-001): activates only when the stack .env sets GATE_AGENT_HOST/TOKEN (gag profile)
+      GH_HOST: ${GATE_AGENT_HOST:-}
+      GITHUB_ENTERPRISE_TOKEN: ${GATE_AGENT_TOKEN:-}
+      GIT_TERMINAL_PROMPT: "0"
     ports:
       - "127.0.0.1:6767:6767"
       - "${TAILNET_IP:?set TAILNET_IP in stack .env}:2222:2023"
@@ -133,6 +138,35 @@ services:
       - /opt/codery/github-app.pem:/run/secrets/github-app.pem:ro
     networks:
       codery-net: {}
+
+  gitauthgate:
+    # GATE_IMAGE points at a locally built tag — see
+    # docs/guides/gitauthgate-setup.md. The image is one static musl binary
+    # (no git, no shell), so building on-host (docker build -t
+    # codery-gate:<date> images/gate) is cheap and needs no registry auth.
+    # Config model (GATE-001/009, opendesign placement): secrets
+    # (GATE_TOKEN_ENC_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWLIST,
+    # GATE_MACHINE_LOGIN) come from /opt/codery/.env via env_file; routing
+    # values are pinned here. The 23080 loopback publish is for host-side
+    # curl checks only — Zoraxy reaches the container by DNS alias.
+    image: ${GATE_IMAGE:?set GATE_IMAGE in stack .env}
+    container_name: gitauthgate
+    restart: unless-stopped
+    profiles: [gag]
+    env_file:
+      - /opt/codery/.env
+    environment:
+      # empty ⇒ fallback mode: internal alias http://gitauthgate:8080 (GATE-001)
+      GATE_PUBLIC_URL: https://gag.${DOMAIN_NAME:?set DOMAIN_NAME in stack .env}
+      GATE_LISTEN_ADDR: 0.0.0.0:8080
+      GATE_POLICY_PATH: /data/policy.toml
+    ports:
+      - "127.0.0.1:23080:8080"
+    volumes:
+      - /opt/codery/data/gate:/data
+    networks:
+      codery-net:
+        aliases: [gitauthgate]
 
   dbgate:
     image: dbgate/dbgate:latest
