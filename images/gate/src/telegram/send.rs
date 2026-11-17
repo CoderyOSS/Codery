@@ -90,6 +90,15 @@ impl SendRequest {
     }
 
     /// Pin the message as a reply to `to` (and target its chat on sends).
+    ///
+    /// Gate-initiated asks use a zero `message_id` (there is no message to
+    /// reply to yet): the anchor still routes the send to `chat_id`, but
+    /// NO reply parameter may reach Telegram's API — a bogus
+    /// `reply_to_message_id` would make real `sendMessage` calls fail (the
+    /// in-memory test fakes accept anything, so only the wire format pins
+    /// this). The omission lives in `TelegramClient::send_body`, which
+    /// serializes `reply_to_message_id` only for `message_id > 0`; the
+    /// tests below pin both shapes.
     pub fn replying_to(mut self, to: MsgRef) -> Self {
         self.reply_to = Some(to);
         self
@@ -147,7 +156,7 @@ mod tests {
 
     #[test]
     fn html_sets_parse_mode_and_plain_text_leaves_it_off() {
-        let rich = SendRequest::html("<b>Settings → Emails</b>");
+        let rich = SendRequest::html("<b>bold</b>");
         assert_eq!(rich.parse_mode.as_deref(), Some("HTML"));
         // Button helpers must preserve the parse mode.
         let with_buttons = rich.with_link_button("Open", "https://example.com");
@@ -155,5 +164,33 @@ mod tests {
 
         let plain = SendRequest::text("plain");
         assert_eq!(plain.parse_mode, None, "legacy plain sends carry no parse mode");
+    }
+
+    // -- zero reply anchors must serialize WITHOUT reply parameters (F2) --
+
+    #[test]
+    fn zero_anchor_serializes_without_reply_to_message_id() {
+        // Gate-initiated ask: anchor names only the chat (message_id 0).
+        let fresh = SendRequest::text("ask").replying_to(MsgRef {
+            chat_id: -42,
+            message_id: 0,
+        });
+        let body = crate::telegram::TelegramClient::send_body(&fresh, -42);
+        assert_eq!(body["chat_id"], -42, "the anchor still routes the chat");
+        assert!(
+            body.get("reply_to_message_id").is_none(),
+            "a zero anchor must NOT produce a reply parameter: {body}"
+        );
+    }
+
+    #[test]
+    fn nonzero_anchor_serializes_with_reply_to_message_id() {
+        let reply = SendRequest::text("reply").replying_to(MsgRef {
+            chat_id: -42,
+            message_id: 7,
+        });
+        let body = crate::telegram::TelegramClient::send_body(&reply, -42);
+        assert_eq!(body["reply_to_message_id"], 7, "{body}");
+        assert_eq!(body["chat_id"], -42);
     }
 }

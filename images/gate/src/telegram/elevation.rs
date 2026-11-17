@@ -685,6 +685,50 @@ fn success_text(login: &str, repo: &str, needed: Role, temporary: bool, back_to:
     text
 }
 
+// -- the personal-repo ceiling (GATE-010 §9.3) ---------------------------------
+
+/// The agent-facing message for a Maintain/Admin need on a personal repo:
+/// the shape is the `role_unavailable` envelope; the text explains why no
+/// elevation can exist and what happens instead.
+pub fn diy_agent_message(repo: &str, needed: Role) -> String {
+    format!(
+        "insufficient role: this operation needs '{needed}', but {repo} is a \
+         personal repo — GitHub offers role tiers only on organization repos, \
+         so no elevation can grant it. The operator must perform this action \
+         themselves (DIY instructions were sent to the control plane)."
+    )
+}
+
+/// The operator's DIY instructions (plain words, GATE-010 §9.3): the one
+/// thing the machine account can never be granted, and what to do instead.
+pub fn diy_text(repo: &str, needed: Role, path: &str) -> String {
+    format!(
+        "⚠️ The agent needed {needed} on {repo} ({path}), but {repo} is a \
+         personal repo — GitHub only offers role choices on org repos, so \
+         the machine account can never hold {needed} there. No elevation \
+         was opened.\n\nPlease do this one yourself on github.com: \
+         personal-repo owners can perform {needed}-tier actions (settings, \
+         topics, Pages) directly in the web UI. Everything below {needed} \
+         still works for the agent."
+    )
+}
+
+/// Best-effort delivery of the DIY instructions to the operator chat.
+/// Fire-and-forget: the agent's `role_unavailable` answer is the binding
+/// semantic; a failed/absent channel must not change it.
+pub async fn maybe_send_diy(
+    notify: &Option<(Arc<dyn TelegramApi>, i64)>,
+    repo: &str,
+    needed: Role,
+    path: &str,
+) {
+    let _ = crate::tasks::send_notice(
+        notify,
+        SendRequest::text(diy_text(repo, needed, path)),
+    )
+    .await;
+}
+
 // -- button handler ---------------------------------------------------------------
 
 const ACTION_GRANT: &str = "grant";

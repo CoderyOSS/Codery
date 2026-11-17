@@ -80,6 +80,11 @@ pub struct ApiDeps {
     /// `None` (no bot configured, or unit tests) ⇒ the error mapping
     /// alone, no offer message.
     pub offer: Option<crate::telegram::grant::GrantOfferDeps>,
+    /// Personal-repo ceiling channel (GATE-010 §9.3): where the DIY
+    /// instructions go when a Maintain/Admin need lands on a personal
+    /// repo (no elevation flow can exist there). `None` ⇒ the denial
+    /// alone.
+    pub elevation_notify: Option<(Arc<dyn crate::telegram::TelegramApi>, i64)>,
 }
 
 impl ApiDeps {
@@ -103,6 +108,7 @@ impl ApiDeps {
             approval_timeout,
             http,
             offer: None,
+            elevation_notify: None,
         })
     }
 }
@@ -259,6 +265,19 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
             if let Some(row) = row {
                 let granted = role_from_name(&row.granted_role).unwrap_or(Role::None);
                 if granted < needed {
+                    if let Some(resp) = personal_repo_ceiling(
+                        gs,
+                        &deps,
+                        &agent_name,
+                        owner,
+                        &repo_label,
+                        &format!("/{rest}"),
+                        needed,
+                    )
+                    .await
+                    {
+                        return resp;
+                    }
                     let id = {
                         let guard =
                             gs.state.lock().expect("state lock must be poison-free");
@@ -306,6 +325,19 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
                     // let forwarding surface the real error.
                     Err(RepoAccessError::Upstream(_)) => {}
                     Ok(access) if access.role < needed => {
+                        if let Some(resp) = personal_repo_ceiling(
+                            gs,
+                            &deps,
+                            &agent_name,
+                            owner,
+                            &repo_label,
+                            &format!("/{rest}"),
+                            needed,
+                        )
+                        .await
+                        {
+                            return resp;
+                        }
                         let id = {
                             let guard = gs
                                 .state
@@ -592,6 +624,49 @@ fn log_rolemap_contradiction(
         ),
         approver: None,
     });
+}
+
+/// The personal-repo ceiling (GATE-010 §9.3): a Maintain/Admin need on a
+/// personal repo CANNOT be elevated — GitHub offers role tiers only on
+/// org repos, so no flow may exist. Returns `Some(response)` when the
+/// ceiling applies: the agent gets the exact `role_unavailable` shape
+/// (error + message, no elevation_id) and the operator gets the DIY
+/// instructions. `None` ⇒ the need is below Maintain, or the owner is an
+/// org, and elevation proceeds normally. The /orgs probe runs only for
+/// Maintain/Admin needs (Write-tier gaps never consult it).
+async fn personal_repo_ceiling(
+    gs: &GateState,
+    deps: &ApiDeps,
+    agent: &str,
+    owner: &str,
+    repo_label: &str,
+    path: &str,
+    needed: Role,
+) -> Option<Response> {
+    if needed < Role::Maintain {
+        return None;
+    }
+    if deps.platform.owner_is_org(owner).await {
+        return None;
+    }
+    crate::telegram::elevation::maybe_send_diy(&deps.elevation_notify, repo_label, needed, path)
+        .await;
+    audit_api(
+        &gs.audit,
+        agent,
+        repo_label,
+        "deny",
+        &format!(
+            "preflight: personal-repo ceiling — {} cannot be granted on a personal repo; DIY instructions sent",
+            role_name(needed)
+        ),
+    );
+    Some(
+        AgentError::RoleUnavailable {
+            message: crate::telegram::elevation::diy_agent_message(repo_label, needed),
+        }
+        .into_response(),
+    )
 }
 
 /// Elevation status endpoint: `{"id","state",...}` from the `flows` table

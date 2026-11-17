@@ -313,6 +313,10 @@ mod tests {
             unimplemented!("not used by registry tests")
         }
 
+        async fn owner_is_org(&self, _: &str) -> bool {
+            unimplemented!("not used by registry tests")
+        }
+
         async fn user_login(&self) -> Option<String> {
             unimplemented!("not used by registry tests")
         }

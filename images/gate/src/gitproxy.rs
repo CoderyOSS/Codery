@@ -355,6 +355,11 @@ pub struct GitDeps {
     pub machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     pub approval_timeout: Duration,
     pub http: Client,
+    /// Personal-repo ceiling channel (GATE-010 §9.3): where the DIY
+    /// instructions go if a push ever needed a tier a personal repo cannot
+    /// grant (every ref-update class is Write today, so this is enforced
+    /// for map evolution — see `preflight_role_gate`).
+    pub elevation_notify: Option<(Arc<dyn crate::telegram::TelegramApi>, i64)>,
 }
 
 impl GitDeps {
@@ -379,6 +384,7 @@ impl GitDeps {
             machine_token,
             approval_timeout,
             http,
+            elevation_notify: None,
         })
     }
 
@@ -466,6 +472,7 @@ fn err_response() -> Response {
 /// forward.
 async fn preflight_role_gate(
     gs: &GateState,
+    deps: &GitDeps,
     agent: &str,
     repo_full: &str,
     own_sphere: bool,
@@ -487,6 +494,56 @@ async fn preflight_role_gate(
     let needed = min_role(Action::Git(ActionClass::Push));
     if granted >= needed {
         return None;
+    }
+    // Personal-repo ceiling (GATE-010 §9.3): Maintain/Admin needs on
+    // personal repos cannot be elevated — no flow, a git-friendly ERR that
+    // says the operator must do it themselves, plus the DIY notice.
+    // Unreachable with today's all-Write git map (the tier check
+    // short-circuits before the /orgs probe), enforced so a map change
+    // can never open impossible flows.
+    if needed >= Role::Maintain {
+        let (owner, _) = repo_full
+            .split_once('/')
+            .expect("repo_full is owner/repo");
+        if !deps.platform.owner_is_org(owner).await {
+            crate::telegram::elevation::maybe_send_diy(
+                &deps.elevation_notify,
+                repo_full,
+                needed,
+                "git-receive-pack",
+            )
+            .await;
+            audit_push(
+                &gs.audit,
+                agent,
+                repo_full,
+                "deny",
+                &format!(
+                    "preflight: personal-repo ceiling — {} cannot be granted on a personal repo; DIY instructions sent",
+                    role_name(needed)
+                ),
+            );
+            let msg = format!(
+                "ERR role_unavailable needs_role={} — {} is a personal repo: \
+                 role tiers cannot be granted there; the operator must \
+                 perform this action themselves\n",
+                role_name(needed),
+                repo_full
+            );
+            let mut body = pkt_line(msg.as_bytes());
+            body.extend_from_slice(b"0000");
+            return Some(
+                (
+                    StatusCode::FORBIDDEN,
+                    [(
+                        header::CONTENT_TYPE,
+                        "application/x-git-receive-pack-result",
+                    )],
+                    body,
+                )
+                    .into_response(),
+            );
+        }
     }
     let id = {
         let guard = gs.state.lock().expect("state lock must be poison-free");
@@ -796,7 +853,7 @@ async fn receive_pack(
                         "approval: approved",
                     );
                     if let Some(resp) =
-                        preflight_role_gate(&gs, &agent_name, &repo_full, own_sphere).await
+                        preflight_role_gate(&gs, &deps, &agent_name, &repo_full, own_sphere).await
                     {
                         return resp;
                     }
@@ -829,7 +886,7 @@ async fn receive_pack(
             let basis = format!("policy: allow; classes: {}", classes.join("+"));
             audit_push(&gs.audit, &agent_name, &repo_full, "forward", &basis);
             if let Some(resp) =
-                preflight_role_gate(&gs, &agent_name, &repo_full, own_sphere).await
+                preflight_role_gate(&gs, &deps, &agent_name, &repo_full, own_sphere).await
             {
                 return resp;
             }

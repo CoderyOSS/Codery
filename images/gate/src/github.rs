@@ -51,6 +51,14 @@ pub trait Platform: Send + Sync {
     /// 200 with `state == "active"` is false (fail closed).
     async fn org_member(&self, org: &str) -> bool;
 
+    /// Is `owner` an organization at all (`GET /orgs/{owner}` visible)?
+    /// 200 ⇒ true; 404 (personal user) or ANY other status/transport
+    /// failure ⇒ false — the GATE-010 §9.3 personal-repo ceiling fails
+    /// closed to "personal", which routes Maintain/Admin needs to DIY
+    /// instructions instead of an elevation flow that could never be
+    /// granted (personal repos offer no role tiers).
+    async fn owner_is_org(&self, owner: &str) -> bool;
+
     /// Verify the machine credential at request time: GET /user with the
     /// custody token. `None` when custody is empty or the upstream rejects
     /// the token — the API proxy forwards NOTHING in that state.
@@ -496,6 +504,17 @@ impl Platform for GitHubPlatform {
             Ok(m) => m.state == "active",
             Err(_) => false,
         }
+    }
+
+    async fn owner_is_org(&self, owner: &str) -> bool {
+        let Ok(url) = self.api_base.join(&format!("orgs/{owner}")) else {
+            return false;
+        };
+        let response = match self.authorize(self.client.get(url)).send().await {
+            Ok(response) => response,
+            Err(_) => return false,
+        };
+        response.status() == StatusCode::OK
     }
 
     async fn user_login(&self) -> Option<String> {
@@ -1539,6 +1558,46 @@ mod tests {
             "missing plan field ⇒ None"
         );
         assert_eq!(p.org_plan_note("junk").await, None, "unparsable ⇒ None");
+    }
+
+    #[tokio::test]
+    async fn owner_is_org_true_only_on_a_200_orgs_answer() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/orgs/acme"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"login":"acme"}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/orgs/rob"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"message":"Not Found"}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/orgs/down"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let p = platform_at(&server);
+        assert!(p.owner_is_org("acme").await, "200 ⇒ org");
+        assert!(!p.owner_is_org("rob").await, "404 ⇒ personal owner");
+        assert!(!p.owner_is_org("down").await, "anything else ⇒ fail closed to personal");
+    }
+
+    #[tokio::test]
+    async fn owner_is_org_transport_error_is_false() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        drop(server);
+        let p = GitHubPlatform::with_bases(
+            Url::parse(&uri).unwrap(),
+            Url::parse("http://git.example.internal/").unwrap(),
+            Arc::new(|| None),
+        );
+        assert!(
+            !p.owner_is_org("anyone").await,
+            "dead upstream ⇒ fail closed to personal"
+        );
     }
 
     #[test]

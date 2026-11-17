@@ -102,7 +102,13 @@ impl Drop for H {
 /// Test-scale elevation durations. `batch`/`poll` are per-call so the
 /// batching test can widen the window while the transitions test widens the
 /// verify cadence (making AWAITING_ROLE_CHANGE observable at the endpoint).
+/// `org` decides whether `GET /orgs/acme` answers 200 (org repo) or 404
+/// (personal repo — the GATE-010 §9.3 ceiling path).
 async fn spawn_gate(batch: Duration, poll: Duration) -> H {
+    spawn_gate_in(batch, poll, true).await
+}
+
+async fn spawn_gate_in(batch: Duration, poll: Duration, org: bool) -> H {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -118,6 +124,13 @@ async fn spawn_gate(batch: Duration, poll: Duration) -> H {
         )
         .mount(&upstream)
         .await;
+    if org {
+        Mock::given(method("GET"))
+            .and(path("/orgs/acme"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"login":"acme"}"#))
+            .mount(&upstream)
+            .await;
+    }
 
     let db_path = dir.join("gate.db");
     let db = DbState::open(db_path.to_str().unwrap()).unwrap();
@@ -170,7 +183,7 @@ async fn spawn_gate(batch: Duration, poll: Duration) -> H {
         Arc::new(gate::telegram::elevation::ElevationHandler::new(deps)),
     );
 
-    let git = GitDeps::new(
+    let mut git = GitDeps::new(
         state.clone(),
         platform.clone(),
         policy.clone(),
@@ -180,7 +193,8 @@ async fn spawn_gate(batch: Duration, poll: Duration) -> H {
         APPROVAL_TIMEOUT,
     )
     .unwrap();
-    let api = ApiDeps::new(
+    git.elevation_notify = Some((tg_api.clone(), CHAT));
+    let mut api = ApiDeps::new(
         state.clone(),
         platform.clone(),
         policy,
@@ -189,6 +203,7 @@ async fn spawn_gate(batch: Duration, poll: Duration) -> H {
         APPROVAL_TIMEOUT,
     )
     .unwrap();
+    api.elevation_notify = Some((tg_api.clone(), CHAT));
 
     let mut gate_state = GateState::with_git(state.clone(), audit, git);
     gate_state.api = Some(Arc::new(api));
@@ -458,6 +473,81 @@ async fn held_api_mutation_needing_maintain_fails_fast_without_upstream() {
             .all(|r| r.url.path() != "/repos/acme/api/topics"
                 && r.url.path() != "/repos/acme/api"),
         "the mutation and the permissions probe must not be forwarded: {requests:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Personal-repo ceiling (GATE-010 §9.3): a Maintain/Admin need on a
+//     personal repo CANNOT be elevated — role_unavailable, no flow, DIY
+//     instructions.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn personal_repo_maintain_need_is_role_unavailable_without_a_flow() {
+    let h = spawn_gate_in(Duration::from_millis(100), Duration::from_millis(20), false).await;
+    h.grant_role("read");
+
+    let resp = h
+        .send("PUT", "/api/v3/repos/acme/api/topics", br#"{"names":["go"]}"#)
+        .await;
+    assert_eq!(resp.status(), 403);
+    let v = H::body_json(resp).await;
+    // Exact role_unavailable shape: error + message, nothing else (no
+    // elevation_id, no needs_role — there IS no elevation to poll).
+    assert_eq!(v["error"], "role_unavailable", "{v}");
+    let message = v["message"].as_str().expect("message").to_string();
+    assert!(message.contains("acme/api"), "{message}");
+    assert!(message.contains("Maintain"), "{message}");
+    assert!(message.contains("personal"), "{message}");
+    assert_eq!(
+        v.as_object().unwrap().len(),
+        2,
+        "exact shape: {{error, message}} — {v}"
+    );
+
+    // NO flow was opened, and no consent conversation started.
+    assert!(
+        h.flow_states().is_empty(),
+        "personal repos never open elevation flows: {:?}",
+        h.flow_states()
+    );
+    assert!(h.sent_with("Role elevation needed").is_empty());
+
+    // The operator gets the DIY instructions instead.
+    let diy = h.sent_with("do this one yourself");
+    assert_eq!(diy.len(), 1, "one DIY notice: {:?}", h.fake.sent());
+    assert!(diy[0].text.contains("acme/api"), "{}", diy[0].text);
+    assert!(diy[0].text.contains("Maintain"), "{}", diy[0].text);
+
+    // The org check ran exactly once — and nothing else left the gate.
+    wait_until(|| async { !h.upstream_requests().await.is_empty() }).await;
+    let requests = h.upstream_requests().await;
+    let org_calls: Vec<_> = requests
+        .iter()
+        .filter(|r| r.url.path() == "/orgs/acme")
+        .collect();
+    assert_eq!(org_calls.len(), 1, "one /orgs probe: {requests:?}");
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.url.path() != "/repos/acme/api/topics" && r.url.path() != "/repos/acme/api"),
+        "the mutation must not be forwarded: {requests:?}"
+    );
+
+    // The denial is audited as a pre-flight deny.
+    let audit = h.audit_lines();
+    let api: Vec<_> = audit
+        .iter()
+        .filter(|l| l["action"] == "api.request")
+        .collect();
+    assert!(
+        api.iter()
+            .any(|l| l["decision"] == "deny"
+                && l["basis"]
+                    .as_str()
+                    .unwrap()
+                    .contains("personal-repo ceiling")),
+        "{api:?}"
     );
 }
 

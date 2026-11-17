@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
             _ => None,
         };
 
-    let git = GitDeps::new(
+    let mut git = GitDeps::new(
         state.clone(),
         platform.clone(),
         policy.clone(),
@@ -110,6 +110,9 @@ async fn main() -> anyhow::Result<()> {
         machine_token.clone(),
         Duration::from_secs(APPROVAL_TIMEOUT_SECS),
     )?;
+    // Personal-repo ceiling channel (GATE-010 §9.3): Maintain/Admin needs
+    // on personal repos get DIY instructions instead of an elevation flow.
+    git.elevation_notify = telegram_notify.clone();
 
     // The API proxy shares every dependency with the git proxy: one
     // platform (single place holding api_base + token custody), one
@@ -130,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
         notify: telegram_notify.clone(),
         machine_login: machine_login.clone(),
     });
+    api.elevation_notify = telegram_notify.clone();
 
     // Machine-token lifecycle (GATE-004 §6.3): the master forwarding
     // switch is created here and shared by the gate state and the
