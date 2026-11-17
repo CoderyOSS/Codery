@@ -41,6 +41,13 @@ impl State {
         Ok(state)
     }
 
+    /// Crate-internal handle on the shared connection, so companion modules
+    /// (e.g. the token store) can run their SQL against the same database
+    /// without a second handle.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Apply migration steps with a schema version higher than the recorded
     /// one, then record the new version. Safe to run any number of times.
     fn migrate(&self) -> anyhow::Result<()> {
