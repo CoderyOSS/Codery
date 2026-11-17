@@ -240,6 +240,33 @@ impl State {
         Ok(())
     }
 
+    /// Every registry row, ordered by repo — the sweep's work list and
+    /// /status's rows.
+    pub fn registry_all(&self) -> anyhow::Result<Vec<RegistryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT repo, granted_role, intended_role, via, last_verified_at
+             FROM registry ORDER BY repo",
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            Ok(RegistryRow {
+                repo: r.get(0)?,
+                granted_role: r.get(1)?,
+                intended_role: r.get(2)?,
+                via: r.get(3)?,
+                last_verified_at: r.get(4)?,
+            })
+        })?;
+        Ok(mapped.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Delete a registry row; true when a row existed.
+    pub fn registry_delete(&self, repo: &str) -> anyhow::Result<bool> {
+        let deleted = self
+            .conn
+            .execute("DELETE FROM registry WHERE repo = ?1", [repo])?;
+        Ok(deleted > 0)
+    }
+
     /// Insert or refresh a control-flow row (`flows`): elevations, setup
     /// runs, and everything a control plane tracks across restarts.
     pub fn flow_insert(
@@ -365,6 +392,24 @@ mod tests {
         assert_eq!(row.granted_role, "write");
         assert_eq!(row.intended_role, "maintain");
         assert_eq!(row.via, "oauth-web");
+    }
+
+    #[test]
+    fn registry_all_lists_rows_ordered_and_delete_removes() {
+        let s = State::open(":memory:").unwrap();
+        assert!(s.registry_all().unwrap().is_empty());
+        s.registry_upsert("acme/beta", "write", "write", "collaborator").unwrap();
+        s.registry_upsert("acme/alpha", "read", "read", "org_team").unwrap();
+        let rows = s.registry_all().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].repo, "acme/alpha", "ordered by repo");
+        assert_eq!(rows[1].repo, "acme/beta");
+
+        assert!(s.registry_delete("acme/alpha").unwrap(), "delete hits");
+        assert!(!s.registry_delete("acme/alpha").unwrap(), "second delete misses");
+        let rows = s.registry_all().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].repo, "acme/beta");
     }
 
     #[test]

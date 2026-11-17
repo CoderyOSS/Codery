@@ -1,5 +1,21 @@
 use serde::Deserialize;
 
+impl std::fmt::Display for Role {
+    /// Capitalized role word for human text (notices, /status); storage
+    /// names stay lowercase via `rolemapping::role_name`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let word = match self {
+            Role::None => "None",
+            Role::Read => "Read",
+            Role::Triage => "Triage",
+            Role::Write => "Write",
+            Role::Maintain => "Maintain",
+            Role::Admin => "Admin",
+        };
+        f.write_str(word)
+    }
+}
+
 /// Classification of a git receive-pack ref update (GATE-005).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionClass {
@@ -61,6 +77,16 @@ mod tests {
         // The comparisons a policy will actually write.
         assert!(Role::Write > Role::Read);
         assert!(Role::Admin > Role::Write);
+    }
+
+    #[test]
+    fn role_display_is_the_capitalized_word() {
+        assert_eq!(Role::None.to_string(), "None");
+        assert_eq!(Role::Read.to_string(), "Read");
+        assert_eq!(Role::Triage.to_string(), "Triage");
+        assert_eq!(Role::Write.to_string(), "Write");
+        assert_eq!(Role::Maintain.to_string(), "Maintain");
+        assert_eq!(Role::Admin.to_string(), "Admin");
     }
 }
 

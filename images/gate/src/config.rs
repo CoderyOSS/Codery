@@ -6,6 +6,20 @@ use anyhow::Context;
 /// `GATE_MAX_BODY_BYTES` is unset, blank or unparsable.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 536_870_912;
 
+/// Default registry sweep cadence in seconds (30 min, GATE-010), used when
+/// `GATE_REGISTRY_SWEEP_SECS` is unset, blank or unparsable.
+pub const DEFAULT_REGISTRY_SWEEP_SECS: u64 = 30 * 60;
+
+/// Parse `GATE_REGISTRY_SWEEP_SECS`; unset/blank/garbage/zero ⇒ the 30-min
+/// default (a misparse must not disable the sweep).
+fn sweep_secs_from(v: Option<&str>) -> u64 {
+    v.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(DEFAULT_REGISTRY_SWEEP_SECS)
+}
+
 /// Parse `GATE_MAX_BODY_BYTES`; unset/blank/garbage ⇒ the 512 MiB default
 /// (never zero — a misparse must not disable every proxied request).
 fn max_body_bytes_from(v: Option<&str>) -> usize {
@@ -41,6 +55,9 @@ pub struct Config {
     /// with a bot token configured ⇒ asks cannot be delivered: approval
     /// `present` errors and holds are denied — fail closed.
     pub telegram_chat_id: Option<i64>,
+    /// Registry sweep cadence in seconds (`GATE_REGISTRY_SWEEP_SECS`,
+    /// default 1800).
+    pub registry_sweep_secs: u64,
 }
 
 /// Bot token as `Some` only when set and non-blank; blank ⇒ `None` (no
@@ -102,6 +119,9 @@ impl Config {
                 env::var("TELEGRAM_ALLOWLIST").ok().as_deref(),
             ),
             telegram_chat_id: chat_id_from(env::var("TELEGRAM_CHAT_ID").ok().as_deref()),
+            registry_sweep_secs: sweep_secs_from(
+                env::var("GATE_REGISTRY_SWEEP_SECS").ok().as_deref(),
+            ),
         })
     }
 
@@ -218,5 +238,26 @@ mod tests {
         assert_eq!(chat_id_from(Some("junk")), None);
         assert_eq!(chat_id_from(Some(" -100200 ")), Some(-100_200));
         assert_eq!(chat_id_from(Some("42")), Some(42));
+    }
+
+    #[test]
+    fn sweep_secs_defaults_when_unset_or_garbage_or_zero() {
+        assert_eq!(sweep_secs_from(None), DEFAULT_REGISTRY_SWEEP_SECS);
+        assert_eq!(sweep_secs_from(Some("")), DEFAULT_REGISTRY_SWEEP_SECS);
+        assert_eq!(sweep_secs_from(Some("   ")), DEFAULT_REGISTRY_SWEEP_SECS);
+        assert_eq!(sweep_secs_from(Some("junk")), DEFAULT_REGISTRY_SWEEP_SECS);
+        assert_eq!(
+            sweep_secs_from(Some("0")),
+            DEFAULT_REGISTRY_SWEEP_SECS,
+            "zero would disable the sweep — never honored"
+        );
+    }
+
+    #[test]
+    fn sweep_secs_parses_plain_integers_and_defaults_to_30_min() {
+        assert_eq!(DEFAULT_REGISTRY_SWEEP_SECS, 1800);
+        assert_eq!(sweep_secs_from(Some("1800")), 1800);
+        assert_eq!(sweep_secs_from(Some(" 5 ")), 5, "test override");
+        assert_eq!(sweep_secs_from(Some("3600")), 3600);
     }
 }

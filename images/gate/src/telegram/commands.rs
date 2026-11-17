@@ -22,7 +22,7 @@ use async_trait::async_trait;
 
 use crate::approval::list_unresolved;
 use crate::audit::{Audit, AuditEntry};
-use crate::state::{self, State};
+use crate::state::{self, RegistryRow, State};
 use crate::telegram::send::SendRequest;
 use crate::telegram::{TelegramApi, Update, UpdateHandler};
 use crate::tokens::TokenStore;
@@ -308,10 +308,18 @@ impl Commands {
         if registry.is_empty() {
             text.push_str(" (none)");
         }
-        for (repo, granted, intended, via) in &registry {
-            text.push_str(&format!(
-                "\n- {repo}: granted {granted} (intended {intended}) via {via}"
-            ));
+        for row in &registry {
+            if row.granted_role == "none" {
+                text.push_str(&format!(
+                    "\n- {}: access removed (intended {}) via {} verified {}",
+                    row.repo, row.intended_role, row.via, row.last_verified_at
+                ));
+            } else {
+                text.push_str(&format!(
+                    "\n- {}: granted {} (intended {}) via {} verified {}",
+                    row.repo, row.granted_role, row.intended_role, row.via, row.last_verified_at
+                ));
+            }
         }
         text.push_str(&format!("\nopen flows: {flows}"));
         (text, Vec::new())
@@ -320,19 +328,8 @@ impl Commands {
 
 /// Registry rows for /status; any DB hiccup renders as "no rows" — status
 /// is informational and must never panic.
-fn registry_rows(guard: &State) -> Vec<(String, String, String, String)> {
-    let Ok(mut stmt) = guard.conn().prepare(
-        "SELECT repo, granted_role, intended_role, via FROM registry ORDER BY repo",
-    ) else {
-        return Vec::new();
-    };
-    let mapped = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    });
-    match mapped {
-        Ok(rows) => rows.collect::<Result<Vec<_>, _>>().unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+fn registry_rows(guard: &State) -> Vec<RegistryRow> {
+    guard.registry_all().unwrap_or_default()
 }
 
 /// `owner/repo` shape check mirroring the proxy's path grammar: a single
@@ -422,5 +419,47 @@ mod tests {
         assert!(!valid_token_name("../traversal"), "slash rejected");
         assert!(!valid_token_name(&"a".repeat(65)), "65 chars rejected");
         assert!(valid_token_name(&"a".repeat(64)), "64 chars accepted");
+    }
+
+    #[test]
+    fn status_shows_last_verified_per_repo_and_removals() {
+        let state = Arc::new(Mutex::new(
+            State::open(":memory:").expect("open"),
+        ));
+        {
+            let guard = state.lock().unwrap();
+            guard
+                .registry_upsert("acme/api", "write", "write", "collaborator")
+                .unwrap();
+            guard
+                .registry_upsert("acme/gone", "none", "write", "collaborator")
+                .unwrap();
+        }
+        let audit_path = std::env::temp_dir().join(format!(
+            "gate-status-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let deps = Arc::new(CommandDeps {
+            state,
+            audit: Arc::new(Audit::open(&audit_path)),
+            machine_token: Arc::new(|| None),
+            lifecycle: None,
+        });
+        let commands = Commands { deps };
+        let (text, buttons) = commands.status_reply();
+        assert!(buttons.is_empty());
+        assert!(
+            text.contains("acme/api: granted write (intended write) via collaborator verified"),
+            "each registry row carries its last_verified_at: {text}"
+        );
+        assert!(
+            text.contains("acme/gone: access removed (intended write) via collaborator verified"),
+            "a granted_role=none row renders as access removed: {text}"
+        );
+        let _ = std::fs::remove_file(&audit_path);
     }
 }

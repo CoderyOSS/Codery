@@ -12,6 +12,7 @@ use gate::github::GitHubPlatform;
 use gate::gitproxy::GitDeps;
 use gate::onepage::OnePageDeps;
 use gate::policy::{PolicyEngine, PolicyFile};
+use gate::registry::{run_registry_sweep, RegistryDeps};
 use gate::routes::{self, GateState};
 use gate::state::State as DbState;
 use gate::tasks::{run_daily_loop, startup_check, DAILY_INTERVAL, LifecycleDeps};
@@ -228,6 +229,22 @@ async fn main() -> anyhow::Result<()> {
         (*lifecycle_deps).clone(),
         lifecycle_shutdown_rx,
         DAILY_INTERVAL,
+    ));
+
+    // Registry re-check cadence (GATE-010): every registry row is
+    // re-verified every 30 min (`GATE_REGISTRY_SWEEP_SECS` shrinks it for
+    // tests); role drops land in the registry + one Telegram notice each.
+    let registry_deps = Arc::new(RegistryDeps {
+        state: state.clone(),
+        platform: platform.clone(),
+        machine_login: machine_login.clone(),
+        notify: telegram_notify.clone(),
+    });
+    let (_registry_shutdown_tx, registry_shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(run_registry_sweep(
+        (*registry_deps).clone(),
+        registry_shutdown_rx,
+        Duration::from_secs(cfg.registry_sweep_secs),
     ));
 
     let app = routes::router(gate_state);

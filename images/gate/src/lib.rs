@@ -13,6 +13,8 @@ pub mod gitproxy;
 pub mod onepage;
 pub mod pktline;
 pub mod policy;
+pub mod registry;
+pub mod rolemapping;
 pub mod routes;
 pub mod sphere;
 pub mod state;

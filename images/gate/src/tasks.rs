@@ -122,8 +122,9 @@ pub fn check_failed_text(err: &VerifyError, expected_login: &str) -> String {
 /// notices) may ignore the result — checks never crash on notification
 /// problems — but CALLERS THAT MARK DELIVERY IN KV (the expiry-reminder
 /// sweep) must write their marker only on `Ok`, so an undelivered notice
-/// stays eligible and the next sweep retries it.
-async fn send_notice(
+/// stays eligible and the next sweep retries it. Shared with the registry
+/// sweep's role-drop notices (`registry.rs`).
+pub(crate) async fn send_notice(
     notify: &Option<(Arc<dyn TelegramApi>, i64)>,
     req: SendRequest,
 ) -> anyhow::Result<()> {
