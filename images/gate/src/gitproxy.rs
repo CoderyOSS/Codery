@@ -265,10 +265,22 @@ pub async fn plan_push(
                     ActionClass::ForcePush,
                     policy.decide(repo, ActionClass::ForcePush, own_sphere),
                 ),
-                // GATE-005: a compare the upstream could not answer is
-                // never guessed into an allow — the ref is labelled
-                // force-push and forced into the hold path below.
-                Ancestry::Unknown => (ActionClass::ForcePush, Decision::Approve),
+                // Policy deny is the standing authority: consult it even on
+                // an Unknown compare, and never hold a ref the config
+                // denies — human approval permits exceptional ops, it can
+                // never override an explicit deny. Without a deny,
+                // GATE-005 still applies: a compare the upstream could not
+                // answer is never guessed into an allow, so the ref is
+                // labelled force-push and holds below.
+                Ancestry::Unknown => {
+                    let denied =
+                        policy.decide(repo, ActionClass::ForcePush, own_sphere)
+                            == Decision::Deny;
+                    (
+                        ActionClass::ForcePush,
+                        if denied { Decision::Deny } else { Decision::Approve },
+                    )
+                }
             },
         };
         // Deny wins over Hold and Forward (ruling 3).
@@ -902,6 +914,27 @@ branch-delete = \"deny\"
             panic!("Unknown ancestry must hold");
         };
         assert_eq!(req.class, ActionClass::ForcePush);
+    }
+
+    #[tokio::test]
+    async fn unknown_ancestry_policy_deny_denies_without_hold() {
+        // Policy deny is the standing authority: an Unknown-ancestry ref in
+        // a force-push-denying repo denies outright — never held, so no
+        // human decision can override the configured deny, and nothing is
+        // forwarded upstream.
+        let policy = engine("\
+[defaults]
+push = \"allow\"
+force-push = \"deny\"
+branch-delete = \"approve\"
+tag-delete = \"approve\"
+");
+        let src = Canned::with("refs/heads/main", Ancestry::Unknown);
+        let updates = vec![update(OLD, NEW, "refs/heads/main")];
+        assert_eq!(
+            plan(&updates, &src, &policy, false, true).await,
+            Plan::Deny(DenyReason::PolicyDenied(ActionClass::ForcePush))
+        );
     }
 
     #[tokio::test]
