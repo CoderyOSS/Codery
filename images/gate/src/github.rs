@@ -39,6 +39,17 @@ pub trait Platform: Send + Sync {
 
     /// REST API root this platform talks to.
     fn api_base(&self) -> Url;
+
+    /// The commits an update would bring, newest-first, rendered as
+    /// `"<sha> <first line of commit.message>"` — the human-readable commit
+    /// list shown on a push approval. Any upstream failure yields an empty
+    /// list (the approval just carries fewer details, never an error).
+    async fn commits_between(&self, owner: &str, repo: &str, old: &Oid, new: &Oid)
+        -> Vec<String>;
+
+    /// Is the machine account an active member of `org`? Anything but a
+    /// 200 with `state == "active"` is false (fail closed).
+    async fn org_member(&self, org: &str) -> bool;
 }
 
 /// The authenticated caller's access to a repo (GATE-008).
@@ -94,6 +105,27 @@ pub fn role_of(permissions: &PermissionsObj) -> Role {
 #[derive(Debug, Deserialize)]
 struct CompareResponse {
     status: String,
+    #[serde(default)]
+    commits: Vec<CompareCommit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompareCommit {
+    sha: String,
+    #[serde(default)]
+    commit: CompareCommitMeta,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CompareCommitMeta {
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MembershipResponse {
+    #[serde(default)]
+    state: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,7 +155,7 @@ impl GitHubPlatform {
     }
 
     /// Explicit bases (tests point these at a mock server).
-    pub(crate) fn with_bases(
+    pub fn with_bases(
         api_base: Url,
         git_base: Url,
         token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
@@ -241,6 +273,64 @@ impl Platform for GitHubPlatform {
 
     fn api_base(&self) -> Url {
         self.api_base.clone()
+    }
+
+    async fn commits_between(
+        &self,
+        owner: &str,
+        repo: &str,
+        old: &Oid,
+        new: &Oid,
+    ) -> Vec<String> {
+        let Some(url) = self.compare_url(owner, repo, old, new) else {
+            return Vec::new();
+        };
+        let response = match self.authorize(self.client.get(url)).send().await {
+            Ok(response) => response,
+            Err(_) => return Vec::new(),
+        };
+        if response.status() != StatusCode::OK {
+            return Vec::new();
+        }
+        let body: CompareResponse = match response.json().await {
+            Ok(body) => body,
+            Err(_) => return Vec::new(),
+        };
+        body.commits
+            .into_iter()
+            .map(|c| {
+                let subject = c
+                    .commit
+                    .message
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim_end()
+                    .to_string();
+                format!("{} {}", c.sha, subject)
+            })
+            .collect()
+    }
+
+    async fn org_member(&self, org: &str) -> bool {
+        let Ok(url) = Url::parse(&format!(
+            "{}/user/memberships/orgs/{}",
+            self.api_base.as_str().trim_end_matches('/'),
+            org,
+        )) else {
+            return false;
+        };
+        let response = match self.authorize(self.client.get(url)).send().await {
+            Ok(response) => response,
+            Err(_) => return false,
+        };
+        if response.status() != StatusCode::OK {
+            return false;
+        }
+        match response.json::<MembershipResponse>().await {
+            Ok(m) => m.state == "active",
+            Err(_) => false,
+        }
     }
 }
 
@@ -579,5 +669,83 @@ mod tests {
         };
         assert_eq!(role_of(&pull_only), Role::Read);
         assert_eq!(role_of(&PermissionsObj::default()), Role::None);
+    }
+
+    #[tokio::test]
+    async fn commits_between_lists_sha_plus_subject_newest_first() {
+        let server = MockServer::start().await;
+        compare_mock(
+            &server,
+            200,
+            r#"{"status":"diverged","commits":[
+                {"sha":"aaa111","commit":{"message":"second commit\n\nbody"}},
+                {"sha":"bbb222","commit":{"message":"first commit"}}
+            ]}"#,
+        )
+        .await;
+        let p = platform_at(&server);
+        assert_eq!(
+            p.commits_between("octo", "hello", &oid(OLD), &oid(NEW)).await,
+            vec![
+                "aaa111 second commit".to_string(),
+                "bbb222 first commit".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn commits_between_failure_is_empty_vec() {
+        let server = MockServer::start().await;
+        compare_mock(&server, 404, r#"{"message":"Not Found"}"#).await;
+        let p = platform_at(&server);
+        assert!(p.commits_between("octo", "hello", &oid(OLD), &oid(NEW)).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn commits_between_empty_commit_list_is_empty_vec() {
+        let server = MockServer::start().await;
+        compare_mock(&server, 200, r#"{"status":"ahead","commits":[]}"#).await;
+        let p = platform_at(&server);
+        assert!(p.commits_between("octo", "hello", &oid(OLD), &oid(NEW)).await.is_empty());
+    }
+
+    async fn membership_mock(server: &MockServer, status: u16, body: &str) {
+        Mock::given(method("GET"))
+            .and(path("/user/memberships/orgs/acme"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn org_member_active_state_is_true() {
+        let server = MockServer::start().await;
+        membership_mock(&server, 200, r#"{"state":"active"}"#).await;
+        let p = platform_at(&server);
+        assert!(p.org_member("acme").await);
+    }
+
+    #[tokio::test]
+    async fn org_member_pending_state_is_false() {
+        let server = MockServer::start().await;
+        membership_mock(&server, 200, r#"{"state":"pending"}"#).await;
+        let p = platform_at(&server);
+        assert!(!p.org_member("acme").await);
+    }
+
+    #[tokio::test]
+    async fn org_member_404_is_false() {
+        let server = MockServer::start().await;
+        membership_mock(&server, 404, r#"{"message":"Not Found"}"#).await;
+        let p = platform_at(&server);
+        assert!(!p.org_member("acme").await);
+    }
+
+    #[tokio::test]
+    async fn org_member_non_json_is_false() {
+        let server = MockServer::start().await;
+        membership_mock(&server, 200, "<html>nope</html>").await;
+        let p = platform_at(&server);
+        assert!(!p.org_member("acme").await);
     }
 }

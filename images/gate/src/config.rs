@@ -8,6 +8,11 @@ pub struct Config {
     pub token_enc_key: String,
     pub listen_addr: String,
     pub policy_path: String,
+    pub state_path: String,
+    pub audit_path: String,
+    /// Machine account username (GATE-004): the Basic-auth login used for
+    /// git passthrough to upstream, `base64("{login}:{token}")`.
+    pub machine_login: String,
 }
 
 impl Config {
@@ -21,6 +26,12 @@ impl Config {
                 .unwrap_or_else(|_| "0.0.0.0:8080".into()),
             policy_path: env::var("GATE_POLICY_PATH")
                 .unwrap_or_else(|_| "/data/policy.toml".into()),
+            state_path: env::var("GATE_STATE_PATH")
+                .unwrap_or_else(|_| "/data/gate.db".into()),
+            audit_path: env::var("GATE_AUDIT_PATH")
+                .unwrap_or_else(|_| "/data/audit.jsonl".into()),
+            machine_login: env::var("GATE_MACHINE_LOGIN")
+                .context("GATE_MACHINE_LOGIN is required")?,
         })
     }
 }

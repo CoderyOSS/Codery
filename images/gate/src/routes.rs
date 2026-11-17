@@ -20,6 +20,7 @@ use base64::Engine as _;
 use serde_json::json;
 
 use crate::audit::{Audit, AuditEntry};
+use crate::gitproxy::GitDeps;
 use crate::state::State as DbState;
 use crate::tokens::{AgentIdentity, TokenStore};
 
@@ -30,19 +31,34 @@ const WINDOW: Duration = Duration::from_secs(60);
 /// How long a tripped source stays blocked.
 const BLOCK: Duration = Duration::from_secs(60);
 
-/// Everything the middleware needs: shared state, audit sink, rate limit.
+/// Everything the middleware needs: shared state, audit sink, rate limit,
+/// and the git-proxy dependencies (absent only on probe-only routers).
 pub struct GateState {
-    pub state: Mutex<DbState>,
-    pub audit: Audit,
+    pub state: Arc<Mutex<DbState>>,
+    pub audit: Arc<Audit>,
     pub rate: Mutex<RateLimiter>,
+    pub git: Option<Arc<GitDeps>>,
 }
 
 impl GateState {
+    /// Probe-only router state (no git proxy deps).
     pub fn new(state: DbState, audit: Audit) -> Self {
         Self {
-            state: Mutex::new(state),
+            state: Arc::new(Mutex::new(state)),
+            audit: Arc::new(audit),
+            rate: Mutex::new(RateLimiter::default()),
+            git: None,
+        }
+    }
+
+    /// Full router state; `state` and `audit` are shared with the approval
+    /// backend / sphere resolver by the caller.
+    pub fn with_git(state: Arc<Mutex<DbState>>, audit: Arc<Audit>, git: GitDeps) -> Self {
+        Self {
+            state,
             audit,
             rate: Mutex::new(RateLimiter::default()),
+            git: Some(Arc::new(git)),
         }
     }
 
@@ -102,12 +118,14 @@ impl RateLimiter {
     }
 }
 
-/// Test/probe router: one authenticated route. Later tasks mount the real
-/// surface on the same middleware.
+/// The full gate surface: probe route plus the git smart-HTTP proxy, all
+/// behind [`require_agent`]. Later tasks mount the API proxy on the same
+/// middleware.
 pub fn router(state: GateState) -> Router {
     let state = Arc::new(state);
     Router::new()
         .route("/whoami", get(whoami))
+        .merge(crate::gitproxy::router(state.clone()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_agent,

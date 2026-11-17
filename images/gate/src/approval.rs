@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::audit::{Audit, AuditEntry};
-use crate::pktline::{Oid, RefUpdate};
+use crate::pktline::RefUpdate;
 use crate::state::{self, State};
 use crate::types::ActionClass;
 
@@ -404,6 +404,7 @@ impl ApprovalBackend for StubBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pktline::Oid;
     use std::time::Instant;
 
     fn unique_tmp_dir(tag: &str) -> std::path::PathBuf {
