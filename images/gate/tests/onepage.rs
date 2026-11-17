@@ -121,6 +121,7 @@ async fn spawn() -> Gate {
             enc_key: ENC_KEY.to_string(),
         })),
         max_body_bytes: gate::config::DEFAULT_MAX_BODY_BYTES,
+        telegram_live: std::sync::atomic::AtomicBool::new(false),
     };
     let app = router(gs);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -221,6 +221,7 @@ async fn spawn_gate_full(
         api: Some(Arc::new(api)),
         onepage: None,
         max_body_bytes,
+        telegram_live: std::sync::atomic::AtomicBool::new(false),
     };
     let app = router(gs);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

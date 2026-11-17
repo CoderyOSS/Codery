@@ -29,6 +29,37 @@ pub struct Config {
     /// Cap on proxied request bodies (`GATE_MAX_BODY_BYTES`); over-limit
     /// requests get a 413 before anything is forwarded upstream.
     pub max_body_bytes: usize,
+    /// Telegram bot token (`TELEGRAM_BOT_TOKEN`) when set and non-empty —
+    /// the only condition under which the control-plane poll loop spawns
+    /// (core git/API paths must work without the bot).
+    pub telegram_bot_token: Option<String>,
+    /// Allowlisted Telegram user ids (`TELEGRAM_ALLOWLIST`, comma-separated
+    /// integers; GATE-006). Empty ⇒ the loop (if spawned) drops every
+    /// update — fail closed.
+    pub telegram_allowlist: Vec<i64>,
+}
+
+/// Bot token as `Some` only when set and non-blank; blank ⇒ `None` (no
+/// control plane spawns).
+fn telegram_bot_token_from(v: Option<&str>) -> Option<String> {
+    v.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Parse the GATE-006 allowlist: comma-separated integer user ids. Blank
+/// or absent ⇒ empty (which the transport treats as "drop everything").
+/// Unparsable entries are skipped individually — a typo narrows the
+/// allowlist rather than disabling or widening it (fail closed).
+fn allowlist_from(v: Option<&str>) -> Vec<i64> {
+    v.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.split(',')
+                .filter_map(|part| part.trim().parse::<i64>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl Config {
@@ -51,6 +82,12 @@ impl Config {
                 .context("GATE_MACHINE_LOGIN is required")?,
             max_body_bytes: max_body_bytes_from(
                 env::var("GATE_MAX_BODY_BYTES").ok().as_deref(),
+            ),
+            telegram_bot_token: telegram_bot_token_from(
+                env::var("TELEGRAM_BOT_TOKEN").ok().as_deref(),
+            ),
+            telegram_allowlist: allowlist_from(
+                env::var("TELEGRAM_ALLOWLIST").ok().as_deref(),
             ),
         })
     }
@@ -132,5 +169,31 @@ mod tests {
     #[test]
     fn default_max_body_bytes_is_512_mib() {
         assert_eq!(DEFAULT_MAX_BODY_BYTES, 536_870_912);
+    }
+
+    #[test]
+    fn telegram_bot_token_none_when_unset_or_blank() {
+        assert_eq!(telegram_bot_token_from(None), None);
+        assert_eq!(telegram_bot_token_from(Some("")), None);
+        assert_eq!(telegram_bot_token_from(Some("   ")), None);
+        assert_eq!(
+            telegram_bot_token_from(Some(" 123:abc ")),
+            Some("123:abc".to_string())
+        );
+    }
+
+    #[test]
+    fn allowlist_parses_comma_separated_ids() {
+        assert_eq!(allowlist_from(Some("42, 7 ,100")), vec![42, 7, 100]);
+        assert_eq!(allowlist_from(Some("-5")), vec![-5]);
+        assert_eq!(allowlist_from(None), Vec::<i64>::new());
+        assert_eq!(allowlist_from(Some("  ")), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn allowlist_skips_bad_entries_and_stays_fail_closed() {
+        assert_eq!(allowlist_from(Some("42,oops,7")), vec![42, 7]);
+        assert_eq!(allowlist_from(Some("oops")), Vec::<i64>::new(), "garbage ⇒ empty");
+        assert_eq!(allowlist_from(Some(",,")), Vec::<i64>::new());
     }
 }

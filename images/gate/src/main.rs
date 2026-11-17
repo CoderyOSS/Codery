@@ -13,6 +13,8 @@ use gate::onepage::OnePageDeps;
 use gate::policy::{PolicyEngine, PolicyFile};
 use gate::routes::{self, GateState};
 use gate::state::State as DbState;
+use gate::telegram::{run_poll_loop, TelegramClient, TelegramRouter, POLL_BACKOFF_BASE};
+use std::sync::atomic::Ordering;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -88,6 +90,32 @@ async fn main() -> anyhow::Result<()> {
         platform,
         enc_key: cfg.token_enc_key.clone(),
     }));
+
+    // Telegram control plane (GATE-006): spawn the long-poll loop ONLY
+    // when a bot token is configured — core git/API serving must work
+    // without the bot. An empty allowlist keeps the loop running but drops
+    // every update (fail closed); Tasks 2–5 register the real handlers on
+    // the router, so until then validated updates simply find no handler.
+    if let Some(token) = cfg.telegram_bot_token.clone() {
+        let api: Arc<dyn gate::telegram::TelegramApi> = Arc::new(TelegramClient::new(&token));
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let router = TelegramRouter::new();
+        tokio::spawn(run_poll_loop(
+            api.clone(),
+            cfg.telegram_allowlist.clone(),
+            tx,
+            shutdown_rx,
+            POLL_BACKOFF_BASE,
+        ));
+        tokio::spawn(router.run(rx, api));
+        gate_state.telegram_live.store(true, Ordering::Relaxed);
+        eprintln!(
+            "telegram control plane live ({} allowlisted approver(s))",
+            cfg.telegram_allowlist.len()
+        );
+    }
+
     let app = routes::router(gate_state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await?;

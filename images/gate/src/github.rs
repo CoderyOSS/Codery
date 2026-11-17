@@ -220,10 +220,20 @@ impl GitHubPlatform {
         git_base: Url,
         token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     ) -> Self {
-        let client = Client::builder()
+        let mut builder = Client::builder()
             // GitHub's API rejects requests without a User-Agent.
             .user_agent(concat!("gate/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10));
+        // Test builds drop idle keep-alive sockets immediately: pooled
+        // connections outliving their wiremock server get their port
+        // recycled by another test's server, and the next request over the
+        // stale socket lands on the wrong listener — a nondeterministic
+        // cross-test request leak (seen as flaky `received_requests`
+        // assertions). Production keeps default pooling.
+        if cfg!(test) {
+            builder = builder.pool_max_idle_per_host(0);
+        }
+        let client = builder
             .build()
             .expect("reqwest client with rustls backend");
         Self {
@@ -746,9 +756,17 @@ mod tests {
             })
         );
         let requests = server.received_requests().await.expect("recorded requests");
-        assert_eq!(requests.len(), 1);
+        // Judge only OUR call (path-matched): a sibling test's stray can
+        // land on a recycled port and inflate the recording.
+        let repo_calls: Vec<_> = requests
+            .iter()
+            .filter(|r| r.url.path() == "/repos/octo/hello")
+            .collect();
+        assert!(!repo_calls.is_empty(), "the repo call must be recorded");
         assert!(
-            !requests[0].headers.contains_key("authorization"),
+            repo_calls
+                .iter()
+                .all(|r| !r.headers.contains_key("authorization")),
             "no Authorization header may be sent without a stored token"
         );
     }
@@ -925,14 +943,28 @@ mod tests {
 
     #[tokio::test]
     async fn user_login_is_none_without_any_upstream_call_when_custody_empty() {
-        // No mocks mounted: if the platform called upstream it would be
-        // recorded, and a default 404 would yield None — the point is that
-        // empty custody short-circuits BEFORE any request.
+        // Canary proof of the short-circuit: if the platform called
+        // upstream despite empty custody it would receive this marker
+        // login and surface it. Deliberately NOT a
+        // `received_requests().is_empty()` assertion — that recording is
+        // nondeterministic under parallel tests: a sibling test's
+        // in-flight request can land here after its own mock server was
+        // dropped and the OS recycled its port (observed as flaky
+        // `/repos/.../compare` strays).
         let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"login":"custody-leak-canary"}"#),
+            )
+            .mount(&server)
+            .await;
         let p = platform_at(&server);
-        assert_eq!(p.user_login().await, None);
-        let requests = server.received_requests().await.unwrap();
-        assert!(requests.is_empty(), "no round trip without custody");
+        assert_eq!(
+            p.user_login().await,
+            None,
+            "empty custody must short-circuit before any upstream call"
+        );
     }
 
     // -- verify_token (task 9, GATE-004 intake checks) ----------------------

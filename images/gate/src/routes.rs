@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -48,6 +49,10 @@ pub struct GateState {
     /// Cap on proxied request bodies; over-limit requests get a 413
     /// before anything is forwarded upstream.
     pub max_body_bytes: usize,
+    /// Health flag (GATE-006): true once the Telegram control-plane poll
+    /// loop has been spawned (`TELEGRAM_BOT_TOKEN` configured). Surfaced
+    /// on `/whoami` so operators can see the gate's control plane state.
+    pub telegram_live: AtomicBool,
 }
 
 impl GateState {
@@ -61,6 +66,7 @@ impl GateState {
             api: None,
             onepage: None,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            telegram_live: AtomicBool::new(false),
         }
     }
 
@@ -75,6 +81,7 @@ impl GateState {
             api: None,
             onepage: None,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            telegram_live: AtomicBool::new(false),
         }
     }
 
@@ -157,8 +164,14 @@ pub fn router(state: GateState) -> Router {
     app.with_state(state)
 }
 
-async fn whoami(Extension(agent): Extension<AgentIdentity>) -> Json<serde_json::Value> {
-    Json(json!({ "agent": agent.name }))
+async fn whoami(
+    State(gs): State<Arc<GateState>>,
+    Extension(agent): Extension<AgentIdentity>,
+) -> Json<serde_json::Value> {
+    Json(json!({
+        "agent": agent.name,
+        "telegram": gs.telegram_live.load(Ordering::Relaxed),
+    }))
 }
 
 /// Pull the raw token out of an Authorization header (Basic or Bearer).
@@ -327,6 +340,17 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap_or_else(|e| {
             panic!("body must be json: {e}; body: {:?}", String::from_utf8_lossy(&bytes))
         })
+    }
+
+    #[tokio::test]
+    async fn whoami_reports_telegram_health_flag() {
+        let (f, raw) = fixture(Some("claude-code"));
+        let resp = f
+            .send(get(&[basic("claude-code", &raw.unwrap())]))
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["telegram"], false, "flag default: no telegram loop");
     }
 
     #[tokio::test]
