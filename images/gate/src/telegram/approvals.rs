@@ -106,7 +106,7 @@ impl TelegramApprovalBackend {
         let (changed, settled, repo, class) = {
             let guard = self.state.lock().expect("state lock must be poison-free");
             let changed =
-                resolve_pending_as(&guard, &self.audit, id, outcome, Some(&approver.to_string()))
+                resolve_pending_as(&guard, &self.audit, id, outcome, Some(&approver.to_string()), None)
                     .unwrap_or(false);
             let settled = row_state(&guard, id).2;
             let (repo, class) = match crate::approval::payload_of(&guard, id) {
@@ -231,10 +231,19 @@ impl TelegramApprovalBackend {
 
 #[async_trait]
 impl ApprovalBackend for TelegramApprovalBackend {
-    /// Persist the hold (with its signed nonce), audit the ask, deliver the
-    /// message with Approve/Deny buttons, and remember the message address
-    /// so the decision can be edited in place later.
+    /// Deliver the ask: the chat must be configured BEFORE anything is
+    /// persisted, and a send failure immediately resolves the row `Denied`
+    /// (`delivery-failed`) — an ask that cannot be delivered must never
+    /// leave a resolvable row behind, because `/pending`'s Resume would
+    /// resurrect it into a phantom-approvable hold with no live waiter.
     async fn present(&self, req: &ApprovalRequest) -> Result<()> {
+        // (1) Config check first: no chat ⇒ no row, Err ⇒ the proxy
+        // already maps present-Err to deny + audit ("backend unavailable").
+        let chat = self.ask_chat.ok_or_else(|| {
+            anyhow!(
+                "no approval chat configured; ask cannot be delivered — hold is denied fail-closed"
+            )
+        })?;
         let n = nonce();
         {
             let guard = self.state.lock().expect("state lock must be poison-free");
@@ -249,11 +258,6 @@ impl ApprovalBackend for TelegramApprovalBackend {
             basis: "hold pending human decision".to_string(),
             approver: None,
         });
-        let chat = self.ask_chat.ok_or_else(|| {
-            anyhow!(
-                "no approval chat configured; ask cannot be delivered — hold is denied fail-closed"
-            )
-        })?;
         let ask = SendRequest::text(render_ask(
             &req.agent,
             &req.repo,
@@ -267,7 +271,40 @@ impl ApprovalBackend for TelegramApprovalBackend {
             chat_id: chat,
             message_id: 0,
         });
-        let sent = self.api.send_message(ask).await?;
+        let sent = match self.api.send_message(ask).await {
+            Ok(sent) => sent,
+            // Send failure ⇒ roll the hold back fail-closed: the row
+            // resolves Denied (basis `delivery-failed`), the delivery
+            // failure itself is audited, and Err denies the hold. The
+            // transport's errors are token-free summaries (Task 1
+            // redaction) and audit record() scrubs secret-shaped material
+            // besides.
+            Err(e) => {
+                {
+                    let guard = self.state.lock().expect("state lock must be poison-free");
+                    // Idempotent: if the row somehow settled already, the
+                    // first decision stands.
+                    let _ = resolve_pending_as(
+                        &guard,
+                        &self.audit,
+                        &req.id,
+                        ApprovalOutcome::Denied,
+                        None,
+                        Some("delivery-failed"),
+                    );
+                }
+                self.audit.record(AuditEntry {
+                    ts: state::now(),
+                    agent: Some(req.agent.clone()),
+                    repo: req.repo.clone(),
+                    action: "approval.delivery".to_string(),
+                    decision: "deny".to_string(),
+                    basis: format!("delivery failed: {e}"),
+                    approver: None,
+                });
+                return Err(anyhow!("approval ask delivery failed: {e}"));
+            }
+        };
         {
             let guard = self.state.lock().expect("state lock must be poison-free");
             store_ask_msg(&guard, &req.id, sent.chat_id, sent.message_id)?;
@@ -305,6 +342,7 @@ impl ApprovalBackend for TelegramApprovalBackend {
                         id,
                         ApprovalOutcome::TimedOut,
                         None,
+                        None,
                     );
                 }
                 let notice = {
@@ -334,7 +372,7 @@ impl ApprovalBackend for TelegramApprovalBackend {
     async fn resolve(&self, id: &str, outcome: ApprovalOutcome) -> Result<()> {
         let changed = {
             let guard = self.state.lock().expect("state lock must be poison-free");
-            resolve_pending_as(&guard, &self.audit, id, outcome, None)?
+            resolve_pending_as(&guard, &self.audit, id, outcome, None, None)?
         };
         if changed {
             self.announce(id, outcome, None).await;

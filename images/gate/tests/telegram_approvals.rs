@@ -123,6 +123,12 @@ impl Drop for Gate {
 }
 
 async fn spawn_gate(approval_timeout: Duration) -> Gate {
+    spawn_gate_with_chat(approval_timeout, Some(FAKE_CHAT_ID)).await
+}
+
+/// Variant with a test-chosen ask chat (`None` = no chat configured ⇒
+/// asks are undeliverable, present must fail closed without persisting).
+async fn spawn_gate_with_chat(approval_timeout: Duration, ask_chat: Option<i64>) -> Gate {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -149,13 +155,7 @@ async fn spawn_gate(approval_timeout: Duration) -> Gate {
     let fake = Arc::new(FakeTelegram::new());
     let api: Arc<dyn TelegramApi> = fake.clone();
     let backend = Arc::new(
-        TelegramApprovalBackend::new(
-            state.clone(),
-            audit.clone(),
-            api.clone(),
-            Some(FAKE_CHAT_ID),
-        )
-        .unwrap(),
+        TelegramApprovalBackend::new(state.clone(), audit.clone(), api.clone(), ask_chat).unwrap(),
     );
 
     let machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync> =
@@ -448,6 +448,12 @@ fn row_nonce(gate: &Gate, id: &str) -> Option<String> {
     gate::approval::row_nonce(&guard, id)
 }
 
+/// Every pending row as `(id, outcome)` — the DB truth.
+fn pending_outcomes(gate: &Gate) -> Vec<(String, Option<gate::approval::ApprovalOutcome>)> {
+    let guard = gate.state.lock().unwrap();
+    gate::approval::all_pending_outcomes(&guard).unwrap()
+}
+
 const OLD: &str = "1234567890abcdef1234567890abcdef12345678";
 const NEW: &str = "fedcba0987654321fedcba0987654321fedcba09";
 
@@ -708,6 +714,126 @@ async fn double_approve_after_timeout_replies_state_without_upstream_hit() {
     assert!(
         resolved.iter().all(|l| l["decision"] == "timed_out"),
         "no approved/denied resolution was recorded: {resolved:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Undeliverable asks never leave a resolvable row (review round 1, F1)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_failure_resolves_hold_denied_without_a_waiter() {
+    let gate = spawn_gate(Duration::from_secs(30)).await;
+    mount_receive_flow(
+        &gate,
+        REPO_FULL,
+        &[("refs/heads/main", OLD)],
+        &format!("/repos/{REPO_FULL}/compare/{OLD}...{NEW}"),
+        r#"{"status":"diverged"}"#,
+    )
+    .await;
+    gate.fake.fail_next_sends(1);
+
+    let status = post_push(&gate, OWNER, REPO, force_push_body(OLD, NEW)).await;
+    assert_eq!(status, 403, "undeliverable ask ⇒ hold denied");
+
+    // The row was rolled back: exactly one row exists and it is already
+    // Denied — NOT pending, so /pending Resume cannot resurrect it.
+    let rows = pending_outcomes(&gate);
+    assert_eq!(rows.len(), 1, "the persisted row: {rows:?}");
+    assert_eq!(
+        rows[0].1,
+        Some(gate::approval::ApprovalOutcome::Denied),
+        "send failure must resolve the row Denied, never leave it pending"
+    );
+    assert!(
+        gate.fake.sent().is_empty(),
+        "failed send records no outbound message"
+    );
+
+    // The rollback and the delivery failure itself are audited.
+    let lines = gate.audit_lines();
+    let resolve_event = lines
+        .iter()
+        .find(|l| l["action"] == "approval.resolve")
+        .expect("rollback resolution audited");
+    assert_eq!(resolve_event["decision"], "denied");
+    assert_eq!(resolve_event["basis"], "delivery-failed");
+    let delivery = lines
+        .iter()
+        .find(|l| l["action"] == "approval.delivery")
+        .expect("delivery failure audited");
+    assert_eq!(delivery["decision"], "deny");
+    assert!(
+        delivery["basis"]
+            .as_str()
+            .unwrap()
+            .contains("simulated telegram outage"),
+        "basis names the (already token-free) transport error: {delivery:?}"
+    );
+
+    // The git proxy saw present Err ⇒ deny.
+    let pushes: Vec<_> = lines
+        .iter()
+        .filter(|l| l["action"] == "git.receive-pack")
+        .collect();
+    let decisions: Vec<&str> = pushes
+        .iter()
+        .map(|p| p["decision"].as_str().unwrap())
+        .collect();
+    assert_eq!(decisions, vec!["hold", "deny"]);
+    assert_eq!(pushes[1]["basis"], "approval backend unavailable");
+
+    let requests = gate.upstream_requests().await;
+    assert!(
+        gate.receive_pack_hits(&requests, OWNER, REPO).is_empty(),
+        "nothing forwards upstream"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_chat_configured_persists_nothing_and_denies() {
+    let gate = spawn_gate_with_chat(Duration::from_secs(30), None).await;
+    mount_receive_flow(
+        &gate,
+        REPO_FULL,
+        &[("refs/heads/main", OLD)],
+        &format!("/repos/{REPO_FULL}/compare/{OLD}...{NEW}"),
+        r#"{"status":"diverged"}"#,
+    )
+    .await;
+
+    let status = post_push(&gate, OWNER, REPO, force_push_body(OLD, NEW)).await;
+    assert_eq!(status, 403, "undeliverable ask ⇒ hold denied");
+
+    // Nothing was persisted at all: the chat check runs BEFORE the insert.
+    assert!(
+        pending_outcomes(&gate).is_empty(),
+        "no chat ⇒ zero pending rows: {:?}",
+        pending_outcomes(&gate)
+    );
+    assert!(gate.fake.sent().is_empty());
+
+    // No approval lifecycle events either — the hold never existed.
+    let lines = gate.audit_lines();
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l["action"].as_str().unwrap().starts_with("approval.")),
+        "no approval rows ⇒ no approval audit events: {lines:?}"
+    );
+    let pushes: Vec<_> = lines
+        .iter()
+        .filter(|l| l["action"] == "git.receive-pack")
+        .collect();
+    assert_eq!(pushes[0]["decision"], "hold");
+    assert_eq!(pushes[1]["decision"], "deny");
+    assert_eq!(pushes[1]["basis"], "approval backend unavailable");
+
+    let requests = gate.upstream_requests().await;
+    assert!(
+        gate.receive_pack_hits(&requests, OWNER, REPO).is_empty(),
+        "zero upstream receive-pack calls"
     );
 }
 

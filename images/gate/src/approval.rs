@@ -202,11 +202,13 @@ pub fn persist_request_with_nonce(
     Ok(())
 }
 
-/// Resolve a hold with an optional approver identity (control-plane ruling:
-/// a Telegram user resolving a hold is audited with `approver` = their user
-/// id string and `basis` = the outcome; programmatic resolves keep the core
-/// shape, `basis = "approval"`). Idempotent: a decided or absent row is
-/// left untouched and reported as `false` — the caller replies with the
+/// Resolve a hold with an optional approver identity and audit basis
+/// (control-plane ruling: a Telegram user resolving a hold is audited with
+/// `approver` = their user id string and `basis` = the outcome;
+/// programmatic resolves keep the core shape, `basis = "approval"`; an
+/// explicit `basis` overrides the derived one — e.g. `delivery-failed` for
+/// an ask that never reached a human). Idempotent: a decided or absent row
+/// is left untouched and reported as `false` — the caller replies with the
 /// row's current state and never mutates it. [`resolve_pending`] is the
 /// approver-less form core consumers use.
 pub fn resolve_pending_as(
@@ -215,6 +217,7 @@ pub fn resolve_pending_as(
     id: &str,
     outcome: ApprovalOutcome,
     approver: Option<&str>,
+    basis: Option<&str>,
 ) -> Result<bool> {
     let stored: Option<(String, Option<String>)> = state
         .conn()
@@ -255,9 +258,12 @@ pub fn resolve_pending_as(
             repo: payload.repo,
             action: "approval.resolve".to_string(),
             decision: outcome.as_str().to_string(),
-            basis: match approver {
-                Some(_) => outcome.as_str().to_string(),
-                None => "approval".to_string(),
+            basis: match basis {
+                Some(b) => b.to_string(),
+                None => match approver {
+                    Some(_) => outcome.as_str().to_string(),
+                    None => "approval".to_string(),
+                },
             },
             approver: approver.map(String::from),
         });
@@ -274,7 +280,7 @@ pub fn resolve_pending(
     id: &str,
     outcome: ApprovalOutcome,
 ) -> Result<bool> {
-    resolve_pending_as(state, audit, id, outcome, None)
+    resolve_pending_as(state, audit, id, outcome, None, None)
 }
 
 /// Restart sweep (GATE-005, fail closed): EVERY approval row left without
@@ -404,6 +410,30 @@ pub fn list_unresolved(state: &State) -> Result<Vec<PendingListRow>> {
                 nonce: payload.nonce,
                 detail: payload.detail,
             })
+        })
+        .collect())
+}
+
+/// Every pending row's `(id, outcome)` — resolved rows carry their
+/// outcome (`None` = still open). The durable truth a control plane or
+/// test reads fate from.
+pub fn all_pending_outcomes(state: &State) -> Result<Vec<(String, Option<ApprovalOutcome>)>> {
+    let rows: Vec<(String, Option<String>)> = {
+        let mut stmt = state
+            .conn()
+            .prepare("SELECT id, outcome FROM pending ORDER BY created_at, id")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(rows
+        .into_iter()
+        .map(|(id, outcome)| {
+            let decided = outcome.map(|o| match o.as_str() {
+                "approved" => ApprovalOutcome::Approved,
+                "denied" => ApprovalOutcome::Denied,
+                _ => ApprovalOutcome::TimedOut,
+            });
+            (id, decided)
         })
         .collect())
 }

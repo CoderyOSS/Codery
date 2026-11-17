@@ -28,6 +28,7 @@ struct Inner {
     queue: Vec<Update>,
     offsets_seen: Vec<i64>,
     pending_failures: usize,
+    pending_send_failures: usize,
     next_message_id: i32,
     next_update_id: i64,
 }
@@ -66,6 +67,16 @@ impl FakeTelegram {
             .lock()
             .expect("fake lock must be poison-free")
             .pending_failures = n;
+    }
+
+    /// Make the next `n` `send_message` calls fail (simulated delivery
+    /// outage) so tests can exercise undeliverable-ask handling; a failed
+    /// send records nothing and consumes no message id.
+    pub fn fail_next_sends(&self, n: usize) {
+        self.inner
+            .lock()
+            .expect("fake lock must be poison-free")
+            .pending_send_failures = n;
     }
 
     /// Every outbound send, in call order.
@@ -109,6 +120,10 @@ impl TelegramApi for FakeTelegram {
 
     async fn send_message(&self, req: SendRequest) -> Result<MsgRef> {
         let mut inner = self.inner.lock().expect("fake lock must be poison-free");
+        if inner.pending_send_failures > 0 {
+            inner.pending_send_failures -= 1;
+            return Err(anyhow!("fake: simulated telegram outage"));
+        }
         inner.sent.push(req.clone());
         inner.next_message_id += 1;
         Ok(MsgRef {
