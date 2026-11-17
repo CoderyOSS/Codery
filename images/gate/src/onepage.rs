@@ -46,6 +46,10 @@ pub struct OnePageDeps {
     pub platform: Arc<dyn Platform>,
     /// `GATE_TOKEN_ENC_KEY` value; custody derives its AES key from it.
     pub enc_key: String,
+    /// `(api, chat_id)` for the rotate-complete notice (GATE-004 §6.4);
+    /// `None` = no bot/chat configured — storage works, notices are
+    /// skipped.
+    pub notify: Option<(Arc<dyn crate::telegram::TelegramApi>, i64)>,
 }
 
 /// Mint a fresh single-use setup nonce: 32 random bytes (hex) with a
@@ -172,7 +176,46 @@ async fn token_submit(
                     .map(|()| consume_nonce(&state))
             };
             match stored {
-                Ok(()) => html_page(StatusCode::OK, &success_page(&deps, &vt)),
+                Ok(()) => {
+                    // GATE-004 §6.3–6.4: a verified credential now lives in
+                    // custody — forwarding is on. Then the post-store
+                    // lifecycle: fresh expiry, reminder reset, and when the
+                    // submitted nonce matches `rotate_in_progress` exactly,
+                    // this was a ROTATION — consume the marker and tell the
+                    // operator to delete the old token. A failed verify
+                    // never reaches this branch, so the old token and the
+                    // flag are untouched on that path.
+                    gs.set_forwarding(true);
+                    let rotating = {
+                        let state = gs.state.lock().expect("state lock");
+                        let marker = state.kv_get(crate::tasks::KV_ROTATE_IN_PROGRESS).ok().flatten();
+                        let is_rotate = marker.as_deref() == Some(nonce);
+                        if crate::tasks::apply_stored_token(&state, &vt).is_err() {
+                            eprintln!("custody post-store lifecycle update failed");
+                        }
+                        if is_rotate
+                            && state
+                                .kv_delete(crate::tasks::KV_ROTATE_IN_PROGRESS)
+                                .is_ok()
+                        {
+                            gs.audit.record(crate::audit::AuditEntry {
+                                ts: crate::state::now(),
+                                agent: None,
+                                repo: "-".to_string(),
+                                action: "custody.rotate".to_string(),
+                                decision: "stored".to_string(),
+                                basis: "new token verified; old token to be deleted by hand"
+                                    .to_string(),
+                                approver: None,
+                            });
+                        }
+                        is_rotate
+                    };
+                    if rotating {
+                        crate::tasks::notify_rotate_complete(&deps.notify, &vt).await;
+                    }
+                    html_page(StatusCode::OK, &success_page(&deps, &vt))
+                }
                 Err(e) => {
                     eprintln!("custody store failed — setup incomplete: {e}");
                     (

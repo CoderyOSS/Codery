@@ -53,9 +53,26 @@ pub struct GateState {
     /// loop has been spawned (`TELEGRAM_BOT_TOKEN` configured). Surfaced
     /// on `/whoami` so operators can see the gate's control plane state.
     pub telegram_live: AtomicBool,
+    /// Master forwarding switch (GATE-004 §6.3): the machine-token
+    /// lifecycle tasks flip it after a credential check; the proxy
+    /// credential-probe paths consult it BEFORE touching custody or
+    /// upstream — flag off ⇒ `credential_unavailable` immediately (no
+    /// probe, no state churn). Starts false: fail closed until the
+    /// startup check verdict.
+    pub forwarding_enabled: Arc<AtomicBool>,
 }
 
 impl GateState {
+    /// Whether forwarding may proceed at all right now.
+    pub fn forwarding_allowed(&self) -> bool {
+        self.forwarding_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Flip the master forwarding switch (lifecycle tasks only).
+    pub fn set_forwarding(&self, on: bool) {
+        self.forwarding_enabled.store(on, Ordering::Relaxed);
+    }
+
     /// Probe-only router state (no proxy deps).
     pub fn new(state: DbState, audit: Audit) -> Self {
         Self {
@@ -67,6 +84,7 @@ impl GateState {
             onepage: None,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             telegram_live: AtomicBool::new(false),
+            forwarding_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -82,6 +100,7 @@ impl GateState {
             onepage: None,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             telegram_live: AtomicBool::new(false),
+            forwarding_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 

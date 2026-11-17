@@ -29,7 +29,7 @@ use crate::tokens::TokenStore;
 
 /// Reply for commands the gate does not know.
 const UNKNOWN_COMMAND: &str =
-    "Unknown command. Available: /pending, /status, /block owner/repo, /unblock owner/repo, /token mint|revoke|list";
+    "Unknown command. Available: /pending, /status, /block owner/repo, /unblock owner/repo, /token mint|revoke|list, /rotate, /disconnect";
 
 /// Usage line for /block and /unblock.
 const BLOCK_USAGE: &str = "Usage: /block owner/repo — or /unblock owner/repo";
@@ -41,11 +41,14 @@ const TOKEN_USAGE: &str = "Usage: /token mint <name> | /token revoke <name> | /t
 /// Everything the command handlers read. `machine_token` is the same
 /// closure the proxies use: calling it decrypts in memory and decides the
 /// forwarding line on /status. No secrets ever render — only the
-/// enabled/disabled verdict.
+/// enabled/disabled verdict. `lifecycle` carries the machine-token
+/// lifecycle deps (GATE-004): present ⇒ /rotate and /disconnect are live,
+/// absent ⇒ both answer the usage reply (no bot, no lifecycle).
 pub struct CommandDeps {
     pub state: Arc<Mutex<State>>,
     pub audit: Arc<Audit>,
     pub machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+    pub lifecycle: Option<Arc<crate::tasks::LifecycleDeps>>,
 }
 
 /// Register the command dispatcher on a router.
@@ -60,8 +63,8 @@ struct Commands {
 #[async_trait]
 impl UpdateHandler for Commands {
     async fn handle(&self, update: Update, api: Arc<dyn TelegramApi>) {
-        // Callback updates belong to the approval handler; a reply needs a
-        // message to edit in place.
+        // Callback updates belong to the approval/lifecycle handlers; a
+        // reply needs a message to edit in place.
         let Some(text) = update.text else {
             return;
         };
@@ -75,16 +78,35 @@ impl UpdateHandler for Commands {
         let arg = words.next();
         let rest: Vec<&str> = words.collect();
         let sender = update.sender_id;
-        let reply = match (cmd, arg) {
-            ("pending", _) => self.pending_reply(),
-            ("block", Some(repo)) => self.block_reply(repo, true, sender),
-            ("unblock", Some(repo)) => self.block_reply(repo, false, sender),
-            ("block", None) | ("unblock", None) => (BLOCK_USAGE.to_string(), Vec::new()),
-            ("status", _) => self.status_reply(),
-            ("token", _) => self.token_reply(arg, &rest),
-            _ => (UNKNOWN_COMMAND.to_string(), Vec::new()),
+        let reply: SendRequest = match (cmd, arg) {
+            ("pending", _) => self.pending_reply().into(),
+            ("block", Some(repo)) => self.block_reply(repo, true, sender).into(),
+            ("unblock", Some(repo)) => self.block_reply(repo, false, sender).into(),
+            ("block", None) | ("unblock", None) => (BLOCK_USAGE.to_string(), Vec::new()).into(),
+            ("status", _) => self.status_reply().into(),
+            ("token", _) => self.token_reply(arg, &rest).into(),
+            // Machine-token lifecycle (GATE-004): delegate to the
+            // lifecycle layer — one reply per command, like every other.
+            ("rotate", _) => match &self.deps.lifecycle {
+                Some(deps) => crate::telegram::lifecycle::rotate_reply(deps, sender),
+                None => (UNKNOWN_COMMAND.to_string(), Vec::new()).into(),
+            },
+            ("disconnect", _) => match &self.deps.lifecycle {
+                Some(deps) => crate::telegram::lifecycle::disconnect_reply(deps, sender),
+                None => (UNKNOWN_COMMAND.to_string(), Vec::new()).into(),
+            },
+            _ => (UNKNOWN_COMMAND.to_string(), Vec::new()).into(),
         };
-        let _ = api.edit_message(to, SendRequest::text(reply.0).buttons(reply.1)).await;
+        let _ = api.edit_message(to, reply).await;
+    }
+}
+
+/// `(text, callback-buttons)` command replies render into a plain
+/// `SendRequest` (commands.rs carried this tuple shape before the
+/// lifecycle replies needed link buttons too).
+impl From<(String, Vec<(String, String)>)> for SendRequest {
+    fn from((text, buttons): (String, Vec<(String, String)>)) -> Self {
+        SendRequest::text(text).buttons(buttons)
     }
 }
 

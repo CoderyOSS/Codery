@@ -486,6 +486,13 @@ impl UpdateHandler for ApprovalCallbacks {
                 .await;
             return;
         };
+        if id == crate::telegram::lifecycle::ROTATE_FLOW {
+            // The lifecycle's [Start /rotate] button shares the router and
+            // the signed-triple format, but it is NOT a hold: its own
+            // handler answers the press (the composed nonce lookup above
+            // already validated it against rotate_cb_nonce).
+            return;
+        }
         let expected = {
             let guard = self.backend.state.lock().expect("state lock must be poison-free");
             row_nonce(&guard, &id)

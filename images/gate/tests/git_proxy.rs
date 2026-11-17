@@ -170,6 +170,9 @@ async fn spawn_gate_with_limit(auto: ApprovalOutcome, max_body_bytes: usize) -> 
 
     let mut gate_state = GateState::with_git(state, audit, git);
     gate_state.max_body_bytes = max_body_bytes;
+    // These scenarios model a fully set-up gate: the machine credential is
+    // live (the getter above), so the lifecycle startup verdict is "on".
+    gate_state.set_forwarding(true);
     let app = router(gate_state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

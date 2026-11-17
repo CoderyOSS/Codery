@@ -61,6 +61,7 @@ impl Harness {
                 state: state.clone(),
                 audit: audit.clone(),
                 machine_token,
+                lifecycle: None,
             }),
         );
         Self {

@@ -169,6 +169,21 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
         return bad_request("invalid path");
     }
 
+    // GATE-004 §6.3: the master forwarding flag is consulted BEFORE the
+    // credential probe — flag off ⇒ credential_unavailable immediately
+    // (no upstream probe, no state churn). With the flag on, the probe
+    // below remains the second line of defense.
+    if !gs.forwarding_allowed() {
+        audit_api(
+            &gs.audit,
+            &agent_name,
+            "-",
+            "deny",
+            "forwarding disabled (machine credential unverified)",
+        );
+        return AgentError::credential_unavailable().into_response();
+    }
+
     // Review Focus 5: a request may only proceed when the machine
     // credential verifies RIGHT NOW; otherwise nothing is forwarded.
     if deps.platform.user_login().await.is_none() {

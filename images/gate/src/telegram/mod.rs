@@ -27,6 +27,7 @@
 
 pub mod approvals;
 pub mod commands;
+pub mod lifecycle;
 pub mod send;
 
 #[cfg(any(test, feature = "test-util"))]

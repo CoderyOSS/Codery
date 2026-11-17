@@ -102,6 +102,15 @@ pub enum VerifyError {
 /// Scopes the machine PAT must carry, in report order.
 const REQUIRED_SCOPES: &[&str] = &["repo", "workflow", "read:org"];
 
+/// Prefilled classic-PAT creation page for the machine account (GATE-004
+/// §6.4 rotate intake): correct scopes, ready-made description. Like every
+/// `github.com` literal, lives only in this module.
+pub const TOKEN_NEW_URL: &str = "https://github.com/settings/tokens/new?scopes=repo,workflow,read:org&description=GitHub%20agent%20proxy";
+
+/// The machine account's token list on github.com — where the operator
+/// deletes the old/revoked token by hand (the gate has no API for it).
+pub const TOKENS_LIST_URL: &str = "https://github.com/settings/tokens";
+
 /// The authenticated caller's access to a repo (GATE-008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepoAccess {

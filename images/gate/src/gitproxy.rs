@@ -529,6 +529,12 @@ async fn info_refs(
     let Some(deps) = gs.git.clone() else {
         return not_configured();
     };
+    // GATE-004 §6.3: the forwarding flag is consulted BEFORE custody —
+    // flag off ⇒ credential_unavailable immediately (no custody load, no
+    // upstream probe).
+    if !gs.forwarding_allowed() {
+        return credential_unavailable();
+    }
     let Some(auth) = deps.basic_auth() else {
         return credential_unavailable();
     };
@@ -581,6 +587,10 @@ async fn upload_pack(
     let Some(deps) = gs.git.clone() else {
         return not_configured();
     };
+    // Forwarding flag gate (GATE-004 §6.3) — before custody, as above.
+    if !gs.forwarding_allowed() {
+        return credential_unavailable();
+    }
     let Some(auth) = deps.basic_auth() else {
         return credential_unavailable();
     };
@@ -760,6 +770,18 @@ async fn forward_receive(
     repo: &str,
     body: Bytes,
 ) -> Response {
+    // Forwarding flag gate (GATE-004 §6.3): nothing is forwarded — not
+    // even the custody read — while the credential is unverified.
+    if !gs.forwarding_allowed() {
+        audit_push(
+            &gs.audit,
+            agent,
+            repo_full,
+            "deny",
+            "machine credential unavailable",
+        );
+        return credential_unavailable();
+    }
     let Some(auth) = deps.basic_auth() else {
         audit_push(
             &gs.audit,
