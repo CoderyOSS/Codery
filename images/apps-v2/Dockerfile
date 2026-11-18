@@ -49,7 +49,10 @@ RUN curl -fsSL https://get.jetify.com/devbox | bash -s -- -f \
     && chmod 755 /usr/local/bin/devbox
 
 # --- gem user (uid 1000 matches host bind-mount ownership) ---
+# -p '*': useradd's default '!' leaves the account LOCKED — Debian sshd
+# denies pubkey auth to locked accounts even with NOPASSWD sudoers.
 RUN useradd -u 1000 -m -s /bin/bash gem \
+    && usermod -p '*' gem \
     && echo "gem ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/gem \
     && chmod 440 /etc/sudoers.d/gem \
     && git lfs install --system \
