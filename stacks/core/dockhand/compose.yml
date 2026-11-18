@@ -21,6 +21,10 @@ name: dockhand
 services:
   dockhand:
     image: ${DOCKHAND_IMAGE:?set DOCKHAND_IMAGE in stack .env}
+    # deploy-engine subprocess budget: recreating containers from huge images
+    # (nix/devbox stores) exceeds the 900s default during the unpack phase
+    environment:
+      COMPOSE_TIMEOUT: "7200"
     container_name: dockhand
     restart: unless-stopped
     env_file:
