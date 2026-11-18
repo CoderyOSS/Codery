@@ -31,9 +31,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- Nix (single-user, later gem-owned) + devbox CLI ---
 # Single-user keeps runtime installs sudo-free; /nix becomes a named volume
 # at runtime (fresh volume seeded from this image on first mount).
-RUN curl -fsSL https://nixos.org/nix/install -o /tmp/nix-install.sh \
+# Root single-user quirk: the installer skips creating the nixbld group, and
+# nix then aborts ("group 'nixbld' does not exist"). Pre-create the group,
+# install, then clear build-users-group + disable sandbox (namespaces are
+# unavailable in this container runtime; nix falls back automatically).
+RUN groupadd -r nixbld \
+    && curl -fsSL https://nixos.org/nix/install -o /tmp/nix-install.sh \
     && sh /tmp/nix-install.sh --no-daemon \
-    && rm -f /tmp/nix-install.sh
+    && rm -f /tmp/nix-install.sh \
+    && printf '\nbuild-users-group =\nsandbox = false\n' >> /etc/nix/nix.conf
 ENV PATH="/nix/var/nix/profiles/default/bin:${PATH}"
 RUN curl -fsSL https://get.jetify.com/devbox | bash
 
