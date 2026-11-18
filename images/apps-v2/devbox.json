@@ -1,0 +1,24 @@
+{
+  "packages": [
+    "rustc",
+    "cargo",
+    "rustfmt",
+    "clippy",
+    "rust-analyzer",
+    "cargo-edit",
+    "cargo-nextest",
+    "elixir",
+    "erlang",
+    "elixir-ls",
+    "rebar3",
+    "bun",
+    "nodejs@22",
+    "neovim",
+    "tree-sitter",
+    "ripgrep",
+    "fd",
+    "fzf",
+    "glow",
+    "starship"
+  ]
+}

@@ -1,0 +1,6 @@
+#!/bin/bash
+# tmux — persistent main session for interactive SSH shells (`tmux attach`).
+export HOME=/home/gem
+export PATH="/home/gem/projects/Codery/images/apps-v2/.devbox/nix/profile/bin:/nix/var/nix/profiles/default/bin:$PATH"
+cd /home/gem/projects
+exec /command/s6-setuidgid gem bash -c 'tmux new-session -d -s main 2>/dev/null || true; exec sleep infinity'

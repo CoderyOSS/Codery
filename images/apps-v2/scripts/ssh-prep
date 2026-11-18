@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# ssh-prep — boot oneshot: sync sshd_config into the /etc/ssh volume, create
+# the privilege-separation dir, ensure host keys exist. Runs before sshd.
+set -eu
+install -m 644 /usr/local/share/apps-etc/sshd_config /etc/ssh/sshd_config
+mkdir -p /run/sshd /etc/ssh/authorized_keys
+ssh-keygen -A
+echo "[ssh-prep] sshd_config installed, host keys present"

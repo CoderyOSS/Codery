@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# devbox-replay — boot-time best-effort replay of the committed devbox
+# manifest into gem's profile. Normally a no-op: the /nix volume persists
+# the store and profiles across redeploys. Matters after a volume loss or
+# when devbox.json gained new packages on another machine. Never fatal.
+set -u
+
+DIR=/home/gem/projects/Codery/images/apps-v2
+[ -d "$DIR" ] || exit 0
+
+export HOME=/home/gem
+export PATH="/nix/var/nix/profiles/default/bin:${PATH}"
+cd "$DIR" || exit 0
+
+echo "[devbox-replay] syncing tools from devbox.json..."
+if ! devbox install >/tmp/devbox-replay.log 2>&1; then
+  echo "[devbox-replay] install FAILED (network?) — see /tmp/devbox-replay.log; retry via: ssh gem@apps 'cd $DIR && devbox install'" >&2
+fi
+exit 0

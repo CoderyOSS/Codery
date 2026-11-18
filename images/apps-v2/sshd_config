@@ -1,0 +1,31 @@
+# Deployed sshd_config lives in the /etc/ssh host-key volume; ssh-prep
+# reinstalls this file at every boot so config and image stay in sync.
+Port 22
+Port 2022
+Protocol 2
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+PermitRootLogin no
+AllowUsers gem
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+
+# /etc/ssh/authorized_keys/%u: host-managed file (bind mount)
+# /run/secrets/authorized_keys: host-managed keys (Blink etc.) — bind-mounted
+#   from /opt/codery/ssh/authorized_keys, same file the paseo container uses.
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u /run/secrets/authorized_keys
+
+StrictModes no
+LogLevel INFO
+
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+UsePAM no
+
+PrintMotd no
+# mosh bootstrap runs mosh-server via non-login ssh exec, which gets NO
+# container ENV — mosh refuses to start without a UTF-8 locale. Force one
+# server-side. C.UTF-8 is built into Debian's glibc.
+SetEnv LANG=C.UTF-8 LC_ALL=C.UTF-8
+Subsystem sftp /usr/lib/openssh/sftp-server

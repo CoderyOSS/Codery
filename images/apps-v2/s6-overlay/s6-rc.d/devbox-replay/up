@@ -1,0 +1,4 @@
+#!/bin/bash
+# devbox-replay — runs as gem; see scripts/devbox-replay (never fatal).
+export HOME=/home/gem
+exec /command/s6-setuidgid gem /usr/local/bin/devbox-replay
