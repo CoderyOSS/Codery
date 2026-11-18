@@ -29,16 +29,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Nix (single-user, later gem-owned) + devbox CLI ---
-# Single-user keeps runtime installs sudo-free; /nix becomes a named volume
+# Pinned binary tarball, single-user, no daemon. Running as root, nix
+# defaults build-users-group to 'nixbld' and aborts ("has no members") —
+# override it to empty for the install itself, then persist the override
+# plus sandbox=false in /etc/nix/nix.conf (namespaces are unavailable in
+# this runtime; nix auto-falls back anyway). /nix becomes a named volume
 # at runtime (fresh volume seeded from this image on first mount).
-# Root single-user quirk: the installer skips creating the nixbld group, and
-# nix then aborts ("group 'nixbld' does not exist"). Pre-create the group,
-# install, then clear build-users-group + disable sandbox (namespaces are
-# unavailable in this container runtime; nix falls back automatically).
-RUN groupadd -r nixbld \
-    && curl -fsSL https://nixos.org/nix/install -o /tmp/nix-install.sh \
-    && sh /tmp/nix-install.sh --no-daemon \
-    && rm -f /tmp/nix-install.sh \
+RUN curl -fsSL https://releases.nixos.org/nix/nix-2.35.6/nix-2.35.6-x86_64-linux.tar.xz -o /tmp/nix.tar.xz \
+    && cd /tmp \
+    && tar xf nix.tar.xz \
+    && cd nix-2.35.6-x86_64-linux \
+    && NIX_CONFIG="build-users-group =" ./install --no-daemon \
+    && cd / \
+    && rm -rf /tmp/nix.tar.xz /tmp/nix-2.35.6-x86_64-linux \
     && printf '\nbuild-users-group =\nsandbox = false\n' >> /etc/nix/nix.conf
 ENV PATH="/nix/var/nix/profiles/default/bin:${PATH}"
 RUN curl -fsSL https://get.jetify.com/devbox | bash
