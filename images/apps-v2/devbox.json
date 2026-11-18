@@ -13,6 +13,8 @@
     "rebar3",
     "bun",
     "nodejs@22",
+    "pnpm",
+    "yarn",
     "neovim",
     "tree-sitter",
     "ripgrep",
