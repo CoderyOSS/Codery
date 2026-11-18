@@ -57,8 +57,11 @@ RUN useradd -u 1000 -m -s /bin/bash gem \
 
 # --- Dev toolchains (devbox manifest = committed record; warm the store) ---
 COPY devbox.json* devbox.lock* /usr/local/share/apps-devbox/
+RUN chown -R 1000:1000 /usr/local/share/apps-devbox
 USER gem
-RUN cd /usr/local/share/apps-devbox && HOME=/home/gem devbox install
+RUN cd /usr/local/share/apps-devbox \
+    && HOME=/home/gem devbox update \
+    && HOME=/home/gem devbox install
 # pnpm + yarn via node's bundled corepack (shims land in the devbox profile)
 RUN cd /usr/local/share/apps-devbox && HOME=/home/gem corepack enable pnpm yarn
 
