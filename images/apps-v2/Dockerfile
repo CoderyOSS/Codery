@@ -101,7 +101,7 @@ NVIM_PLUGINS
 USER root
 RUN printf '%s\n' \
       '# devbox profile first: runtime-installed tools shadow system ones' \
-      'export PATH="$HOME/projects/Codery/images/apps-v2/.devbox/nix/profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:$HOME/.local/bin:$PATH"' \
+      'export PATH="$HOME/projects/Codery/images/apps-v2/.devbox/nix/profile/default/bin:/usr/local/share/apps-devbox/.devbox/nix/profile/default/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:$HOME/.local/bin:$PATH"' \
       'export LANG=C.UTF-8 LC_ALL=C.UTF-8' \
       'export EDITOR=nvim VISUAL=nvim PAGER=less' \
       'command -v starship >/dev/null 2>&1 && eval "$(starship init bash)"' \
@@ -111,7 +111,7 @@ RUN printf '%s\n' \
       'alias grep="grep --color=auto"' \
       > /home/gem/.bashrc \
     && printf '%s\n' \
-      'export PATH="$HOME/projects/Codery/images/apps-v2/.devbox/nix/profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:$PATH"' \
+      'export PATH="$HOME/projects/Codery/images/apps-v2/.devbox/nix/profile/default/bin:/usr/local/share/apps-devbox/.devbox/nix/profile/default/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:$PATH"' \
       'export LANG=C.UTF-8 LC_ALL=C.UTF-8' \
       > /etc/profile.d/zz-devbox.sh \
     && echo "set -g mouse on" > /home/gem/.tmux.conf \
@@ -147,8 +147,9 @@ RUN for f in noarch x86_64; do \
 COPY s6-overlay/ /etc/s6-overlay/
 
 # PATH for root processes: s6 services, HEALTHCHECK (docker exec has no
-# login shell). devbox profile dir exists because the store was warmed above.
-ENV PATH="/usr/local/share/apps-devbox/.devbox/nix/profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# login shell). The devbox profile dir exists because the store was warmed
+# at build; note devbox 0.22 puts profiles under nix/profile/<profile-name>.
+ENV PATH="/usr/local/share/apps-devbox/.devbox/nix/profile/default/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ENV LANG=C.UTF-8
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=120s --retries=3 \

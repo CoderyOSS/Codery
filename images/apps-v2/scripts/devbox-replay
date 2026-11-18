@@ -9,7 +9,8 @@ DIR=/home/gem/projects/Codery/images/apps-v2
 [ -d "$DIR" ] || exit 0
 
 export HOME=/home/gem
-export PATH="/nix/var/nix/profiles/default/bin:${PATH}"
+# /usr/local/bin: s6 oneshot PATH is minimal — devbox itself lives there.
+export PATH="/usr/local/bin:/nix/var/nix/profiles/default/bin:${PATH}"
 cd "$DIR" || exit 0
 
 echo "[devbox-replay] syncing tools from devbox.json..."
