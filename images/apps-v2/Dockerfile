@@ -62,8 +62,11 @@ USER gem
 RUN cd /usr/local/share/apps-devbox \
     && HOME=/home/gem devbox update \
     && HOME=/home/gem devbox install
-# pnpm + yarn via node's bundled corepack (shims land in the devbox profile)
-RUN cd /usr/local/share/apps-devbox && HOME=/home/gem corepack enable pnpm yarn
+    # pnpm + yarn via node's bundled corepack (shims land in the devbox profile)
+    RUN cd /usr/local/share/apps-devbox \
+        && HOME=/home/gem \
+           PATH="/usr/local/share/apps-devbox/.devbox/nix/profile/bin:$PATH" \
+           corepack enable pnpm yarn
 
 # --- NvChad starter (pinned) — first `nvim` launch bootstraps lazy plugins ---
 RUN git clone --filter=blob:none https://github.com/NvChad/starter /tmp/nvchad-starter \
