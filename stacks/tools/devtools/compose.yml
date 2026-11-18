@@ -81,7 +81,9 @@ services:
       - "${TAILNET_IP}:3333:2022"
       - "${TAILNET_IP}:61000:61000/udp"
     volumes:
-      - codery-apps-nix:/nix
+      # v2 image (Debian + devbox): single-user nix store, gem-owned.
+      # Old root-owned volume codery-apps-nix retained for rollback.
+      - codery-apps-nix-v2:/nix
       - codery-apps-ssh-host-keys:/etc/ssh
       - ${SSH_DIR:?set SSH_DIR in stack .env}:/home/gem/.ssh:ro
       - /opt/codery/github-app.pem:/run/secrets/github-app.pem:ro
@@ -195,7 +197,7 @@ volumes:
     external: true
   codery-paseo-ssh-host-keys:
     external: true
-  codery-apps-nix:
+  codery-apps-nix-v2:
     external: true
   codery-apps-ssh-host-keys:
     external: true
