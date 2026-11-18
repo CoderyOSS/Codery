@@ -45,7 +45,8 @@ RUN curl -fsSL https://releases.nixos.org/nix/nix-2.35.6/nix-2.35.6-x86_64-linux
     && mkdir -p /etc/nix \
     && printf 'build-users-group =\nsandbox = false\n' > /etc/nix/nix.conf
 ENV PATH="/nix/var/nix/profiles/default/bin:${PATH}"
-RUN curl -fsSL https://get.jetify.com/devbox | bash -s -- -f
+RUN curl -fsSL https://get.jetify.com/devbox | bash -s -- -f \
+    && chmod 755 /usr/local/bin/devbox
 
 # --- gem user (uid 1000 matches host bind-mount ownership) ---
 RUN useradd -u 1000 -m -s /bin/bash gem \
