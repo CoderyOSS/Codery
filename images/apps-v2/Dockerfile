@@ -64,7 +64,10 @@ RUN chown -R 1000:1000 /usr/local/share/apps-devbox
 
 USER gem
 # --- NvChad starter (pinned) — first `nvim` launch bootstraps lazy plugins ---
-RUN git clone --filter=blob:none https://github.com/NvChad/starter /tmp/nvchad-starter \
+# mkdir -p: nothing in the slim build creates ~/.config (devbox's gem-level
+# install used to); cp -a needs the parent to exist.
+RUN mkdir -p /home/gem/.config \
+    && git clone --filter=blob:none https://github.com/NvChad/starter /tmp/nvchad-starter \
     && cd /tmp/nvchad-starter \
     && git checkout e3572e1f5e1c297212c3deeb17b7863139ce663e \
     && rm -rf /home/gem/.config/nvim \
