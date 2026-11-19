@@ -1,11 +1,18 @@
-# GitAuthGate (gag) — project stack, deployed via Dockhand from this file.
-# Image is built host-side (no CI):
-#   docker build -t codery-gate:YYYYMMDD /opt/codery/projects/Codery/images/gate
-# Stack dir: /opt/codery/stacks/gag/ — compose.yml + policy.toml + .env (0600).
+# GitAuthGate (gag) — project stack, imported in place via Dockhand.
+# This file IS the deployed stack definition (no copy into stacks/); the
+# stack .env lives beside it here (gitignored — project secrets stay in the
+# project repo).
+# Rebuilds are host-side; dockhand deploys local images only because of
+# build: + pull_policy: never (dockhand always pulls otherwise):
+#   docker build -t codery-gitgate:YYYYMMDD /opt/codery/projects/Codery/images/gate
 # Zoraxy proxies gag.<domain> -> gitauthgate:8080 (no host port publish).
 services:
   gate:
     image: ${GATE_IMAGE:?set GATE_IMAGE in the stack .env}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    pull_policy: never
     container_name: gitauthgate
     restart: unless-stopped
     networks:
