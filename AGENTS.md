@@ -87,7 +87,7 @@ lets these bind before tailscale0 exists.
 | Add a subdomain | Zoraxy UI → proxy host (subdomain → `container:port`) |
 | Container down / logs / restart | Dockhand UI or `dockhand.*` MCP |
 | Enable/disable a tool | Edit `COMPOSE_PROFILES` in the stack `.env` → Deploy |
-| Install a dev tool | `ssh gem@apps tooladd <nixpkgs-pkg>` (persists in `/nix`; manifest auto-committed) |
+| Install a dev tool | `ssh gem@apps`, then in `~/projects/Codery/images/apps-v2`: `devbox add <pkg> && devbox install` (installs into `/nix` volume, no sudo; commit the `devbox.json`+`devbox.lock` change — `add` alone doesn't refresh the live profile, `install` does) |
 | Deploy dockhand itself | host-side only: `docker compose -f /opt/codery/stacks/dockhand/compose.yml up -d` |
 | Host unhealthy | `/usr/local/bin/codery-triage` (`--json` for machines) |
 | Full backup | `/usr/local/bin/codery-backup.sh` → `/opt/codery/backups/` |
