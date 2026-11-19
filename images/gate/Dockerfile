@@ -1,7 +1,12 @@
 # GitAuthGate image (GATE-009): single static musl binary; no git, no shell.
-FROM rust:1-slim AS build
+# Alpine builder: musl is the native libc (no cross toolchain needed) and
+# the x86_64-unknown-linux-musl target defaults to crt-static, so the
+# result runs on scratch.
+FROM rust:1-alpine AS build
 WORKDIR /src
-RUN rustup target add x86_64-unknown-linux-musl
+# musl-dev: ring/sqlite compile C via the native cc.
+# ca-certificates: runtime trust bundle copied into the scratch stage.
+RUN apk add --no-cache musl-dev ca-certificates
 # Manifests first so the dependency layers cache; no cargo config or
 # toolchain pin is committed — the image uses its own default toolchain.
 COPY Cargo.toml Cargo.lock ./
