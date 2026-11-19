@@ -1,0 +1,38 @@
+# GitAuthGate (gag) — project stack, deployed via Dockhand from this file.
+# Image is built host-side (no CI):
+#   docker build -t codery-gate:YYYYMMDD /opt/codery/projects/Codery/images/gate
+# Stack dir: /opt/codery/stacks/gag/ — compose.yml + policy.toml + .env (0600).
+# Zoraxy proxies gag.<domain> -> gitauthgate:8080 (no host port publish).
+services:
+  gate:
+    image: ${GATE_IMAGE:?set GATE_IMAGE in the stack .env}
+    container_name: gitauthgate
+    restart: unless-stopped
+    networks:
+      codery-net:
+        aliases:
+          - gitauthgate
+    environment:
+      GATE_PUBLIC_URL: ${GATE_PUBLIC_URL:-}
+      GATE_TOKEN_ENC_KEY: ${GATE_TOKEN_ENC_KEY:?required}
+      GATE_MACHINE_LOGIN: ${GATE_MACHINE_LOGIN:?required}
+      GATE_POLICY_PATH: /data/policy.toml
+      GATE_STATE_PATH: /data/gate.db
+      GATE_AUDIT_PATH: /data/audit.jsonl
+      # Control plane is optional: unset token = StubBackend, dangerous
+      # holds fail closed. Fill these in when the bot is provisioned.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWLIST: ${TELEGRAM_ALLOWLIST:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      # policy is config (version-controlled, bind-mounted);
+      # gate.db + audit.jsonl are runtime state (named volume).
+      - ./policy.toml:/data/policy.toml:ro
+      - gag-data:/data
+
+networks:
+  codery-net:
+    external: true
+
+volumes:
+  gag-data:

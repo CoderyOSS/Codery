@@ -1,0 +1,19 @@
+# GitAuthGate starter policy — fail-closed baseline.
+# Classes: push | force-push | branch-delete | tag-delete
+# Decisions: "allow" | "deny" | "approve" (approve = Telegram hold; without
+# the bot configured, approve decides as deny).
+# Unset class = deny. Third-party (non-own-sphere) mutations always approve,
+# whatever this file says.
+
+[defaults]
+push = "allow"
+force-push = "approve"
+branch-delete = "approve"
+tag-delete = "deny"
+
+[api]
+mutations = "approve"
+
+# Per-repo overrides inherit [defaults] for unmentioned classes.
+# [repos."owner/repo"]
+# tag-delete = "approve"
