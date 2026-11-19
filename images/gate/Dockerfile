@@ -15,11 +15,17 @@ RUN mkdir src \
     && cargo build --release --target x86_64-unknown-linux-musl
 COPY src ./src
 RUN touch src/main.rs \
-    && cargo build --release --target x86_64-unknown-linux-musl
+    && cargo build --release --target x86_64-unknown-linux-musl \
+    && mkdir -p /data \
+    && chown 65532:65532 /data
 
 # Distroless-style runtime: static binary + CA certs only.
+# /data is baked empty but gate-owned (65532): a fresh named volume seeds
+# from image content on first mount, ownership included — no manual
+# volume chown step at deploy time.
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /src/target/x86_64-unknown-linux-musl/release/gate /usr/local/bin/gate
+COPY --from=build /data /data
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/gate"]
