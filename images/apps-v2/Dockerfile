@@ -1,20 +1,18 @@
-# Apps container v2 — Debian base + devbox-managed toolchains + s6-overlay.
+# Apps container v2 (slim) — Debian + nix + devbox + s6-overlay.
 #
-# Replaces the nixos/nix (Alpine) base image (images/apps) and its flake +
-# home-manager + tooladd machinery. Package management at runtime:
+# Slim architecture: the image carries ONLY nix (~250 MB store) + devbox +
+# apt glue. ALL dev toolchains (rust, elixir, bun, node, nvim, ~9 GB) live
+# in the persistent /nix volume, installed by the s6 `devbox-replay` oneshot
+# (`devbox install` from the committed devbox.json + devbox.lock) at every
+# boot — no-op when the volume is already populated; on a FRESH volume the
+# first boot downloads them (network required, ~10-15 min). Runtime installs:
 #
 #   ssh gem@apps
 #   cd ~/projects/Codery/images/apps-v2 && devbox add <pkg>   (no sudo)
 #
-# devbox.json + devbox.lock (committed) are the tool record; the s6
-# `devbox-replay` oneshot runs `devbox install` best-effort at every boot.
-# /nix is a named volume (single-user nix store, gem-owned) seeded from this
-# image on first mount — runtime-installed tools survive redeploys.
-#
 # apt owns system services (sshd, mosh, tmux) and the native build chain;
-# devbox owns versioned dev toolchains (rust, elixir, bun, node, nvim...).
-# Dropped vs v1: nginx (layer violation), locale hacks (glibc base),
-# ijq, rustup (devbox pins rustc directly).
+# devbox owns versioned dev toolchains. Dropped vs v1: nginx (layer
+# violation), locale hacks (glibc base), ijq, rustup (devbox pins rustc).
 
 FROM debian:bookworm-slim
 
@@ -58,14 +56,13 @@ RUN useradd -u 1000 -m -s /bin/bash gem \
     && git lfs install --system \
     && chown -R 1000:1000 /nix
 
-# --- Dev toolchains (devbox manifest = committed record; warm the store) ---
+# --- Devbox manifest (baked for reference/repair) ---
+# NOT installed into the image — the /nix volume holds the toolchains.
+# devbox-replay installs from the committed manifest at every boot.
 COPY devbox.json* devbox.lock* /usr/local/share/apps-devbox/
 RUN chown -R 1000:1000 /usr/local/share/apps-devbox
-USER gem
-RUN cd /usr/local/share/apps-devbox \
-    && HOME=/home/gem devbox update \
-    && HOME=/home/gem devbox install
 
+USER gem
 # --- NvChad starter (pinned) — first `nvim` launch bootstraps lazy plugins ---
 RUN git clone --filter=blob:none https://github.com/NvChad/starter /tmp/nvchad-starter \
     && cd /tmp/nvchad-starter \
@@ -101,7 +98,7 @@ NVIM_PLUGINS
 USER root
 RUN printf '%s\n' \
       '# devbox profile first: runtime-installed tools shadow system ones' \
-      'export PATH="$HOME/projects/Codery/images/apps-v2/.devbox/nix/profile/default/bin:/usr/local/share/apps-devbox/.devbox/nix/profile/default/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:$HOME/.local/bin:$PATH"' \
+      'export PATH="$HOME/projects/Codery/images/apps-v2/.devbox/nix/profile/default/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:$HOME/.local/bin:$PATH"' \
       'export LANG=C.UTF-8 LC_ALL=C.UTF-8' \
       'export EDITOR=nvim VISUAL=nvim PAGER=less' \
       'command -v starship >/dev/null 2>&1 && eval "$(starship init bash)"' \
@@ -111,7 +108,7 @@ RUN printf '%s\n' \
       'alias grep="grep --color=auto"' \
       > /home/gem/.bashrc \
     && printf '%s\n' \
-      'export PATH="$HOME/projects/Codery/images/apps-v2/.devbox/nix/profile/default/bin:/usr/local/share/apps-devbox/.devbox/nix/profile/default/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:$PATH"' \
+      'export PATH="$HOME/projects/Codery/images/apps-v2/.devbox/nix/profile/default/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:$PATH"' \
       'export LANG=C.UTF-8 LC_ALL=C.UTF-8' \
       > /etc/profile.d/zz-devbox.sh \
     && echo "set -g mouse on" > /home/gem/.tmux.conf \
@@ -147,12 +144,15 @@ RUN for f in noarch x86_64; do \
 COPY s6-overlay/ /etc/s6-overlay/
 
 # PATH for root processes: s6 services, HEALTHCHECK (docker exec has no
-# login shell). The devbox profile dir exists because the store was warmed
-# at build; note devbox 0.22 puts profiles under nix/profile/<profile-name>.
-ENV PATH="/usr/local/share/apps-devbox/.devbox/nix/profile/default/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# login shell). The repo-dir devbox profile is created by devbox-replay at
+# boot (bind-mounted, persists); devbox 0.22 puts profiles under
+# nix/profile/<profile-name>.
+ENV PATH="/home/gem/projects/Codery/images/apps-v2/.devbox/nix/profile/default/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ENV LANG=C.UTF-8
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=120s --retries=3 \
+# start-period 600s: tolerates fresh-volume first boots, where
+# devbox-replay downloads the whole manifest before tools appear.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=600s --retries=3 \
     CMD /usr/local/bin/healthcheck
 
 ENTRYPOINT ["/init"]
