@@ -14,9 +14,13 @@
 //!   [`crate::control::Callback`] a Telegram button press would produce —
 //!   callback updates carry NO text, exactly like the Telegram shape.
 
+pub mod client;
+
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use serde_json::{json, Value};
+
+pub use self::client::{connect, NtfyClient};
 
 use crate::control::{Callback, Update};
 

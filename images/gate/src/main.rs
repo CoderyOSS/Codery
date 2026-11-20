@@ -76,8 +76,11 @@ async fn main() -> anyhow::Result<()> {
         Option<i64>,
         Vec<i64>,
         &'static str,
-    )> = {
-        // ntfy transport wires in here (config + transport tasks, GATE-013)
+    )> = if let Some(ntfy_cfg) = &cfg.ntfy {
+        let api: Arc<dyn gate::control::ControlApi> =
+            Arc::new(gate::ntfy::connect(ntfy_cfg).await?);
+        Some((api, Some(gate::ntfy::CONTROL_TOPIC_ID), vec![1], "ntfy"))
+    } else {
         None
     };
     let chat_id = channel.as_ref().and_then(|(_, chat, _, _)| *chat);
