@@ -1,19 +1,22 @@
-# GitAuthGate (gag) — project stack, imported in place (this file IS the
-# deployed stack definition; the stack .env lives beside it, gitignored).
+# GitAuthGate (gag) — standalone compose (DockerHub / plain-docker path).
+# Codery hosts deploy via the devtools stack's gitauthgate service instead
+# (stacks/tools/devtools/compose.yml, `gag` profile) — this file is the
+# self-contained deployment for hosts without the devtools stack.
 #
 # Setup (see README.md for the full walk-through):
 #   1. docker pull coderyoss/codery-gitgate:0.1.0
 #      (pre-publish: docker build -t codery-gitgate:0.1.0 <repo>/images/gate)
 #   2. cp .env.example .env — fill GATE_PUBLIC_URL, GATE_TOKEN_ENC_KEY,
-#      GATE_MACHINE_LOGIN
-#   3. run it: Dockhand → import this compose (plain host: docker compose up -d;
-#      create the codery-net network first if absent)
+#      GATE_MACHINE_LOGIN, and ONE control channel (GATE-012: Telegram
+#      here OR the Matrix keys — never both; the gate refuses to boot)
+#   3. run it: docker network create codery-net (if absent);
+#      docker compose up -d
 #   4. browse to the gate page via your reverse proxy → /setup/token
 #      custodies the machine PAT (encrypted into /data/gate.db)
 #
-# Zoraxy (Codery hosts) proxies gag.<domain> -> gitauthgate:8080; no host
-# port publish. build:+pull_policy:never keeps dockhand from pulling a
-# DockerHub image that doesn't exist yet.
+# The volume auto-seeds with gate's baked /data ownership (uid 65532) on
+# first mount — no manual chown. The policy file is bind-mounted
+# read-only: it is config, not state.
 services:
   gate:
     image: codery-gitgate:0.1.0
@@ -22,3 +25,34 @@ services:
       dockerfile: Dockerfile
     pull_policy: never
     container_name: gitauthgate
+    restart: unless-stopped
+    networks:
+      codery-net:
+        aliases:
+          - gitauthgate
+    environment:
+      GATE_PUBLIC_URL: ${GATE_PUBLIC_URL:-}
+      GATE_TOKEN_ENC_KEY: ${GATE_TOKEN_ENC_KEY:?required — see .env.example}
+      GATE_MACHINE_LOGIN: ${GATE_MACHINE_LOGIN:?required — see .env.example}
+      GATE_POLICY_PATH: /data/policy.toml
+      GATE_STATE_PATH: /data/gate.db
+      GATE_AUDIT_PATH: /data/audit.jsonl
+      # Control plane is optional: unset = StubBackend, dangerous holds
+      # fail closed. Choose ONE channel (GATE-012) — never both.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWLIST: ${TELEGRAM_ALLOWLIST:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      MATRIX_HOMESERVER_URL: ${MATRIX_HOMESERVER_URL:-}
+      MATRIX_ACCESS_TOKEN: ${MATRIX_ACCESS_TOKEN:-}
+      MATRIX_ROOM_ID: ${MATRIX_ROOM_ID:-}
+      MATRIX_USER_ALLOWLIST: ${MATRIX_USER_ALLOWLIST:-}
+    volumes:
+      - ./policy.toml:/data/policy.toml:ro
+      - gag-data:/data
+
+networks:
+  codery-net:
+    external: true
+
+volumes:
+  gag-data:

@@ -146,12 +146,14 @@ services:
     # docs/guides/gitauthgate-setup.md. The image is one static musl binary
     # (no git, no shell), so building on-host (docker build -t
     # codery-gitgate:<tag> images/gate) is cheap and needs no registry auth.
-    # Config model (GATE-001/009, opendesign placement): secrets
-    # (GATE_TOKEN_ENC_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWLIST,
-    # TELEGRAM_CHAT_ID, GATE_MACHINE_LOGIN) come from /opt/codery/.env via
-    # env_file; routing values are pinned here. The 23080 loopback publish
-    # is for host-side curl checks only — Zoraxy reaches the container by
-    # DNS alias.
+    # Config model (GATE-001/009/012, opendesign placement): secrets
+    # (GATE_TOKEN_ENC_KEY, GATE_MACHINE_LOGIN, and ONE control channel —
+    # TELEGRAM_BOT_TOKEN/TELEGRAM_ALLOWLIST/TELEGRAM_CHAT_ID or
+    # MATRIX_HOMESERVER_URL/MATRIX_ACCESS_TOKEN/MATRIX_ROOM_ID/
+    # MATRIX_USER_ALLOWLIST; both channels ⇒ refuse to boot) come from
+    # /opt/codery/.env via env_file; routing values are pinned here. The
+    # 23080 loopback publish is for host-side curl checks only — Zoraxy
+    # reaches the container by DNS alias.
     # pull_policy: never — dockhand always pulls on deploy; the image is
     # local-only (DockerHub publication pending), so pulling must be off.
     # The deployed stacks/ copy also carries a build: section (absolute
