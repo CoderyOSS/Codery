@@ -16,6 +16,10 @@
 
 use std::collections::HashMap;
 
+pub mod client;
+
+pub use self::client::{connect, validate_room_id, MatrixClient, SharedState};
+
 /// The numeric chat id of the single pinned control room. The room's
 /// real identity (`MATRIX_ROOM_ID`) lives only in the transport; the
 /// rest of the control plane sees this constant.
