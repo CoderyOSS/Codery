@@ -70,21 +70,10 @@ pub struct Config {
     /// Cap on proxied request bodies (`GATE_MAX_BODY_BYTES`); over-limit
     /// requests get a 413 before anything is forwarded upstream.
     pub max_body_bytes: usize,
-    /// Telegram bot token (`TELEGRAM_BOT_TOKEN`) when set and non-empty —
-    /// the only condition under which the control-plane poll loop spawns
-    /// (core git/API paths must work without the bot).
-    pub telegram_bot_token: Option<String>,
-    /// Allowlisted Telegram user ids (`TELEGRAM_ALLOWLIST`, comma-separated
-    /// integers; GATE-006). Empty ⇒ the loop (if spawned) drops every
-    /// update — fail closed.
-    pub telegram_allowlist: Vec<i64>,
-    /// Chat id approval asks are delivered to (`TELEGRAM_CHAT_ID`). Unset
-    /// with a bot token configured ⇒ asks cannot be delivered: approval
-    /// `present` errors and holds are denied — fail closed.
-    pub telegram_chat_id: Option<i64>,
-    /// Matrix control channel (GATE-012), mutually exclusive with the
-    /// Telegram one — `matrix_config_from` refuses dual/partial configs.
-    pub matrix: Option<MatrixConfig>,
+    /// ntfy control channel (GATE-013): broker URL + control/answers
+    /// topics + access token. All-or-nothing — a partial set refuses to
+    /// boot. Broker auth IS the operator identity (deny-all + token).
+    pub ntfy: Option<NtfyConfig>,
     /// Registry sweep cadence in seconds (`GATE_REGISTRY_SWEEP_SECS`,
     /// default 1800).
     pub registry_sweep_secs: u64,
@@ -108,129 +97,69 @@ pub struct Config {
     pub elevation_expire_secs: u64,
 }
 
-/// Bot token as `Some` only when set and non-blank; blank ⇒ `None` (no
-/// control plane spawns).
-fn telegram_bot_token_from(v: Option<&str>) -> Option<String> {
-    v.map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// Parse the GATE-006 allowlist: comma-separated integer user ids. Blank
-/// or absent ⇒ empty (which the transport treats as "drop everything").
-/// Unparsable entries are skipped individually — a typo narrows the
-/// allowlist rather than disabling or widening it (fail closed).
-fn allowlist_from(v: Option<&str>) -> Vec<i64> {
-    v.map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            s.split(',')
-                .filter_map(|part| part.trim().parse::<i64>().ok())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Parse `TELEGRAM_CHAT_ID`: trimmed integer, or `None` when unset, blank
-/// or unparsable (asks stay undeliverable — the backend fails closed).
-fn chat_id_from(v: Option<&str>) -> Option<i64> {
-    v.map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse().ok())
-}
-
-/// GATE-012 Matrix control-channel configuration. Present (`Some`) only
-/// when the required keys are set; any Matrix key present demands a
-/// COMPLETE configuration — partial configs refuse to boot, never
-/// half-wire a channel.
+/// GATE-013 ntfy control-channel configuration. Present (`Some`) only
+/// when ALL FOUR keys are set; any ntfy key present demands a COMPLETE
+/// configuration — partial configs refuse to boot, never half-wire a
+/// channel. Broker auth (deny-all + token) IS the operator identity.
 #[derive(Debug, Clone)]
-pub struct MatrixConfig {
-    pub homeserver_url: String,
-    pub access_token: String,
-    pub room_id: String,
-    /// mxids allowed to command the gate; empty ⇒ drop everything
-    /// (fail closed, mirrors the Telegram allowlist rule).
-    pub user_allowlist: Vec<String>,
+pub struct NtfyConfig {
+    /// Broker base URL — MUST be byte-identical to the address the app
+    /// subscribes with (ntfy matches the push signal on it).
+    pub url: String,
+    /// The control topic: asks, notices, and operator compositions.
+    pub topic: String,
+    /// The answers topic: action buttons POST here; the phone does NOT
+    /// subscribe to it.
+    pub answers_topic: String,
+    /// Broker access token (`tk_…`).
+    pub token: String,
 }
 
-/// Parse `MATRIX_USER_ALLOWLIST`: comma-separated mxids, trimmed, blanks
-/// skipped. There is no "bad entry" notion at this layer — mxid shape is
-/// validated by the transport (GATE-012).
-fn mxids_from(v: Option<&str>) -> Vec<String> {
-    v.map(|s| {
-        s.split(',')
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(String::from)
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
-/// GATE-012 channel resolution. A key "counts as set" when trimmed
-/// non-empty — including the allowlist (a blank allowlist value counts as
-/// UNSET for presence: composes export it set-but-empty everywhere; when
-/// the trio IS complete, a blank allowlist is a valid empty fail-closed
-/// list). Rules, in order:
-/// no Matrix key ⇒ `Ok(None)`; any Matrix key alongside
-/// `TELEGRAM_BOT_TOKEN` ⇒ refuse (mutually exclusive channels); any
-/// Matrix key without all three required ones ⇒ refuse naming the
-/// missing keys. The error strings name the offending env keys so the
-/// operator can fix the `.env` without reading code.
 /// A required key "counts as set" when trimmed non-empty.
 fn trimmed_non_empty(v: Option<&str>) -> Option<&str> {
     v.map(str::trim).filter(|s| !s.is_empty())
 }
 
-fn matrix_config_from(
-    telegram_token: Option<&str>,
-    homeserver: Option<&str>,
-    access_token: Option<&str>,
-    room_id: Option<&str>,
-    user_allowlist: Option<&str>,
-) -> anyhow::Result<Option<MatrixConfig>> {
-    let hs = trimmed_non_empty(homeserver);
-    let token = trimmed_non_empty(access_token);
-    let room = trimmed_non_empty(room_id);
-    // Presence rule (C1): a BLANK allowlist counts as unset for presence —
-    // composes export `MATRIX_USER_ALLOWLIST=` set-but-empty on every
-    // deployment, and a blank value must never make a Telegram/no-channel
-    // deployment look Matrix-configured. The VALUE still flows through
-    // `mxids_from` when the trio is complete (blank ⇒ empty fail-closed list).
-    let allowlist_present =
-        user_allowlist.map(str::trim).is_some_and(|s| !s.is_empty());
-    let any_present =
-        hs.is_some() || token.is_some() || room.is_some() || allowlist_present;
+fn ntfy_config_from(
+    url: Option<&str>,
+    topic: Option<&str>,
+    answers_topic: Option<&str>,
+    token: Option<&str>,
+) -> anyhow::Result<Option<NtfyConfig>> {
+    let u = trimmed_non_empty(url);
+    let t = trimmed_non_empty(topic);
+    let a = trimmed_non_empty(answers_topic);
+    let k = trimmed_non_empty(token);
+    let any_present = u.is_some() || t.is_some() || a.is_some() || k.is_some();
     if !any_present {
         return Ok(None);
     }
-    if trimmed_non_empty(telegram_token).is_some() {
-        anyhow::bail!(
-            "GATE-012: TELEGRAM_BOT_TOKEN and MATRIX_ACCESS_TOKEN are mutually exclusive — \
-             configure exactly one control channel"
-        );
-    }
     let mut missing = Vec::new();
-    if hs.is_none() {
-        missing.push("MATRIX_HOMESERVER_URL");
+    if u.is_none() {
+        missing.push("NTFY_URL");
     }
-    if token.is_none() {
-        missing.push("MATRIX_ACCESS_TOKEN");
+    if t.is_none() {
+        missing.push("NTFY_TOPIC");
     }
-    if room.is_none() {
-        missing.push("MATRIX_ROOM_ID");
+    if a.is_none() {
+        missing.push("NTFY_ANSWERS_TOPIC");
+    }
+    if k.is_none() {
+        missing.push("NTFY_TOKEN");
     }
     if !missing.is_empty() {
         anyhow::bail!(
-            "GATE-012: partial Matrix configuration — {} must also be set",
+            "GATE-013: partial ntfy configuration — {} must also be set",
             missing.join(", ")
         );
     }
-    Ok(Some(MatrixConfig {
-        homeserver_url: hs.unwrap().to_string(),
-        access_token: token.unwrap().to_string(),
-        room_id: room.unwrap().to_string(),
-        user_allowlist: mxids_from(user_allowlist),
+    // Trailing slash would make the push-signal host differ from the app's
+    // subscription address (ntfy's #1 self-hosting gotcha) — normalize.
+    Ok(Some(NtfyConfig {
+        url: u.unwrap().trim_end_matches('/').to_string(),
+        topic: t.unwrap().to_string(),
+        answers_topic: a.unwrap().to_string(),
+        token: k.unwrap().to_string(),
     }))
 }
 
@@ -255,19 +184,11 @@ impl Config {
             max_body_bytes: max_body_bytes_from(
                 env::var("GATE_MAX_BODY_BYTES").ok().as_deref(),
             ),
-            telegram_bot_token: telegram_bot_token_from(
-                env::var("TELEGRAM_BOT_TOKEN").ok().as_deref(),
-            ),
-            telegram_allowlist: allowlist_from(
-                env::var("TELEGRAM_ALLOWLIST").ok().as_deref(),
-            ),
-            telegram_chat_id: chat_id_from(env::var("TELEGRAM_CHAT_ID").ok().as_deref()),
-            matrix: matrix_config_from(
-                env::var("TELEGRAM_BOT_TOKEN").ok().as_deref(),
-                env::var("MATRIX_HOMESERVER_URL").ok().as_deref(),
-                env::var("MATRIX_ACCESS_TOKEN").ok().as_deref(),
-                env::var("MATRIX_ROOM_ID").ok().as_deref(),
-                env::var("MATRIX_USER_ALLOWLIST").ok().as_deref(),
+            ntfy: ntfy_config_from(
+                env::var("NTFY_URL").ok().as_deref(),
+                env::var("NTFY_TOPIC").ok().as_deref(),
+                env::var("NTFY_ANSWERS_TOPIC").ok().as_deref(),
+                env::var("NTFY_TOKEN").ok().as_deref(),
             )?,
             registry_sweep_secs: sweep_secs_from(
                 env::var("GATE_REGISTRY_SWEEP_SECS").ok().as_deref(),
@@ -379,42 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn telegram_bot_token_none_when_unset_or_blank() {
-        assert_eq!(telegram_bot_token_from(None), None);
-        assert_eq!(telegram_bot_token_from(Some("")), None);
-        assert_eq!(telegram_bot_token_from(Some("   ")), None);
-        assert_eq!(
-            telegram_bot_token_from(Some(" 123:abc ")),
-            Some("123:abc".to_string())
-        );
-    }
-
-    #[test]
-    fn allowlist_parses_comma_separated_ids() {
-        assert_eq!(allowlist_from(Some("42, 7 ,100")), vec![42, 7, 100]);
-        assert_eq!(allowlist_from(Some("-5")), vec![-5]);
-        assert_eq!(allowlist_from(None), Vec::<i64>::new());
-        assert_eq!(allowlist_from(Some("  ")), Vec::<i64>::new());
-    }
-
-    #[test]
-    fn allowlist_skips_bad_entries_and_stays_fail_closed() {
-        assert_eq!(allowlist_from(Some("42,oops,7")), vec![42, 7]);
-        assert_eq!(allowlist_from(Some("oops")), Vec::<i64>::new(), "garbage ⇒ empty");
-        assert_eq!(allowlist_from(Some(",,")), Vec::<i64>::new());
-    }
-
-    #[test]
-    fn telegram_chat_id_parses_or_fails_closed_to_none() {
-        assert_eq!(chat_id_from(None), None);
-        assert_eq!(chat_id_from(Some("")), None);
-        assert_eq!(chat_id_from(Some("  ")), None);
-        assert_eq!(chat_id_from(Some("junk")), None);
-        assert_eq!(chat_id_from(Some(" -100200 ")), Some(-100_200));
-        assert_eq!(chat_id_from(Some("42")), Some(42));
-    }
-
-    #[test]
     fn sweep_secs_defaults_when_unset_or_garbage_or_zero() {
         assert_eq!(sweep_secs_from(None), DEFAULT_REGISTRY_SWEEP_SECS);
         assert_eq!(sweep_secs_from(Some("")), DEFAULT_REGISTRY_SWEEP_SECS);
@@ -460,86 +345,52 @@ mod tests {
         }
     }
 
-    // --- GATE-012: Matrix control channel (mutually exclusive) ---
+    // --- GATE-013: ntfy control channel (all-or-nothing) ---
 
-    const HS: Option<&str> = Some("https://matrix.example.org");
-    const TOKEN: Option<&str> = Some("syt_gate_XXXXXXXX");
-    const ROOM: Option<&str> = Some("!control:example.org");
-    const MXIDS: Option<&str> = Some("@rob:example.org, @ops:example.org ");
+    const NU: Option<&str> = Some("https://ntfy.example.com/");
+    const NT: Option<&str> = Some("gate-control-7f3a");
+    const NA: Option<&str> = Some("gate-answers-91bd");
+    const NK: Option<&str> = Some("tk_gate_XXXXXXXX");
 
     #[test]
-    fn matrix_config_parses_all_keys() {
-        let cfg = matrix_config_from(None, HS, TOKEN, ROOM, MXIDS)
-            .expect("complete matrix config must load");
-        let cfg = cfg.expect("all keys set ⇒ Some");
-        assert_eq!(cfg.homeserver_url, "https://matrix.example.org");
-        assert_eq!(cfg.access_token, "syt_gate_XXXXXXXX");
-        assert_eq!(cfg.room_id, "!control:example.org");
-        assert_eq!(
-            cfg.user_allowlist,
-            vec!["@rob:example.org".to_string(), "@ops:example.org".to_string()]
-        );
+    fn ntfy_config_parses_and_normalizes_url() {
+        let cfg = ntfy_config_from(NU, NT, NA, NK)
+            .expect("complete ntfy config must load")
+            .expect("all keys set ⇒ Some");
+        assert_eq!(cfg.url, "https://ntfy.example.com", "trailing slash normalized");
+        assert_eq!(cfg.topic, "gate-control-7f3a");
+        assert_eq!(cfg.answers_topic, "gate-answers-91bd");
+        assert_eq!(cfg.token, "tk_gate_XXXXXXXX");
     }
 
     #[test]
-    fn matrix_config_absent_when_no_keys() {
-        let cfg = matrix_config_from(None, None, None, None, None)
-            .expect("no keys at all is a valid no-matrix config");
+    fn ntfy_config_absent_when_no_keys() {
+        let cfg = ntfy_config_from(None, None, None, None)
+            .expect("no keys at all is a valid no-ntfy config");
         assert!(cfg.is_none());
     }
 
     #[test]
-    fn both_channels_configured_refuses() {
-        let err = matrix_config_from(Some("123:abc"), HS, TOKEN, ROOM, None)
-            .expect_err("dual channels must refuse to boot");
+    fn partial_ntfy_config_refuses() {
+        // token-only: missing url + both topics
+        let err = ntfy_config_from(None, None, None, NK)
+            .expect_err("token without url/topics must refuse");
         let msg = err.to_string();
-        assert!(msg.contains("TELEGRAM_BOT_TOKEN"), "{msg}");
-        assert!(msg.contains("MATRIX_ACCESS_TOKEN"), "{msg}");
+        assert!(msg.contains("NTFY_URL"), "{msg}");
+        assert!(msg.contains("NTFY_TOPIC"), "{msg}");
+        assert!(msg.contains("NTFY_ANSWERS_TOPIC"), "{msg}");
+
+        // url-only
+        let err = ntfy_config_from(NU, None, None, None)
+            .expect_err("url alone must refuse");
+        assert!(err.to_string().contains("NTFY_TOKEN"));
     }
 
     #[test]
-    fn partial_matrix_config_refuses() {
-        // token-only: missing homeserver + room
-        let err = matrix_config_from(None, None, TOKEN, None, None)
-            .expect_err("token without homeserver/room must refuse");
-        let msg = err.to_string();
-        assert!(msg.contains("MATRIX_HOMESERVER_URL"), "{msg}");
-        assert!(msg.contains("MATRIX_ROOM_ID"), "{msg}");
-
-        // homeserver-only
-        let err = matrix_config_from(None, HS, None, None, None)
-            .expect_err("homeserver alone must refuse");
-        assert!(err.to_string().contains("MATRIX_ACCESS_TOKEN"));
-
-        // room-only
-        let err = matrix_config_from(None, None, None, ROOM, None)
-            .expect_err("room alone must refuse");
-        assert!(err.to_string().contains("MATRIX_ACCESS_TOKEN"));
-    }
-
-    #[test]
-    fn blank_allowlist_is_valid_empty_fail_closed() {
-        let cfg = matrix_config_from(None, HS, TOKEN, ROOM, Some(""))
-            .expect("blank allowlist is a complete config")
-            .expect("all required keys set ⇒ Some");
-        assert!(cfg.user_allowlist.is_empty(), "empty allowlist ⇒ drop everything");
-    }
-
-    #[test]
-    fn blank_allowlist_alone_is_not_a_matrix_config() {
-        // C1 regression guard: composes export `MATRIX_USER_ALLOWLIST=`
-        // (set-but-empty) for Telegram/no-channel deployments — a blank
-        // value must count as UNSET for presence, or every deployment
-        // without a full Matrix trio would refuse to boot.
-        let cfg = matrix_config_from(None, None, None, None, Some(""))
-            .expect("blank allowlist alone must not be a partial config");
-        assert!(cfg.is_none(), "no Matrix keys ⇒ no Matrix config");
-    }
-
-    #[test]
-    fn blank_allowlist_with_telegram_does_not_trigger_exclusivity() {
-        let cfg = matrix_config_from(Some("123:abc"), None, None, None, Some(""))
-            .expect("blank allowlist beside Telegram must not refuse");
-        assert!(cfg.is_none(), "still no Matrix config");
+    fn blank_values_count_as_unset_for_presence_but_url_slash_still_trims() {
+        let cfg = ntfy_config_from(Some("https://ntfy.example.com"), NT, NA, NK)
+            .expect("complete config")
+            .expect("all keys set ⇒ Some");
+        assert_eq!(cfg.url, "https://ntfy.example.com");
     }
 }
