@@ -60,6 +60,10 @@ pub struct SharedState {
     next_update_id: AtomicI64,
     next_message_id: AtomicI32,
     events: Mutex<HashMap<i32, OwnedEventId>>,
+    /// Message ids the GATE ITSELF sent (C2): only bot-owned events may
+    /// carry `m.replace` edits — cross-sender replacements are invalid
+    /// per the Matrix spec and are ignored by clients.
+    owned: Mutex<std::collections::HashSet<i32>>,
 }
 
 impl SharedState {
@@ -74,10 +78,30 @@ impl SharedState {
         self.next_update_id.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Bind an outbound/inbound event id to a fresh `MsgRef` in the
-    /// control room. One binding table serves both directions: the id
-    /// space is per-process and monotonic.
+    /// Bind an OUTBOUND (bot-sent) event id to a fresh `MsgRef`. One
+    /// binding table serves both directions; ownership is tracked
+    /// separately so edits only ever target the gate's own messages.
     pub fn bind(&self, event_id: OwnedEventId) -> MsgRef {
+        let id = self.next_message_id.fetch_add(1, Ordering::Relaxed) + 1;
+        self.events
+            .lock()
+            .expect("event map lock must be poison-free")
+            .insert(id, event_id);
+        self.owned
+            .lock()
+            .expect("owned set lock must be poison-free")
+            .insert(id);
+        MsgRef {
+            chat_id: ROOM_CHAT_ID,
+            message_id: id,
+        }
+    }
+
+    /// Bind an INBOUND (operator-sent) event id. The gate must never
+    /// `m.replace` another user's event (Matrix spec: replacement validity)
+    /// — `resolve_owned` returns `None` for these, driving the fresh-reply
+    /// fallback in `edit_message`.
+    pub fn bind_inbound(&self, event_id: OwnedEventId) -> MsgRef {
         let id = self.next_message_id.fetch_add(1, Ordering::Relaxed) + 1;
         self.events
             .lock()
@@ -100,6 +124,21 @@ impl SharedState {
             .cloned()
     }
 
+    /// Like [`resolve`], but `None` unless the event was sent BY THE GATE
+    /// (C2) — the precondition for a spec-valid `m.replace`.
+    pub fn resolve_owned(&self, to: MsgRef) -> Option<OwnedEventId> {
+        let owned = self
+            .owned
+            .lock()
+            .expect("owned set lock must be poison-free")
+            .contains(&to.message_id);
+        if owned {
+            self.resolve(to)
+        } else {
+            None
+        }
+    }
+
     /// Queue a parsed inbound update for the poll loop; sequential ids
     /// assigned here. Test-visible.
     pub fn stage(&self, mut update: Update, queue: &Mutex<Vec<Update>>) {
@@ -116,6 +155,15 @@ impl SharedState {
 /// text is the classic leak path).
 fn kind_of(_: &impl std::fmt::Debug) -> &'static str {
     "transport error"
+}
+
+/// Backoff delay after the `failure_count`-th consecutive sync error:
+/// 1s, 2s, 4s … capped at 60s (mirrors the GATE-006 poll-loop posture).
+fn sync_backoff(failure_count: u32) -> Duration {
+    let shift = failure_count.saturating_sub(1).min(6);
+    Duration::from_secs(1)
+        .saturating_mul(1u32 << shift)
+        .min(Duration::from_secs(60))
 }
 
 /// Where the SDK persists device identity + Megolm sessions: a directory
@@ -239,8 +287,10 @@ async fn warn_if_unencrypted(room: &Room, room_id: &RoomId) {
 }
 
 /// The live transport. `rx` long-poll semantics: `get_updates` blocks on
-/// the queue the sync handlers feed; a closed queue means the sync loop
-/// died and the poll loop backs off (GATE-006 loop semantics).
+/// the queue the sync handlers feed. The sync task RETRIES with backoff
+/// on transport errors (C3) — a transient homeserver blip must never
+/// permanently silence the channel, so the queue in practice stays open
+/// for the process's lifetime.
 pub struct MatrixClient {
     room: Room,
     rx: tokio::sync::Mutex<mpsc::Receiver<Update>>,
@@ -278,29 +328,46 @@ async fn handle_message(
     let Some(&from_id) = ids.get(mxid) else {
         return; // stranger: dropped with zero outbound (GATE-006 rule)
     };
-    let to = state.bind(original.event_id);
-    let update = if let Some(triple) = command_to_callback(&body) {
-        Update {
+    let update = synthesize_update(state, from_id, &body, original.event_id);
+    let _ = tx.send(update).await;
+}
+
+/// Inbound event → the `Update` the control plane consumes (C2/I1 fix
+/// pass). One function so the synthesis shapes stay testable without the
+/// SDK: `/ok`-family commands become callback updates in the exact shape
+/// a Telegram button press produces — NO text, NO sender_id (`commands`
+/// fires on text presence; carrying both would double-fire an
+/// UNKNOWN_COMMAND reply on every decision) — other text keeps sender and
+/// text. The anchor binds as INBOUND: the gate owns it not, so feedback
+/// edits resolve to None and answer with a fresh reply instead of the
+/// spec-invalid cross-sender `m.replace`.
+fn synthesize_update(
+    state: &SharedState,
+    from_id: i64,
+    body: &str,
+    event_id: OwnedEventId,
+) -> Update {
+    let msg_ref = state.bind_inbound(event_id);
+    if let Some(data) = command_to_callback(body) {
+        return Update {
             update_id: 0,
-            sender_id: Some(from_id),
-            text: Some(body),
+            sender_id: None,
+            text: None,
             callback: Some(Callback {
                 id: "matrix".to_string(),
-                data: triple,
+                data,
                 from_id,
             }),
-            message_ref: Some(to),
-        }
-    } else {
-        Update {
-            update_id: 0,
-            sender_id: Some(from_id),
-            text: Some(body),
-            callback: None,
-            message_ref: Some(to),
-        }
-    };
-    let _ = tx.send(update).await;
+            message_ref: Some(msg_ref),
+        };
+    }
+    Update {
+        update_id: 0,
+        sender_id: Some(from_id),
+        text: Some(body.to_string()),
+        callback: None,
+        message_ref: Some(msg_ref),
+    }
 }
 
 /// Connect and arm the transport: validate config shape, restore/build
@@ -336,11 +403,24 @@ pub async fn connect(cfg: &MatrixConfig, state_dir: &Path) -> Result<MatrixClien
     });
     let sync_client = client.clone();
     tokio::spawn(async move {
-        if let Err(e) = sync_client
-            .sync(SyncSettings::default().timeout(Duration::from_secs(30)))
-            .await
-        {
-            eprintln!("matrix: sync loop ended ({})", kind_of(&e));
+        // C3: the SDK's sync returns on ANY transport error and it is the
+        // caller's job to continue — a fire-and-forget spawn would turn
+        // one homeserver blip into silent permanent loss of inbound
+        // traffic. Retry with the GATE-006 backoff posture instead.
+        let mut failures: u32 = 0;
+        loop {
+            match sync_client
+                .sync(SyncSettings::default().timeout(Duration::from_secs(30)))
+                .await
+            {
+                Ok(()) => return, // clean stop: the client was dropped
+                Err(e) => {
+                    failures = failures.saturating_add(1);
+                    let delay = sync_backoff(failures);
+                    eprintln!("matrix: sync error ({}); retrying in {delay:?}", kind_of(&e));
+                    tokio::time::sleep(delay).await;
+                }
+            }
         }
     });
 
@@ -412,10 +492,13 @@ impl TelegramApi for MatrixClient {
         self.send_content(&req).await
     }
 
-    /// Edit in place via `m.new_content`; a binding that predates this
-    /// process falls back to a fresh send (ADR GATE-012 trade-off).
+    /// Edit in place via `m.new_content` — bot-owned events only (C2):
+    /// a cross-sender `m.replace` is invalid per the Matrix spec, so an
+    /// operator's event (or a pre-restart binding) falls back to a fresh
+    /// REPLY send, which every handler's request already anchors via
+    /// `replying_to`.
     async fn edit_message(&self, to: MsgRef, req: SendRequest) -> Result<MsgRef> {
-        match self.state.resolve(to) {
+        match self.state.resolve_owned(to) {
             Some(event_id) => {
                 let body = with_button_lines(req.text.clone(), &req);
                 let new_content = if req.parse_mode.as_deref() == Some("HTML") {
@@ -435,7 +518,13 @@ impl TelegramApi for MatrixClient {
                     .map_err(|_| anyhow!("matrix edit: transport error"))?;
                 Ok(self.state.bind(response.response.event_id))
             }
-            None => self.send_content(&req).await,
+            None => {
+                let req = match req.reply_to {
+                    Some(_) => req,
+                    None => req.replying_to(to),
+                };
+                self.send_content(&req).await
+            }
         }
     }
 
@@ -444,10 +533,10 @@ impl TelegramApi for MatrixClient {
         Ok(())
     }
 
-    /// Redact; unknown bindings (pre-restart) are a no-op — the message
-    /// is gone from the process's world anyway.
+    /// Redact — bot-owned events only; anything else is a no-op (the
+    /// gate cannot redact another user's message anyway).
     async fn delete_message(&self, to: MsgRef) -> Result<()> {
-        if let Some(event_id) = self.state.resolve(to) {
+        if let Some(event_id) = self.state.resolve_owned(to) {
             self.room
                 .redact(&event_id, None, None)
                 .await
@@ -516,5 +605,62 @@ mod tests {
             vec![1, 2],
             "sequential update ids for the poll loop's offset bookkeeping"
         );
+    }
+
+    // --- C2/I1: update synthesis + edit-ownership (GATE-012 fix pass) ---
+
+    #[test]
+    fn callback_update_shape_matches_telegram() {
+        // A synthesized button-press equivalent must look EXACTLY like a
+        // Telegram callback update: no text, no sender_id (commands.rs
+        // fires on text presence — carrying both would double-fire an
+        // UNKNOWN_COMMAND reply on every decision).
+        let state = SharedState::new();
+        let ev: OwnedEventId = "$cmd1:example.org".parse().unwrap();
+        let update = synthesize_update(&state, 2, "/ok elev1:abcd0123456789ef:approve", ev);
+        let cb = update.callback.as_ref().expect("command ⇒ callback");
+        assert_eq!(cb.data, "elev1:abcd0123456789ef:approve");
+        assert_eq!(cb.from_id, 2);
+        assert_eq!(cb.id, "matrix");
+        assert_eq!(update.text, None, "callback updates carry no text");
+        assert_eq!(update.sender_id, None, "callback updates carry no sender");
+        assert!(update.message_ref.is_some(), "anchor kept for feedback");
+    }
+
+    #[test]
+    fn text_update_keeps_sender_and_text() {
+        let state = SharedState::new();
+        let ev: OwnedEventId = "$cmd2:example.org".parse().unwrap();
+        let update = synthesize_update(&state, 3, "hello gate", ev);
+        assert_eq!(update.text.as_deref(), Some("hello gate"));
+        assert_eq!(update.sender_id, Some(3));
+        assert!(update.callback.is_none());
+    }
+
+    #[test]
+    fn owned_vs_inbound_bindings() {
+        // C2: the gate may only m.replace events IT sent. Outbound binds
+        // (send_message) mark ownership; inbound binds never do, so
+        // edit/redact on an operator's event resolves to None and the
+        // transport falls back to a fresh reply.
+        let state = SharedState::new();
+        let bot_ev: OwnedEventId = "$bot1:example.org".parse().unwrap();
+        let bot_ref = state.bind(bot_ev.clone());
+        let op_ev: OwnedEventId = "$op1:example.org".parse().unwrap();
+        let op_ref = state.bind_inbound(op_ev.clone());
+
+        assert_eq!(state.resolve_owned(bot_ref).as_ref(), Some(&bot_ev));
+        assert!(state.resolve_owned(op_ref).is_none(), "inbound ⇒ not owned");
+        assert_eq!(state.resolve(op_ref).as_ref(), Some(&op_ev), "reply anchors still resolve");
+    }
+
+    #[test]
+    fn sync_backoff_matches_the_gate006_posture() {
+        // C3: 1s, 2s, 4s … capped at 60s.
+        assert_eq!(sync_backoff(1), Duration::from_secs(1));
+        assert_eq!(sync_backoff(2), Duration::from_secs(2));
+        assert_eq!(sync_backoff(3), Duration::from_secs(4));
+        assert_eq!(sync_backoff(7), Duration::from_secs(60), "cap");
+        assert_eq!(sync_backoff(50), Duration::from_secs(60), "stays capped");
     }
 }

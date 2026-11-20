@@ -168,8 +168,10 @@ fn mxids_from(v: Option<&str>) -> Vec<String> {
 }
 
 /// GATE-012 channel resolution. A key "counts as set" when trimmed
-/// non-empty (the allowlist counts as set whenever its key is present —
-/// a blank allowlist is a valid empty fail-closed list). Rules, in order:
+/// non-empty — including the allowlist (a blank allowlist value counts as
+/// UNSET for presence: composes export it set-but-empty everywhere; when
+/// the trio IS complete, a blank allowlist is a valid empty fail-closed
+/// list). Rules, in order:
 /// no Matrix key ⇒ `Ok(None)`; any Matrix key alongside
 /// `TELEGRAM_BOT_TOKEN` ⇒ refuse (mutually exclusive channels); any
 /// Matrix key without all three required ones ⇒ refuse naming the
@@ -190,7 +192,15 @@ fn matrix_config_from(
     let hs = trimmed_non_empty(homeserver);
     let token = trimmed_non_empty(access_token);
     let room = trimmed_non_empty(room_id);
-    let any_present = hs.is_some() || token.is_some() || room.is_some() || user_allowlist.is_some();
+    // Presence rule (C1): a BLANK allowlist counts as unset for presence —
+    // composes export `MATRIX_USER_ALLOWLIST=` set-but-empty on every
+    // deployment, and a blank value must never make a Telegram/no-channel
+    // deployment look Matrix-configured. The VALUE still flows through
+    // `mxids_from` when the trio is complete (blank ⇒ empty fail-closed list).
+    let allowlist_present =
+        user_allowlist.map(str::trim).is_some_and(|s| !s.is_empty());
+    let any_present =
+        hs.is_some() || token.is_some() || room.is_some() || allowlist_present;
     if !any_present {
         return Ok(None);
     }
@@ -513,5 +523,23 @@ mod tests {
             .expect("blank allowlist is a complete config")
             .expect("all required keys set ⇒ Some");
         assert!(cfg.user_allowlist.is_empty(), "empty allowlist ⇒ drop everything");
+    }
+
+    #[test]
+    fn blank_allowlist_alone_is_not_a_matrix_config() {
+        // C1 regression guard: composes export `MATRIX_USER_ALLOWLIST=`
+        // (set-but-empty) for Telegram/no-channel deployments — a blank
+        // value must count as UNSET for presence, or every deployment
+        // without a full Matrix trio would refuse to boot.
+        let cfg = matrix_config_from(None, None, None, None, Some(""))
+            .expect("blank allowlist alone must not be a partial config");
+        assert!(cfg.is_none(), "no Matrix keys ⇒ no Matrix config");
+    }
+
+    #[test]
+    fn blank_allowlist_with_telegram_does_not_trigger_exclusivity() {
+        let cfg = matrix_config_from(Some("123:abc"), None, None, None, Some(""))
+            .expect("blank allowlist beside Telegram must not refuse");
+        assert!(cfg.is_none(), "still no Matrix config");
     }
 }
