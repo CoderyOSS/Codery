@@ -31,15 +31,15 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use gate::audit::Audit;
 use gate::github::{GitHubPlatform, Platform};
 use gate::state::State as DbState;
-use gate::telegram::commands::{register_commands, CommandDeps};
-use gate::telegram::fake::FakeTelegram;
-use gate::telegram::grant::{
+use gate::control::commands::{register_commands, CommandDeps};
+use gate::control::fake::FakeTransport;
+use gate::control::grant::{
     grant_offer_key, maybe_offer_grant, open_reduction_row, reduction_sweep_tick,
     register_revoke, revoke_nonce_lookup, start_grant, start_reduction, GrantDeps, RealGrantFlow,
     ReductionDeps, REDUCTION_FLOW_KIND, REDUCTION_STATE_DONE, REVOKE_STATE_EXPIRED,
 };
-use gate::telegram::setup::{register_setup, GrantOutcome, NotifyHandle, SetupDeps};
-use gate::telegram::{MsgRef, TelegramApi, TelegramRouter, Update};
+use gate::control::setup::{register_setup, GrantOutcome, NotifyHandle, SetupDeps};
+use gate::control::{MsgRef, ControlApi, ControlRouter, Update};
 use gate::types::Role;
 
 const LOGIN: &str = "rob-agent";
@@ -48,15 +48,15 @@ const REPO: &str = "acme/api";
 const ENC_KEY: &str = "grant-test-enc-key";
 
 // ---------------------------------------------------------------------------
-// Harness: in-memory state + FakeTelegram + wiremock upstream + GrantDeps
+// Harness: in-memory state + FakeTransport + wiremock upstream + GrantDeps
 // with test-scale durations.
 // ---------------------------------------------------------------------------
 
 struct H {
     dir: PathBuf,
     state: Arc<Mutex<DbState>>,
-    fake: Arc<FakeTelegram>,
-    api: Arc<dyn TelegramApi>,
+    fake: Arc<FakeTransport>,
+    api: Arc<dyn ControlApi>,
     upstream: MockServer,
     deps: GrantDeps,
     audit: Arc<Audit>,
@@ -85,8 +85,8 @@ impl H {
             base,
             Arc::new(|| None),
         ));
-        let fake = Arc::new(FakeTelegram::new());
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let fake = Arc::new(FakeTransport::new());
+        let api: Arc<dyn ControlApi> = fake.clone();
         let deps = GrantDeps {
             state: state.clone(),
             platform,
@@ -137,7 +137,7 @@ impl H {
         }
     }
 
-    fn sent_with(&self, needle: &str) -> Vec<gate::telegram::send::SendRequest> {
+    fn sent_with(&self, needle: &str) -> Vec<gate::control::send::SendRequest> {
         self.fake
             .sent()
             .iter()
@@ -523,10 +523,10 @@ async fn personal_repo_instructions_say_every_collaborator_gets_push_access() {
 struct SetupH {
     dir: PathBuf,
     state: Arc<Mutex<DbState>>,
-    fake: Arc<FakeTelegram>,
-    api: Arc<dyn TelegramApi>,
+    fake: Arc<FakeTransport>,
+    api: Arc<dyn ControlApi>,
     upstream: MockServer,
-    router: TelegramRouter,
+    router: ControlRouter,
 }
 
 impl Drop for SetupH {
@@ -554,8 +554,8 @@ async fn spawn_setup_with_real_grant() -> SetupH {
         base,
         Arc::new(|| None),
     ));
-    let fake = Arc::new(FakeTelegram::new());
-    let api: Arc<dyn TelegramApi> = fake.clone();
+    let fake = Arc::new(FakeTransport::new());
+    let api: Arc<dyn ControlApi> = fake.clone();
     let grant_deps = GrantDeps {
         state: state.clone(),
         platform: platform.clone(),
@@ -576,7 +576,7 @@ async fn spawn_setup_with_real_grant() -> SetupH {
         grant,
         audit,
     });
-    let mut router = TelegramRouter::new();
+    let mut router = ControlRouter::new();
     register_setup(&mut router, deps);
     SetupH {
         dir,
@@ -693,10 +693,10 @@ async fn setup_step_eight_with_real_grant_shows_the_check_mark() {
 struct CmdH {
     dir: PathBuf,
     state: Arc<Mutex<DbState>>,
-    fake: Arc<FakeTelegram>,
-    api: Arc<dyn TelegramApi>,
+    fake: Arc<FakeTransport>,
+    api: Arc<dyn ControlApi>,
     upstream: MockServer,
-    router: TelegramRouter,
+    router: ControlRouter,
 }
 
 impl Drop for CmdH {
@@ -721,8 +721,8 @@ async fn spawn_cmd_gate() -> CmdH {
         base,
         Arc::new(|| None),
     ));
-    let fake = Arc::new(FakeTelegram::new());
-    let api: Arc<dyn TelegramApi> = fake.clone();
+    let fake = Arc::new(FakeTransport::new());
+    let api: Arc<dyn ControlApi> = fake.clone();
     let grant_deps = GrantDeps {
         state: state.clone(),
         platform,
@@ -733,7 +733,7 @@ async fn spawn_cmd_gate() -> CmdH {
     };
     let grant = Arc::new(RealGrantFlow::new(grant_deps));
     let machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync> = Arc::new(|| None);
-    let mut router = TelegramRouter::new();
+    let mut router = ControlRouter::new();
     register_commands(
         &mut router,
         Arc::new(CommandDeps {
@@ -756,7 +756,7 @@ async fn spawn_cmd_gate() -> CmdH {
 }
 
 impl CmdH {
-    async fn command(&self, text: &str) -> gate::telegram::send::SendRequest {
+    async fn command(&self, text: &str) -> gate::control::send::SendRequest {
         let before = self.fake.edits().len();
         let update = Update {
             sender_id: Some(CHAT),
@@ -777,7 +777,7 @@ impl CmdH {
         edits.last().unwrap().1.clone()
     }
 
-    async fn wait_for_sent(&self, needle: &str) -> Option<gate::telegram::send::SendRequest> {
+    async fn wait_for_sent(&self, needle: &str) -> Option<gate::control::send::SendRequest> {
         for _ in 0..600 {
             if let Some(r) = self
                 .fake
@@ -1071,7 +1071,7 @@ async fn reduction_sweep_expires_stale_reduction_rows_and_menus() {
 /// Extract the flow id from a revoke menu's signed button data (the sweep
 /// test only cares about the row lifecycle, not the message).
 fn menu_row_id(deps: &ReductionDeps) -> String {
-    let req = gate::telegram::grant::revoke_menu_reply(deps, REPO);
+    let req = gate::control::grant::revoke_menu_reply(deps, REPO);
     let (_, data) = req.inline_buttons.first().expect("menu carries buttons");
     data.split(':')
         .next()
@@ -1121,10 +1121,10 @@ async fn reduction_flow_to_none_is_a_removal_with_trash_icon_instructions() {
 struct RevokeH {
     dir: PathBuf,
     state: Arc<Mutex<DbState>>,
-    fake: Arc<FakeTelegram>,
-    api: Arc<dyn TelegramApi>,
+    fake: Arc<FakeTransport>,
+    api: Arc<dyn ControlApi>,
     upstream: MockServer,
-    router: TelegramRouter,
+    router: ControlRouter,
 }
 
 impl Drop for RevokeH {
@@ -1149,8 +1149,8 @@ async fn spawn_revoke_gate() -> RevokeH {
         base,
         Arc::new(|| None),
     ));
-    let fake = Arc::new(FakeTelegram::new());
-    let api: Arc<dyn TelegramApi> = fake.clone();
+    let fake = Arc::new(FakeTransport::new());
+    let api: Arc<dyn ControlApi> = fake.clone();
     let reduction = Arc::new(ReductionDeps {
         state: state.clone(),
         platform,
@@ -1161,7 +1161,7 @@ async fn spawn_revoke_gate() -> RevokeH {
         audit: audit.clone(),
     });
     let machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync> = Arc::new(|| None);
-    let mut router = TelegramRouter::new();
+    let mut router = ControlRouter::new();
     register_commands(
         &mut router,
         Arc::new(CommandDeps {
@@ -1186,7 +1186,7 @@ async fn spawn_revoke_gate() -> RevokeH {
 }
 
 impl RevokeH {
-    async fn command(&self, text: &str) -> gate::telegram::send::SendRequest {
+    async fn command(&self, text: &str) -> gate::control::send::SendRequest {
         let before = self.fake.edits().len();
         let update = Update {
             sender_id: Some(CHAT),
@@ -1220,7 +1220,7 @@ impl RevokeH {
             .unwrap_or_else(|| panic!("no '{label}' button on the menu"));
         let update = Update {
             sender_id: Some(CHAT),
-            callback: Some(gate::telegram::Callback {
+            callback: Some(gate::control::Callback {
                 id: "cbq-1".to_string(),
                 data,
                 from_id: CHAT,
@@ -1271,7 +1271,7 @@ impl RevokeH {
             .expect("row present")
     }
 
-    fn sent_with(&self, needle: &str) -> Vec<gate::telegram::send::SendRequest> {
+    fn sent_with(&self, needle: &str) -> Vec<gate::control::send::SendRequest> {
         self.fake
             .sent()
             .iter()

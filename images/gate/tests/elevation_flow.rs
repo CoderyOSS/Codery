@@ -1,6 +1,6 @@
 //! Integration: elevation flows (GATE-010 §8–9, task 8) — fail-fast
 //! pre-flight role checks on the API and git paths, the consent→verify
-//! state machine on Telegram, and temporary grants with auto-reduction.
+//! state machine on Control, and temporary grants with auto-reduction.
 //!
 //! The fail-fast ruling is the spine of every scenario: a role gap answers
 //! `permission_pending` immediately (the elevation conversation starts in
@@ -22,13 +22,13 @@ use gate::gitproxy::GitDeps;
 use gate::policy::{PolicyEngine, PolicyFile};
 use gate::routes::{router, GateState};
 use gate::state::State as DbState;
-use gate::telegram::commands::{register_commands, CommandDeps};
-use gate::telegram::elevation::{
+use gate::control::commands::{register_commands, CommandDeps};
+use gate::control::elevation::{
     nonce_lookup as elevation_nonce_lookup, register_elevation, ElevationDeps, ReductionFlow,
 };
-use gate::telegram::fake::FakeTelegram;
-use gate::telegram::send::SendRequest;
-use gate::telegram::{Callback, MsgRef, TelegramApi, TelegramRouter, Update};
+use gate::control::fake::FakeTransport;
+use gate::control::send::SendRequest;
+use gate::control::{Callback, MsgRef, ControlApi, ControlRouter, Update};
 use gate::tokens::TokenStore;
 use gate::types::Role;
 
@@ -54,7 +54,7 @@ tag-delete = \"allow\"
 
 // ---------------------------------------------------------------------------
 // Harness: one gate serving BOTH proxies, an elevation sweep running on
-// test-scale durations, a FakeTelegram channel and a recorded reduction seam.
+// test-scale durations, a FakeTransport channel and a recorded reduction seam.
 // ---------------------------------------------------------------------------
 
 struct FakeReduction {
@@ -85,9 +85,9 @@ struct H {
     port: u16,
     agent_token: String,
     state: Arc<Mutex<DbState>>,
-    fake: Arc<FakeTelegram>,
-    api: Arc<dyn TelegramApi>,
-    tg_router: TelegramRouter,
+    fake: Arc<FakeTransport>,
+    api: Arc<dyn ControlApi>,
+    tg_router: ControlRouter,
     upstream: MockServer,
     reduction: Arc<FakeReduction>,
     audit_path: PathBuf,
@@ -154,8 +154,8 @@ async fn spawn_gate_in(batch: Duration, poll: Duration, org: bool) -> H {
     let policy = PolicyEngine::new(&PolicyFile::parse(POLICY_ALLOW_ALL).unwrap());
     let backend = Arc::new(StubBackend::new(state.clone(), audit.clone(), ApprovalOutcome::Approved).unwrap());
 
-    let fake = Arc::new(FakeTelegram::new());
-    let tg_api: Arc<dyn TelegramApi> = fake.clone();
+    let fake = Arc::new(FakeTransport::new());
+    let tg_api: Arc<dyn ControlApi> = fake.clone();
     let reduction = FakeReduction::new();
 
     let deps = ElevationDeps {
@@ -171,17 +171,17 @@ async fn spawn_gate_in(batch: Duration, poll: Duration, org: bool) -> H {
         audit: audit.clone(),
     };
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tokio::spawn(gate::telegram::elevation::run_elevation_sweep(
+    tokio::spawn(gate::control::elevation::run_elevation_sweep(
         deps.clone(),
         shutdown_rx,
         Duration::from_millis(10),
     ));
 
-    let mut tg_router = TelegramRouter::new();
+    let mut tg_router = ControlRouter::new();
     tg_router.set_nonce_lookup(elevation_nonce_lookup(state.clone()));
     register_elevation(
         &mut tg_router,
-        Arc::new(gate::telegram::elevation::ElevationHandler::new(deps)),
+        Arc::new(gate::control::elevation::ElevationHandler::new(deps)),
     );
     // The command dispatcher too: /elevate opens flows through the SAME
     // open_or_join path the proxies use (the command handlers below only
@@ -313,7 +313,7 @@ impl H {
         guard.flow_state(id).expect("flows read")
     }
 
-    fn payload_of(&self, id: &str) -> gate::telegram::elevation::ElevationPayload {
+    fn payload_of(&self, id: &str) -> gate::control::elevation::ElevationPayload {
         let guard = self.state.lock().unwrap();
         let row = guard.flow_get(id).expect("flows read").expect("row present");
         serde_json::from_str(&row.payload_json).expect("payload parses")
@@ -1041,7 +1041,7 @@ async fn git_push_role_gap_err_carries_elevation_id_without_upstream() {
     // Active flow (DETECTED; the sweep may already have presented consent
     // with this test's short batching window).
     assert!(
-        gate::telegram::elevation::is_active_state(&flows[0].1),
+        gate::control::elevation::is_active_state(&flows[0].1),
         "flow must be active, got {}",
         flows[0].1
     );
@@ -1108,7 +1108,7 @@ async fn contradiction_logged_when_registry_role_covers_but_upstream_refuses() {
     // any ACTIVE state backs the id.
     let state = h.flow_state_of(&id).expect("flow row exists");
     assert!(
-        gate::telegram::elevation::is_active_state(&state),
+        gate::control::elevation::is_active_state(&state),
         "flow must be active, got {state}"
     );
 

@@ -122,7 +122,7 @@ async fn spawn() -> Gate {
             notify: None,
         })),
         max_body_bytes: gate::config::DEFAULT_MAX_BODY_BYTES,
-        telegram_live: std::sync::atomic::AtomicBool::new(false),
+        control_live: std::sync::atomic::AtomicBool::new(false),
         forwarding_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
     let app = router(gs);

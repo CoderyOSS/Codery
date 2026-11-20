@@ -50,7 +50,7 @@
 //! # Reduction (GATE-010 §10, task 9)
 //!
 //! Temporary grants reduce automatically: the elevation's
-//! [`crate::telegram::elevation::ReductionFlow`] seam fires at DONE and
+//! [`crate::control::elevation::ReductionFlow`] seam fires at DONE and
 //! [`RealReductionFlow`] starts the reduction conversation —
 //! `start_reduction(deps, repo, target)`:
 //!
@@ -95,9 +95,9 @@ use crate::github::{Platform, RepoAccessError};
 use crate::registry::RegistryDeps;
 use crate::rolemapping::{role_from_name, role_name};
 use crate::state::{self, State as DbState};
-use crate::telegram::send::SendRequest;
-use crate::telegram::setup::{GrantFlow, GrantOutcome, NotifyHandle};
-use crate::telegram::{nonce, NonceLookup, TelegramApi, TelegramRouter, Update, UpdateHandler};
+use crate::control::send::SendRequest;
+use crate::control::setup::{GrantFlow, GrantOutcome, NotifyHandle};
+use crate::control::{nonce, NonceLookup, ControlApi, ControlRouter, Update, UpdateHandler};
 use crate::types::Role;
 
 /// Seconds per day — the offer debounce bucket.
@@ -345,7 +345,7 @@ pub fn grant_offer_key(repo: &str, day: i64) -> String {
 #[derive(Clone)]
 pub struct GrantOfferDeps {
     pub state: Arc<Mutex<DbState>>,
-    pub notify: Option<(Arc<dyn TelegramApi>, i64)>,
+    pub notify: Option<(Arc<dyn ControlApi>, i64)>,
     pub machine_login: String,
 }
 
@@ -355,7 +355,7 @@ pub struct GrantOfferDeps {
 /// Returns `true` when an offer message went out.
 pub async fn maybe_offer_grant(
     state: &Arc<Mutex<DbState>>,
-    notify: &Option<(Arc<dyn TelegramApi>, i64)>,
+    notify: &Option<(Arc<dyn ControlApi>, i64)>,
     repo: &str,
     machine_login: &str,
 ) -> bool {
@@ -478,7 +478,7 @@ pub struct ReductionDeps {
     pub machine_login: String,
     /// `(api, chat_id)` for gate-initiated sends; `None` ⇒ conversations
     /// cannot start (nobody to instruct) — rows expire with the sweep.
-    pub notify: Option<(Arc<dyn TelegramApi>, i64)>,
+    pub notify: Option<(Arc<dyn ControlApi>, i64)>,
     /// Verify-poll cadence (GATE-010: 5 s).
     pub poll: Duration,
     /// No-progress expiry for reduction rows and revoke menus
@@ -487,7 +487,7 @@ pub struct ReductionDeps {
     pub audit: Arc<Audit>,
 }
 
-/// The real reducer behind the elevation module's [`crate::telegram::
+/// The real reducer behind the elevation module's [`crate::control::
 /// elevation::ReductionFlow`] seam (temporary grants call it at DONE) and
 /// the machinery `/revoke` drives directly. `main.rs` wires this in.
 pub struct RealReductionFlow {
@@ -501,7 +501,7 @@ impl RealReductionFlow {
 }
 
 #[async_trait]
-impl crate::telegram::elevation::ReductionFlow for RealReductionFlow {
+impl crate::control::elevation::ReductionFlow for RealReductionFlow {
     async fn reduce(&self, repo: &str, to: Role) {
         // Fire-and-forget: DONE is durable and the agent is unblocked; the
         // reduction conversation polls in its own task.
@@ -843,7 +843,7 @@ pub fn revoke_nonce_lookup(state: Arc<Mutex<DbState>>) -> NonceLookup {
 }
 
 /// Register the `/revoke` button handler on a router.
-pub fn register_revoke(router: &mut TelegramRouter, deps: ReductionDeps) {
+pub fn register_revoke(router: &mut ControlRouter, deps: ReductionDeps) {
     router.register(Arc::new(RevokeHandler { deps }));
 }
 
@@ -858,7 +858,7 @@ struct RevokeHandler {
 
 #[async_trait]
 impl UpdateHandler for RevokeHandler {
-    async fn handle(&self, update: Update, api: Arc<dyn TelegramApi>) {
+    async fn handle(&self, update: Update, api: Arc<dyn ControlApi>) {
         let Some(callback) = &update.callback else {
             return;
         };

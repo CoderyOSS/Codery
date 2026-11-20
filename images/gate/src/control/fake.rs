@@ -1,10 +1,10 @@
-//! FakeTelegram — in-memory [`TelegramApi`] test double for the Telegram
+//! FakeTransport — in-memory [`ControlApi`] test double for the Telegram
 //! transport tests and any future control-plane tests. NOT compiled into
 //! release paths: the module is gated behind
 //! `cfg(any(test, feature = "test-util"))`.
 //!
 //! Outbound calls are recorded (never transmitted) and readable through
-//! the getters; inbound updates are queued with [`FakeTelegram::push_update`]
+//! the getters; inbound updates are queued with [`FakeTransport::push_update`]
 //! and drained by `get_updates`, which can also be scripted to fail first
 //! (`fail_next_get_updates`) so tests can drive the poll loop's backoff.
 
@@ -13,8 +13,8 @@ use std::sync::Mutex;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
-use crate::telegram::send::{MsgRef, SendRequest};
-use crate::telegram::{TelegramApi, Update};
+use crate::control::send::{MsgRef, SendRequest};
+use crate::control::{ControlApi, Update};
 
 /// Chat id the fake "delivers" into when a send carries no reply anchor.
 pub const FAKE_CHAT_ID: i64 = 100_000;
@@ -36,11 +36,11 @@ struct Inner {
 
 /// Recorded-outbound fake of the Telegram Bot API.
 #[derive(Default)]
-pub struct FakeTelegram {
+pub struct FakeTransport {
     inner: Mutex<Inner>,
 }
 
-impl FakeTelegram {
+impl FakeTransport {
     /// Empty fake: no recorded traffic, no queued updates, no failures.
     pub fn new() -> Self {
         Self::default()
@@ -117,13 +117,13 @@ impl FakeTelegram {
 }
 
 #[async_trait]
-impl TelegramApi for FakeTelegram {
+impl ControlApi for FakeTransport {
     async fn get_updates(&self, offset: i64) -> Result<Vec<Update>> {
         let mut inner = self.inner.lock().expect("fake lock must be poison-free");
         inner.offsets_seen.push(offset);
         if inner.pending_failures > 0 {
             inner.pending_failures -= 1;
-            return Err(anyhow!("fake: simulated telegram outage"));
+            return Err(anyhow!("fake: simulated transport outage"));
         }
         Ok(std::mem::take(&mut inner.queue))
     }
@@ -132,7 +132,7 @@ impl TelegramApi for FakeTelegram {
         let mut inner = self.inner.lock().expect("fake lock must be poison-free");
         if inner.pending_send_failures > 0 {
             inner.pending_send_failures -= 1;
-            return Err(anyhow!("fake: simulated telegram outage"));
+            return Err(anyhow!("fake: simulated transport outage"));
         }
         inner.sent.push(req.clone());
         inner.next_message_id += 1;
@@ -164,7 +164,7 @@ impl TelegramApi for FakeTelegram {
         let mut inner = self.inner.lock().expect("fake lock must be poison-free");
         if inner.pending_delete_failures > 0 {
             inner.pending_delete_failures -= 1;
-            return Err(anyhow!("fake: simulated telegram outage"));
+            return Err(anyhow!("fake: simulated transport outage"));
         }
         inner.deletes.push(to);
         Ok(())

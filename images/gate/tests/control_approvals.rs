@@ -1,9 +1,9 @@
-//! Integration: Telegram approval delivery (GATE-005/006) end-to-end.
+//! Integration: Control approval delivery (GATE-005/006) end-to-end.
 //! Approval asks land on the control-plane chat with signed Approve/Deny
 //! buttons; a validated press forwards or rejects the held push through
 //! the same `ApprovalBackend` trait the git/API proxies consume; timed-out
 //! holds answer a late press with their state and never touch upstream;
-//! /block is the kill switch that denies before any Telegram ask; /pending
+//! /block is the kill switch that denies before any Control ask; /pending
 //! and /status render the gate's live state.
 
 use std::net::SocketAddr;
@@ -23,11 +23,11 @@ use gate::gitproxy::GitDeps;
 use gate::policy::{PolicyEngine, PolicyFile};
 use gate::routes::{router, GateState};
 use gate::state::State as DbState;
-use gate::telegram::approvals::{register_approvals, TelegramApprovalBackend, TIMED_OUT_TEXT};
-use gate::telegram::commands::{register_commands, CommandDeps};
-use gate::telegram::fake::{FakeTelegram, FAKE_CHAT_ID};
-use gate::telegram::{
-    run_poll_loop, Callback, MsgRef, TelegramApi, TelegramRouter, Update,
+use gate::control::approvals::{register_approvals, ControlApprovalBackend, TIMED_OUT_TEXT};
+use gate::control::commands::{register_commands, CommandDeps};
+use gate::control::fake::{FakeTransport, FAKE_CHAT_ID};
+use gate::control::{
+    run_poll_loop, Callback, MsgRef, ControlApi, ControlRouter, Update,
 };
 use gate::tokens::TokenStore;
 use gate::types::ActionClass;
@@ -49,7 +49,7 @@ tag-delete = \"approve\"
 ";
 
 // ---------------------------------------------------------------------------
-// Harness: gate + Telegram control plane, wired like main.rs
+// Harness: gate + Control control plane, wired like main.rs
 // ---------------------------------------------------------------------------
 
 struct Gate {
@@ -58,8 +58,8 @@ struct Gate {
     upstream: MockServer,
     audit_path: PathBuf,
     dir: PathBuf,
-    fake: Arc<FakeTelegram>,
-    backend: Arc<TelegramApprovalBackend>,
+    fake: Arc<FakeTransport>,
+    backend: Arc<ControlApprovalBackend>,
     state: Arc<Mutex<DbState>>,
     _shutdown: tokio::sync::watch::Sender<bool>,
 }
@@ -152,10 +152,10 @@ async fn spawn_gate_with_chat(approval_timeout: Duration, ask_chat: Option<i64>)
     };
     let state = Arc::new(Mutex::new(db));
 
-    let fake = Arc::new(FakeTelegram::new());
-    let api: Arc<dyn TelegramApi> = fake.clone();
+    let fake = Arc::new(FakeTransport::new());
+    let api: Arc<dyn ControlApi> = fake.clone();
     let backend = Arc::new(
-        TelegramApprovalBackend::new(state.clone(), audit.clone(), api.clone(), ask_chat).unwrap(),
+        ControlApprovalBackend::new(state.clone(), audit.clone(), api.clone(), ask_chat).unwrap(),
     );
 
     let machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync> =
@@ -196,7 +196,7 @@ async fn spawn_gate_with_chat(approval_timeout: Duration, ask_chat: Option<i64>)
 
     // Control plane wired exactly as the binary does: poll loop -> router
     // with the approval callback handler + command handlers registered.
-    let mut tg_router = TelegramRouter::new();
+    let mut tg_router = ControlRouter::new();
     register_approvals(&mut tg_router, backend.clone());
     register_commands(
         &mut tg_router,
@@ -211,7 +211,7 @@ async fn spawn_gate_with_chat(approval_timeout: Duration, ask_chat: Option<i64>)
     );
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let api_for_loop: Arc<dyn TelegramApi> = fake.clone();
+    let api_for_loop: Arc<dyn ControlApi> = fake.clone();
     tokio::spawn(run_poll_loop(
         api_for_loop.clone(),
         vec![APPROVER],
@@ -386,7 +386,7 @@ async fn post_push(gate: &Gate, owner: &str, repo: &str, body: Vec<u8>) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
-// Telegram update helpers
+// Control update helpers
 // ---------------------------------------------------------------------------
 
 /// Poll a condition for up to ~6s (10ms steps).
@@ -401,14 +401,14 @@ async fn wait_for(mut cond: impl FnMut() -> bool) {
 }
 
 /// The single outbound ask: (text, buttons).
-fn ask_message(fake: &FakeTelegram) -> (String, Vec<(String, String)>) {
+fn ask_message(fake: &FakeTransport) -> (String, Vec<(String, String)>) {
     let sent = fake.sent();
     assert_eq!(sent.len(), 1, "exactly one outbound message: {:?}", sent);
     (sent[0].text.clone(), sent[0].inline_buttons.clone())
 }
 
 /// Extract (pending id, nonce) from the Approve button's signed triple.
-fn ask_triple(fake: &FakeTelegram) -> (String, String) {
+fn ask_triple(fake: &FakeTransport) -> (String, String) {
     let (_, buttons) = ask_message(fake);
     let (_, data) = buttons
         .iter()
@@ -578,7 +578,7 @@ async fn approve_button_forwards_held_push_end_to_end() {
 
     wait_for(|| !gate.fake.sent().is_empty()).await;
     let (id, nonce) = ask_triple(&gate.fake);
-    let ask_ref = msg_ref(1); // first FakeTelegram send
+    let ask_ref = msg_ref(1); // first FakeTransport send
 
     // The allowlisted approver presses Approve on the ask message itself.
     gate.fake.push_update(callback_update(
@@ -597,7 +597,7 @@ async fn approve_button_forwards_held_push_end_to_end() {
         "upstream receive-pack POST hit exactly once"
     );
 
-    // Audit: the resolution names the Telegram approver and the outcome.
+    // Audit: the resolution names the Control approver and the outcome.
     let resolved = gate.resolve_audit();
     assert_eq!(resolved.len(), 1, "{:?}", gate.audit_lines());
     assert_eq!(resolved[0]["decision"], "approved");
@@ -774,7 +774,7 @@ async fn send_failure_resolves_hold_denied_without_a_waiter() {
         delivery["basis"]
             .as_str()
             .unwrap()
-            .contains("simulated telegram outage"),
+            .contains("simulated transport outage"),
         "basis names the (already token-free) transport error: {delivery:?}"
     );
 
@@ -844,11 +844,11 @@ async fn no_chat_configured_persists_nothing_and_denies() {
 }
 
 // ---------------------------------------------------------------------------
-// Kill switch short-circuits before any Telegram ask
+// Kill switch short-circuits before any Control ask
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn block_command_denies_holds_without_telegram_ask() {
+async fn block_command_denies_holds_without_control_ask() {
     let gate = spawn_gate(Duration::from_secs(30)).await;
 
     // /block acme/api via the control plane.
@@ -878,7 +878,7 @@ async fn block_command_denies_holds_without_telegram_ask() {
     );
 
     // A push that WOULD hold on acme/api: denied before any ancestry call
-    // and before any Telegram ask.
+    // and before any Control ask.
     Mock::given(method("GET"))
         .and(path("/acme/api.git/info/refs"))
         .and(query_param("service", "git-receive-pack"))
@@ -1012,7 +1012,7 @@ async fn pending_resume_and_cancel_manage_holds() {
         "resume re-sends the signed Approve button: {buttons:?}"
     );
 
-    // Cancel resolves the hold as denied (with the Telegram approver).
+    // Cancel resolves the hold as denied (with the Control approver).
     gate.fake.push_update(callback_update(
         APPROVER,
         &format!("hold-resume-1:{nonce}:cancel"),

@@ -16,20 +16,20 @@ use gate::registry::{run_registry_sweep, RegistryDeps};
 use gate::routes::{self, GateState};
 use gate::state::State as DbState;
 use gate::tasks::{run_daily_loop, startup_check, DAILY_INTERVAL, LifecycleDeps};
-use gate::telegram::approvals::{register_approvals, TelegramApprovalBackend};
-use gate::telegram::commands::{register_commands, CommandDeps};
-use gate::telegram::elevation::{
+use gate::control::approvals::{register_approvals, ControlApprovalBackend};
+use gate::control::commands::{register_commands, CommandDeps};
+use gate::control::elevation::{
     nonce_lookup as elevation_nonce_lookup, register_elevation, ElevationDeps, ElevationHandler,
 };
-use gate::telegram::grant::{
+use gate::control::grant::{
     register_revoke, revoke_nonce_lookup, GrantOfferDeps, RealGrantFlow, RealReductionFlow,
     ReductionDeps,
 };
-use gate::telegram::lifecycle::{register_lifecycle, nonce_lookup as rotate_nonce_lookup};
-use gate::telegram::setup::{
+use gate::control::lifecycle::{register_lifecycle, nonce_lookup as rotate_nonce_lookup};
+use gate::control::setup::{
     nonce_lookup as setup_nonce_lookup, register_setup, resume as setup_resume, SetupDeps,
 };
-use gate::telegram::{run_poll_loop, TelegramClient, TelegramRouter, POLL_BACKOFF_BASE};
+use gate::control::{run_poll_loop, ControlRouter, POLL_BACKOFF_BASE};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -66,41 +66,18 @@ async fn main() -> anyhow::Result<()> {
     let gate_host = cfg.gate_host();
     let machine_login = cfg.machine_login.clone();
 
-    // Control-channel selection (GATE-012): exactly one — Matrix when
-    // configured (mutual exclusion is enforced at config load), else
-    // Telegram, else none (StubBackend, dangerous holds deny). The triple
+    // Control-channel selection (GATE-013): ntfy when configured, else
+    // none — the StubBackend keeps dangerous holds denied. The triple
     // `(transport, chat, allowlist)` preserves every downstream seam's
-    // Telegram-era call shape: `chat`/`allowlist` route through the same
-    // numeric id space both transports emit (GATE-012 identity mapping).
+    // call shape. The broker token IS the operator identity, so the
+    // allowlist is exactly the transport-assigned id `[1]`.
     let channel: Option<(
-        Arc<dyn gate::telegram::TelegramApi>,
+        Arc<dyn gate::control::ControlApi>,
         Option<i64>,
         Vec<i64>,
         &'static str,
-    )> = if let Some(matrix_cfg) = &cfg.matrix {
-        let state_dir = std::path::Path::new(&cfg.state_path)
-            .parent()
-            .unwrap_or(std::path::Path::new("/data"))
-            .join("matrix-state");
-        let api: Arc<dyn gate::telegram::TelegramApi> =
-            Arc::new(gate::matrix::connect(matrix_cfg, &state_dir).await?);
-        // mxid_map assigns positional ids 1..=n in allowlist order — the
-        // numeric allowlist the poll loop filters on is exactly that range.
-        let allowlist = (1..=matrix_cfg.user_allowlist.len() as i64).collect();
-        Some((
-            api,
-            Some(gate::matrix::ROOM_CHAT_ID),
-            allowlist,
-            "matrix",
-        ))
-    } else if let Some(token) = cfg.telegram_bot_token.clone() {
-        Some((
-            Arc::new(TelegramClient::new(&token)),
-            cfg.telegram_chat_id,
-            cfg.telegram_allowlist.clone(),
-            "telegram",
-        ))
-    } else {
+    )> = {
+        // ntfy transport wires in here (config + transport tasks, GATE-013)
         None
     };
     let chat_id = channel.as_ref().and_then(|(_, chat, _, _)| *chat);
@@ -110,8 +87,8 @@ async fn main() -> anyhow::Result<()> {
     // one the StubBackend keeps every hold fail closed — the auto decision
     // is Denied, so dangerous operations are rejected, never silently
     // forwarded.
-    let approval_backend: Option<Arc<TelegramApprovalBackend>> = match &channel {
-        Some((api, chat, _, _)) => Some(Arc::new(TelegramApprovalBackend::new(
+    let approval_backend: Option<Arc<ControlApprovalBackend>> = match &channel {
+        Some((api, chat, _, _)) => Some(Arc::new(ControlApprovalBackend::new(
             state.clone(),
             audit.clone(),
             api.clone(),
@@ -133,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     // Where lifecycle notices go: the bot AND a chat must both exist. With
     // either missing, lifecycle checks still run and flags still flip —
     // only the notices are skipped.
-    let telegram_notify: Option<(Arc<dyn gate::telegram::TelegramApi>, i64)> =
+    let control_notify: Option<(Arc<dyn gate::control::ControlApi>, i64)> =
         match (&channel, chat_id) {
             (Some((api, ..)), Some(chat)) => Some((api.clone(), chat)),
             _ => None,
@@ -150,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
     // Personal-repo ceiling channel (GATE-010 §9.3): Maintain/Admin needs
     // on personal repos get DIY instructions instead of an elevation flow.
-    git.elevation_notify = telegram_notify.clone();
+    git.elevation_notify = control_notify.clone();
 
     // The API proxy shares every dependency with the git proxy: one
     // platform (single place holding api_base + token custody), one
@@ -164,14 +141,14 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(APPROVAL_TIMEOUT_SECS),
     )?;
     // Grant-offer hook (GATE-010): a repo-scoped mutation that upstream
-    // answers 404 offers the Telegram grant flow, debounced once per repo
+    // answers 404 offers the grant flow, debounced once per repo
     // per 24 h. Without the bot the hook stays off (offer-silent).
     api.offer = Some(GrantOfferDeps {
         state: state.clone(),
-        notify: telegram_notify.clone(),
+        notify: control_notify.clone(),
         machine_login: machine_login.clone(),
     });
-    api.elevation_notify = telegram_notify.clone();
+    api.elevation_notify = control_notify.clone();
 
     // Machine-token lifecycle (GATE-004 §6.3): the master forwarding
     // switch is created here and shared by the gate state and the
@@ -187,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
         machine_login: machine_login.clone(),
         platform: platform.clone(),
         enc_key: cfg.token_enc_key.clone(),
-        notify: telegram_notify.clone(),
+        notify: control_notify.clone(),
     }));
 
     let lifecycle_deps = Arc::new(LifecycleDeps {
@@ -196,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
         machine_login: cfg.machine_login.clone(),
         enc_key: cfg.token_enc_key.clone(),
         forwarding: forwarding.clone(),
-        notify: telegram_notify.clone(),
+        notify: control_notify.clone(),
         gate_host: gate_host.clone(),
         audit: audit.clone(),
     });
@@ -211,13 +188,13 @@ async fn main() -> anyhow::Result<()> {
         state: state.clone(),
         platform: platform.clone(),
         machine_login: machine_login.clone(),
-        notify: telegram_notify.clone(),
+        notify: control_notify.clone(),
         poll: Duration::from_secs(cfg.flow_poll_secs),
         expire_after: Duration::from_secs(cfg.elevation_expire_secs),
         audit: audit.clone(),
     });
     let (_reduction_shutdown_tx, reduction_shutdown_rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(gate::telegram::grant::run_reduction_sweep(
+    tokio::spawn(gate::control::grant::run_reduction_sweep(
         (*reduction_deps).clone(),
         reduction_shutdown_rx,
         Duration::from_secs(cfg.flow_poll_secs),
@@ -232,7 +209,7 @@ async fn main() -> anyhow::Result<()> {
         state: state.clone(),
         platform: platform.clone(),
         machine_login: machine_login.clone(),
-        notify: telegram_notify.clone(),
+        notify: control_notify.clone(),
         batch_window: Duration::from_secs(cfg.elevation_batch_secs),
         poll: Duration::from_secs(cfg.flow_poll_secs),
         reminder_after: Duration::from_secs(cfg.elevation_reminder_secs),
@@ -241,13 +218,13 @@ async fn main() -> anyhow::Result<()> {
         audit: audit.clone(),
     });
     let (_elevation_shutdown_tx, elevation_shutdown_rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(gate::telegram::elevation::run_elevation_sweep(
+    tokio::spawn(gate::control::elevation::run_elevation_sweep(
         (*elevation_deps).clone(),
         elevation_shutdown_rx,
         Duration::from_secs(cfg.flow_poll_secs),
     ));
 
-    // Telegram control plane (GATE-006): spawn the long-poll loop ONLY
+    // Control plane (GATE-006/013): spawn the long-poll loop ONLY
     // when a bot token is configured — core git/API serving must work
     // without the bot. An empty allowlist keeps the loop running but drops
     // every update (fail closed). The router carries the approval button
@@ -260,7 +237,7 @@ async fn main() -> anyhow::Result<()> {
         // Grant-flow machinery (GATE-010): the real implementation behind
         // setup step 8 AND the /grant command. Durations come from env
         // (GATE_FLOW_* overrides shrink them for tests).
-        let grant_flow = Arc::new(RealGrantFlow::new(gate::telegram::grant::GrantDeps {
+        let grant_flow = Arc::new(RealGrantFlow::new(gate::control::grant::GrantDeps {
             state: state.clone(),
             platform: platform.clone(),
             machine_login: machine_login.clone(),
@@ -270,7 +247,7 @@ async fn main() -> anyhow::Result<()> {
         }));
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let mut router = TelegramRouter::new();
+        let mut router = ControlRouter::new();
         register_approvals(
             &mut router,
             control_backend.expect("a live channel implies a real approval backend"),
@@ -278,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
         // Composed callback validation: approval rows first, then the
         // lifecycle rotate flow, then the setup walkthrough (the approval
         // layer set its own lookup; the composed one keeps all three).
-        let approvals = TelegramApprovalBackend::nonce_lookup(state.clone());
+        let approvals = ControlApprovalBackend::nonce_lookup(state.clone());
         let rotate = rotate_nonce_lookup(state.clone());
         let setup = setup_nonce_lookup(state.clone());
         let elevation = elevation_nonce_lookup(state.clone());
@@ -308,7 +285,7 @@ async fn main() -> anyhow::Result<()> {
         );
         register_lifecycle(&mut router, lifecycle_deps.clone());
         // Guided setup walkthrough (GATE-011): the grant-flow seam is fed
-        // by the real machinery (telegram::grant::RealGrantFlow) — step 8
+        // by the real machinery (control::grant::RealGrantFlow) — step 8
         // walks the invitation flow end-to-end.
         let setup_deps = Arc::new(SetupDeps {
             state: state.clone(),
@@ -331,7 +308,7 @@ async fn main() -> anyhow::Result<()> {
             POLL_BACKOFF_BASE,
         ));
         tokio::spawn(router.run(rx, api.clone()));
-        gate_state.telegram_live.store(true, Ordering::Relaxed);
+        gate_state.control_live.store(true, Ordering::Relaxed);
         eprintln!(
             "{channel_name} control plane live ({approver_count} allowlisted approver(s))"
         );
@@ -342,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Startup credential check (GATE-004 §6.3): runs BEFORE the server
     // binds — no request is ever served while the credential state is
-    // unknown. Any failure lands on forwarding-off + a Telegram notice;
+    // unknown. Any failure lands on forwarding-off + a control-channel notice;
     // only an explicit verify pass enables forwarding.
     startup_check(&lifecycle_deps).await;
 
@@ -357,12 +334,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Registry re-check cadence (GATE-010): every registry row is
     // re-verified every 30 min (`GATE_REGISTRY_SWEEP_SECS` shrinks it for
-    // tests); role drops land in the registry + one Telegram notice each.
+    // tests); role drops land in the registry + one control-channel notice each.
     let registry_deps = Arc::new(RegistryDeps {
         state: state.clone(),
         platform: platform.clone(),
         machine_login: machine_login.clone(),
-        notify: telegram_notify.clone(),
+        notify: control_notify.clone(),
     });
     let (_registry_shutdown_tx, registry_shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(run_registry_sweep(

@@ -1,4 +1,4 @@
-//! Guided Telegram setup — the first-run walkthrough (GATE-011): a user
+//! Guided control-channel setup — the first-run walkthrough (GATE-011): a user
 //! with no stored machine token goes from `/setup` to a working agent
 //! setup, one step per message, with durable resumable progress.
 //!
@@ -49,8 +49,8 @@
 //! Step 8 consumes [`GrantFlow`] as `Arc<dyn GrantFlow>`. This module
 //! ships the trait, [`GrantOutcome`], the [`NotifyHandle`] the flow uses
 //! to reach the user and a scripted test double ([`FakeGrantFlow`]). The
-//! REAL grant machinery lives in [`crate::telegram::grant`]
-//! ([`crate::telegram::grant::RealGrantFlow`], GATE-010): it implements
+//! REAL grant machinery lives in [`crate::control::grant`]
+//! ([`crate::control::grant::RealGrantFlow`], GATE-010): it implements
 //! [`GrantFlow`] and `main.rs` wires it in — the step-8 handler here
 //! consumes the trait and never changed.
 //!
@@ -73,8 +73,8 @@ use crate::audit::{Audit, AuditEntry};
 use crate::custody::MachineTokenStore;
 use crate::github::Platform;
 use crate::state::{self, State as DbState};
-use crate::telegram::send::{MsgRef, SendRequest};
-use crate::telegram::{validate_callback, TelegramApi, Update, UpdateHandler};
+use crate::control::send::{MsgRef, SendRequest};
+use crate::control::{validate_callback, ControlApi, Update, UpdateHandler};
 
 /// Flow id of the setup walkthrough's signed buttons.
 pub const SETUP_FLOW: &str = "setup";
@@ -95,14 +95,14 @@ const KEY_MSG: &str = "msg";
 const KEY_CHECKLIST: &str = "checklist";
 
 // ---------------------------------------------------------------------------
-// The grant-flow seam (the real implementation lives in telegram::grant)
+// The grant-flow seam (the real implementation lives in control::grant)
 // ---------------------------------------------------------------------------
 
 /// What a grant flow uses to reach the operator while granting (GATE-010:
 /// instruction messages, invitation reminders). The setup handler only
 /// constructs it; the flow sends through it.
 pub struct NotifyHandle {
-    pub api: Arc<dyn TelegramApi>,
+    pub api: Arc<dyn ControlApi>,
     pub chat_id: i64,
 }
 
@@ -161,7 +161,7 @@ pub trait GrantFlow: Send + Sync {
 
 /// Scripted test double: per-repo outcomes with a default fallback, plus
 /// a call log. Compiled only under `test` / `test-util` (like
-/// [`crate::telegram::fake::FakeTelegram`]).
+/// [`crate::control::fake::FakeTransport`]).
 #[cfg(any(test, feature = "test-util"))]
 pub struct FakeGrantFlow {
     scripted: Mutex<Vec<(String, GrantOutcome)>>,
@@ -249,13 +249,13 @@ pub struct SetupDeps {
 /// Register the walkthrough handler on a router. `/setup` is handled HERE
 /// (not in the command dispatcher) because it edits into the command
 /// bubble and may fresh-send on a stale resume; `commands.rs` yields it.
-pub fn register_setup(router: &mut crate::telegram::TelegramRouter, deps: Arc<SetupDeps>) {
+pub fn register_setup(router: &mut crate::control::ControlRouter, deps: Arc<SetupDeps>) {
     router.register(Arc::new(SetupHandler { deps }));
 }
 
 /// Nonce resolver for the router's callback validation: exactly one flow
 /// (`setup`), keyed by the persistent kv nonce.
-pub fn nonce_lookup(state: Arc<Mutex<DbState>>) -> crate::telegram::NonceLookup {
+pub fn nonce_lookup(state: Arc<Mutex<DbState>>) -> crate::control::NonceLookup {
     Arc::new(move |flow| {
         if flow != SETUP_FLOW {
             return None;
@@ -576,7 +576,7 @@ impl StepCtx {
     fn stuck_detail(&self, step: u8) -> String {
         match step {
             0 => String::from(
-                "• Nothing answers? Check your id is in TELEGRAM_ALLOWLIST.\n• Want \
+                "• Nothing answers? Check you are on the broker allowlist.\n• Want \
                  out? Cancel setup — progress is only cleared when YOU cancel.",
             ),
             1 => String::from(
@@ -762,7 +762,7 @@ fn ensure_intake_nonce(state: &Mutex<DbState>) -> String {
         }
     }
     let _ = guard.kv_delete(crate::tasks::KV_ROTATE_IN_PROGRESS);
-    crate::onepage::mint_setup_nonce(&guard).unwrap_or_else(|_| crate::telegram::nonce())
+    crate::onepage::mint_setup_nonce(&guard).unwrap_or_else(|_| crate::control::nonce())
 }
 
 fn ensure_cb_nonce(state: &Mutex<DbState>) -> String {
@@ -770,7 +770,7 @@ fn ensure_cb_nonce(state: &Mutex<DbState>) -> String {
     match guard.kv_get(KV_SETUP_CB_NONCE) {
         Ok(Some(n)) => n,
         _ => {
-            let n = crate::telegram::nonce();
+            let n = crate::control::nonce();
             let _ = guard.kv_set(KV_SETUP_CB_NONCE, &n);
             n
         }
@@ -793,7 +793,7 @@ fn cb_nonce(state: &Mutex<DbState>) -> Option<String> {
 /// Restart resume (called from `main` after the startup check): resend the
 /// current step message ONLY when its row is older than 1 h — a fresh
 /// flow stays perfectly quiet (no duplicate after restart).
-pub async fn resume(deps: &SetupDeps, api: Arc<dyn TelegramApi>) {
+pub async fn resume(deps: &SetupDeps, api: Arc<dyn ControlApi>) {
     let Some(step) = step_now(&deps.state) else {
         return;
     };
@@ -833,7 +833,7 @@ struct SetupHandler {
 
 #[async_trait]
 impl UpdateHandler for SetupHandler {
-    async fn handle(&self, update: Update, api: Arc<dyn TelegramApi>) {
+    async fn handle(&self, update: Update, api: Arc<dyn ControlApi>) {
         if update.callback.is_some() {
             self.on_callback(update, api).await;
             return;
@@ -863,7 +863,7 @@ impl SetupHandler {
     /// step row gets a short "you're on step N" ack (no duplicate step
     /// message); a step row older than 1 h is resent (fresh send, same
     /// rule as a restart resume).
-    async fn start_or_resume(&self, anchor: Option<MsgRef>, api: Arc<dyn TelegramApi>) {
+    async fn start_or_resume(&self, anchor: Option<MsgRef>, api: Arc<dyn ControlApi>) {
         let deps = &self.deps;
         match step_now(&deps.state) {
             None => {
@@ -915,7 +915,7 @@ impl SetupHandler {
     }
 
     /// Plain text while a flow is active, routed by step.
-    async fn on_text(&self, text: &str, to: MsgRef, api: Arc<dyn TelegramApi>) {
+    async fn on_text(&self, text: &str, to: MsgRef, api: Arc<dyn ControlApi>) {
         let deps = &self.deps;
         let Some(step) = step_now(&deps.state) else {
             return; // no active flow: plain chat is none of our business
@@ -931,7 +931,7 @@ impl SetupHandler {
 
     /// Edit the current step's message (re-rendered) with a note appended
     /// — retries stay in place (message-volume discipline).
-    async fn edit_step_note(&self, step: u8, note: String, api: &Arc<dyn TelegramApi>) {
+    async fn edit_step_note(&self, step: u8, note: String, api: &Arc<dyn ControlApi>) {
         let deps = &self.deps;
         let Some(anchor) = stored_anchor(&deps.state) else {
             return;
@@ -946,7 +946,7 @@ impl SetupHandler {
     /// Step 1: an optional main-email text reply, used only to render the
     /// plus-address alias (stored in setup_progress, deleted at finish —
     /// GATE-011: never stored beyond the alias suggestion).
-    async fn step1_email(&self, text: &str, api: Arc<dyn TelegramApi>) {
+    async fn step1_email(&self, text: &str, api: Arc<dyn ControlApi>) {
         let deps = &self.deps;
         let hint = text.trim();
         if plus_alias(hint).is_none() {
@@ -976,7 +976,7 @@ impl SetupHandler {
     ///   `{name}-agent-1`/`{name}-bot` (never stored);
     /// - a name that doesn't exist ⇒ stored as the attempt, repeat-ask,
     ///   no advance.
-    async fn step2_username(&self, text: &str, api: Arc<dyn TelegramApi>) {
+    async fn step2_username(&self, text: &str, api: Arc<dyn ControlApi>) {
         let deps = &self.deps;
         let name = text.trim().trim_start_matches('@').to_string();
         if !valid_username(&name) {
@@ -1055,7 +1055,7 @@ impl SetupHandler {
     /// message is deleted immediately (failure told to the user), then
     /// full verification per GATE-004 — wrong login names the login found
     /// and returns to step 6 with the form nonce untouched.
-    async fn step7_paste(&self, text: &str, to: MsgRef, api: Arc<dyn TelegramApi>) {
+    async fn step7_paste(&self, text: &str, to: MsgRef, api: Arc<dyn ControlApi>) {
         let deps = &self.deps;
         let token = text.trim();
         let mut warning = String::new();
@@ -1083,7 +1083,7 @@ impl SetupHandler {
                             repo: "-".to_string(),
                             action: "custody.setup".to_string(),
                             decision: "stored".to_string(),
-                            basis: "telegram paste intake".to_string(),
+                            basis: "control-channel paste intake".to_string(),
                             approver: None,
                         });
                         let confirmed = SendRequest::html(format!(
@@ -1139,13 +1139,13 @@ impl SetupHandler {
     /// spawned worker (final-review fix 2): the router dispatch returns
     /// after the ack render, so commands and buttons stay live while a
     /// real grant polls GitHub for as long as it takes.
-    async fn step8_repos(&self, text: &str, chat: i64, api: Arc<dyn TelegramApi>) {
+    async fn step8_repos(&self, text: &str, chat: i64, api: Arc<dyn ControlApi>) {
         let deps = &self.deps;
         let mut entries = load_checklist(&deps.state);
         let fresh: Vec<String> = text
             .split(|c: char| c.is_whitespace() || c == ',')
             .map(str::trim)
-            .filter(|t| crate::telegram::commands::valid_repo(t).is_some())
+            .filter(|t| crate::control::commands::valid_repo(t).is_some())
             .map(String::from)
             .filter(|repo| !entries.iter().any(|(r, _)| r == repo))
             .collect();
@@ -1183,7 +1183,7 @@ impl SetupHandler {
     /// Advance from `from` to `to`: stamp the completed step, then
     /// re-show the walkthrough message as the next step (edit in place).
     /// Leaving step 5 enters the 6+7 intake pair instead.
-    async fn advance_from(&self, from: u8, to: u8, api: &Arc<dyn TelegramApi>) {
+    async fn advance_from(&self, from: u8, to: u8, api: &Arc<dyn ControlApi>) {
         let deps = &self.deps;
         pset_with_ts(&deps.state, &format!("ts:{from}"), "1", state::now());
         if from == 5 {
@@ -1200,7 +1200,7 @@ impl SetupHandler {
     /// Enter the 6+7 pair (from step 5's Done): ensure the form nonce
     /// (clearing a stale rotate marker), re-show step 6 on the anchor,
     /// then fresh-send the step-7 intake ask which becomes the new anchor.
-    async fn enter_intake_pair(&self, api: &Arc<dyn TelegramApi>) {
+    async fn enter_intake_pair(&self, api: &Arc<dyn ControlApi>) {
         let deps = &self.deps;
         let nonce = ensure_intake_nonce(&deps.state);
         pset(&deps.state, KEY_NONCE, &nonce);
@@ -1224,7 +1224,7 @@ impl SetupHandler {
     /// Return to step 6 after a failed intake verification: the reason is
     /// merged into the step-6 re-show (edit in place), then the intake ask
     /// is re-sent with the SAME nonce (still valid — nothing re-minted).
-    async fn return_to_intake(&self, reason: String, api: Arc<dyn TelegramApi>) {
+    async fn return_to_intake(&self, reason: String, api: Arc<dyn ControlApi>) {
         let deps = &self.deps;
         pset(&deps.state, KEY_STEP, "6");
         if let Some(anchor) = stored_anchor(&deps.state) {
@@ -1247,7 +1247,7 @@ impl SetupHandler {
 
     /// Enter step 8 (after a successful intake): fresh-send the repo ask,
     /// which becomes the checklist anchor.
-    async fn enter_step8(&self, api: &Arc<dyn TelegramApi>, chat: i64) {
+    async fn enter_step8(&self, api: &Arc<dyn ControlApi>, chat: i64) {
         let deps = &self.deps;
         pset_with_ts(&deps.state, "ts:7", "1", state::now());
         pset(&deps.state, KEY_STEP, "8");
@@ -1264,14 +1264,14 @@ impl SetupHandler {
     }
 
     /// Re-render step 8 (ask + checklist) onto the stored anchor.
-    async fn render_step8(&self, api: &Arc<dyn TelegramApi>) {
+    async fn render_step8(&self, api: &Arc<dyn ControlApi>) {
         render_step8_for(&self.deps, api).await;
     }
 
     /// Finish (step 8's `[Finish setup]`): summary + command list +
     /// ruleset reminder as a fresh send, then clear the durable rows
     /// (including the email hint — never persisted beyond setup).
-    async fn finish(&self, api: Arc<dyn TelegramApi>, chat: i64) {
+    async fn finish(&self, api: Arc<dyn ControlApi>, chat: i64) {
         let deps = &self.deps;
         let username = pget(&deps.state, KEY_USERNAME).unwrap_or_else(|| deps.machine_login.clone());
         let entries = load_checklist(&deps.state);
@@ -1290,7 +1290,7 @@ impl SetupHandler {
     }
 
     /// Callback dispatch: signed `setup:{nonce}:{action}` triples only.
-    async fn on_callback(&self, update: Update, api: Arc<dyn TelegramApi>) {
+    async fn on_callback(&self, update: Update, api: Arc<dyn ControlApi>) {
         let deps = &self.deps;
         let Some(cb) = update.callback else {
             return;
@@ -1311,7 +1311,7 @@ impl SetupHandler {
                 let _ = api
                     .edit_message(
                         to,
-                        SendRequest::text(crate::telegram::ACTION_NO_LONGER_VALID),
+                        SendRequest::text(crate::control::ACTION_NO_LONGER_VALID),
                     )
                     .await;
             }
@@ -1390,7 +1390,7 @@ impl SetupHandler {
                     let _ = api
                         .edit_message(
                             to,
-                            SendRequest::text(crate::telegram::ACTION_NO_LONGER_VALID),
+                            SendRequest::text(crate::control::ACTION_NO_LONGER_VALID),
                         )
                         .await;
                 }
@@ -1402,7 +1402,7 @@ impl SetupHandler {
 /// Re-render step 8 (ask + checklist) onto the stored anchor — shared by
 /// the handler and the spawned grant worker (the anchor row is durable, so
 /// the worker renders from the same truth).
-async fn render_step8_for(deps: &SetupDeps, api: &Arc<dyn TelegramApi>) {
+async fn render_step8_for(deps: &SetupDeps, api: &Arc<dyn ControlApi>) {
     let Some(anchor) = stored_anchor(&deps.state) else {
         return;
     };
@@ -1422,7 +1422,7 @@ async fn render_step8_for(deps: &SetupDeps, api: &Arc<dyn TelegramApi>) {
 /// clear (the `[Finish setup]` ending, reached on its own).
 async fn run_step8_grants(
     deps: Arc<SetupDeps>,
-    api: Arc<dyn TelegramApi>,
+    api: Arc<dyn ControlApi>,
     notify: NotifyHandle,
     repos: Vec<String>,
 ) {
@@ -1484,7 +1484,7 @@ async fn run_step8_grants(
 /// channel the state still advances; `/setup` resumes there.
 pub async fn form_stored_hook(
     state: &Arc<Mutex<DbState>>,
-    notify: &Option<(Arc<dyn TelegramApi>, i64)>,
+    notify: &Option<(Arc<dyn ControlApi>, i64)>,
 ) {
     if pget(state, KEY_STEP).is_none() {
         return; // no active walkthrough

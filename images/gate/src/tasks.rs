@@ -38,8 +38,8 @@ use crate::audit::Audit;
 use crate::custody::MachineTokenStore;
 use crate::github::{Platform, VerifiedToken, VerifyError};
 use crate::state::{self, State as DbState};
-use crate::telegram::send::{MsgRef, SendRequest};
-use crate::telegram::TelegramApi;
+use crate::control::send::{MsgRef, SendRequest};
+use crate::control::ControlApi;
 
 /// 24 h: the daily verify + reminder cadence.
 pub const DAILY_INTERVAL: Duration = Duration::from_secs(86_400);
@@ -79,7 +79,7 @@ pub struct LifecycleDeps {
     pub forwarding: Arc<std::sync::atomic::AtomicBool>,
     /// `(api, chat_id)` for gate-initiated notices; `None` = no bot or no
     /// chat configured — checks still run, notices are skipped.
-    pub notify: Option<(Arc<dyn TelegramApi>, i64)>,
+    pub notify: Option<(Arc<dyn ControlApi>, i64)>,
     /// Gate base URL for the one-time form link in rotate intake.
     pub gate_host: String,
     pub audit: Arc<Audit>,
@@ -125,7 +125,7 @@ pub fn check_failed_text(err: &VerifyError, expected_login: &str) -> String {
 /// stays eligible and the next sweep retries it. Shared with the registry
 /// sweep's role-drop notices (`registry.rs`).
 pub(crate) async fn send_notice(
-    notify: &Option<(Arc<dyn TelegramApi>, i64)>,
+    notify: &Option<(Arc<dyn ControlApi>, i64)>,
     req: SendRequest,
 ) -> anyhow::Result<()> {
     let Some((api, chat)) = notify else {
@@ -175,7 +175,7 @@ pub fn apply_stored_token(guard: &DbState, vt: &VerifiedToken) -> anyhow::Result
 /// delete-the-old-token instruction (the gate cannot delete GitHub-side
 /// tokens). Silence when no notify channel is configured.
 pub async fn notify_rotate_complete(
-    notify: &Option<(Arc<dyn TelegramApi>, i64)>,
+    notify: &Option<(Arc<dyn ControlApi>, i64)>,
     vt: &VerifiedToken,
 ) {
     if notify.is_none() {
@@ -337,7 +337,7 @@ async fn maybe_send_reminders(deps: &LifecycleDeps) {
     let cb_nonce = rotate_cb_nonce(deps);
     let req = match &cb_nonce {
         Some(n) => SendRequest::text(body)
-            .with_inline_button("Start /rotate", crate::telegram::lifecycle::ROTATE_FLOW, n, "start"),
+            .with_inline_button("Start /rotate", crate::control::lifecycle::ROTATE_FLOW, n, "start"),
         None => SendRequest::text(body),
     };
     // The marker is written ONLY on a confirmed send: a failed delivery
@@ -359,7 +359,7 @@ fn rotate_cb_nonce(deps: &LifecycleDeps) -> Option<String> {
     match guard.kv_get(KV_ROTATE_CB_NONCE) {
         Ok(Some(n)) => Some(n),
         Ok(None) => {
-            let n = crate::telegram::nonce();
+            let n = crate::control::nonce();
             guard.kv_set(KV_ROTATE_CB_NONCE, &n).ok()?;
             Some(n)
         }

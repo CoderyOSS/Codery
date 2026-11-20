@@ -25,6 +25,6 @@ pub mod routes;
 pub mod sphere;
 pub mod state;
 pub mod tasks;
-pub mod telegram;
+pub mod control;
 pub mod tokens;
 pub mod types;

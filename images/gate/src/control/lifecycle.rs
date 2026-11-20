@@ -1,4 +1,4 @@
-//! Machine-token lifecycle over Telegram (GATE-004 §6.4–6.5, task 4):
+//! Machine-token lifecycle over the control channel (GATE-004 §6.4–6.5, task 4):
 //! `/rotate` (and the `[Start /rotate]` reminder button) run the intake
 //! steps of the setup flow with the OLD token still live — a prefilled
 //! token-page link plus a one-time form link; the form's success path
@@ -30,9 +30,9 @@ use crate::custody::MachineTokenStore;
 use crate::github::{TOKENS_LIST_URL, TOKEN_NEW_URL};
 use crate::state::{self, State};
 use crate::tasks::{LifecycleDeps, KV_ROTATE_IN_PROGRESS};
-use crate::telegram::send::SendRequest;
-use crate::telegram::{
-    validate_callback, ACTION_NO_LONGER_VALID, NonceLookup, TelegramApi, Update, UpdateHandler,
+use crate::control::send::SendRequest;
+use crate::control::{
+    validate_callback, ACTION_NO_LONGER_VALID, NonceLookup, ControlApi, Update, UpdateHandler,
 };
 
 /// Flow id of the rotate intake (reminder button + its handler). Never a
@@ -136,7 +136,7 @@ pub fn disconnect_reply(deps: &LifecycleDeps, approver: Option<i64>) -> SendRequ
         repo: "-".to_string(),
         action: "custody.disconnect".to_string(),
         decision: "disconnected".to_string(),
-        basis: "telegram command".to_string(),
+        basis: "control command".to_string(),
         approver: approver.map(|id| id.to_string()),
     });
     let mut text = String::from(
@@ -196,7 +196,7 @@ struct RotateStart {
 
 #[async_trait]
 impl UpdateHandler for RotateStart {
-    async fn handle(&self, update: Update, api: Arc<dyn TelegramApi>) {
+    async fn handle(&self, update: Update, api: Arc<dyn ControlApi>) {
         let Some(cb) = update.callback else {
             return;
         };
@@ -235,6 +235,6 @@ fn nonce_lookup_once(deps: &LifecycleDeps) -> Option<String> {
 /// Wire the lifecycle layer onto a router: the `[Start /rotate]` button
 /// handler. (`rotate_reply`/`disconnect_reply` are invoked by the command
 /// dispatcher in `commands`, keeping one reply per operator command.)
-pub fn register_lifecycle(router: &mut crate::telegram::TelegramRouter, deps: Arc<LifecycleDeps>) {
+pub fn register_lifecycle(router: &mut crate::control::ControlRouter, deps: Arc<LifecycleDeps>) {
     router.register(Arc::new(RotateStart { deps }));
 }

@@ -359,7 +359,7 @@ pub struct GitDeps {
     /// instructions go if a push ever needed a tier a personal repo cannot
     /// grant (every ref-update class is Write today, so this is enforced
     /// for map evolution — see `preflight_role_gate`).
-    pub elevation_notify: Option<(Arc<dyn crate::telegram::TelegramApi>, i64)>,
+    pub elevation_notify: Option<(Arc<dyn crate::control::ControlApi>, i64)>,
 }
 
 impl GitDeps {
@@ -506,7 +506,7 @@ async fn preflight_role_gate(
             .split_once('/')
             .expect("repo_full is owner/repo");
         if !deps.platform.owner_is_org(owner).await {
-            crate::telegram::elevation::maybe_send_diy(
+            crate::control::elevation::maybe_send_diy(
                 &deps.elevation_notify,
                 repo_full,
                 needed,
@@ -547,7 +547,7 @@ async fn preflight_role_gate(
     }
     let id = {
         let guard = gs.state.lock().expect("state lock must be poison-free");
-        crate::telegram::elevation::open_or_join_flow(&guard, repo_full, "git-receive-pack", needed)
+        crate::control::elevation::open_or_join_flow(&guard, repo_full, "git-receive-pack", needed)
     };
     audit_push(
         &gs.audit,

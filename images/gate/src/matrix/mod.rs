@@ -10,7 +10,7 @@
 //! - inline buttons become text commands embedding the same signed
 //!   `"{flow_id}:{nonce}:{action}"` triple (GATE-006's `callback_data`);
 //! - an inbound `/ok`/`/no`/`/approve`/`/deny` command carrying a
-//!   well-formed triple becomes the same validated [`crate::telegram::Callback`]
+//!   well-formed triple becomes the same validated [`crate::control::Callback`]
 //!   update a Telegram button press would produce. The prefix is
 //!   ergonomic only — the triple's action word stays authoritative.
 
@@ -37,7 +37,7 @@ pub fn mxid_map(allowlist: &[String]) -> HashMap<String, i64> {
 }
 
 /// Minimum nonce length for a text command to count as a signed triple —
-/// production nonces are 16 hex chars (GATE-006's [`crate::telegram::nonce`]);
+/// production nonces are 16 hex chars (GATE-006's [`crate::control::nonce`]);
 /// the floor just keeps garbage like `one:two:three` from looking signed.
 const MIN_NONCE_LEN: usize = 8;
 
@@ -71,7 +71,7 @@ pub fn command_to_callback(text: &str) -> Option<String> {
     Some(triple.to_string())
 }
 
-/// The command lines rendered for outbound [`crate::telegram::SendRequest`]
+/// The command lines rendered for outbound [`crate::control::SendRequest`]
 /// buttons: one line per button — `` `/ok {data}` `` for `approve`
 /// actions, `` `/no {data}` `` for anything else — suffixed ` — {label}`.
 /// `None` when there are no inline buttons (link buttons render as

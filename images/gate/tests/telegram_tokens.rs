@@ -1,4 +1,4 @@
-//! Integration: agent-token lifecycle over Telegram (GATE-003/006).
+//! Integration: agent-token lifecycle over Control (GATE-003/006).
 //! `/token mint {name}` replies with the raw token exactly once (plus a
 //! "store this now" note), `/token revoke {name}` confirms with an
 //! affected-agent note, `/token list` shows names + timestamps and never
@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex};
 
 use gate::audit::Audit;
 use gate::state::State as DbState;
-use gate::telegram::commands::{register_commands, CommandDeps};
-use gate::telegram::fake::FakeTelegram;
-use gate::telegram::send::SendRequest;
-use gate::telegram::{MsgRef, TelegramApi, TelegramRouter, Update};
+use gate::control::commands::{register_commands, CommandDeps};
+use gate::control::fake::FakeTransport;
+use gate::control::send::SendRequest;
+use gate::control::{MsgRef, ControlApi, ControlRouter, Update};
 use gate::tokens::TokenStore;
 
 const APPROVER: i64 = 42;
@@ -27,13 +27,13 @@ const COMMAND_MSG_ID: i32 = 500;
 // ---------------------------------------------------------------------------
 
 struct Harness {
-    fake: Arc<FakeTelegram>,
+    fake: Arc<FakeTransport>,
     state: Arc<Mutex<DbState>>,
     audit: Arc<Audit>,
     audit_path: PathBuf,
     dir: PathBuf,
-    router: TelegramRouter,
-    api: Arc<dyn TelegramApi>,
+    router: ControlRouter,
+    api: Arc<dyn ControlApi>,
 }
 
 impl Harness {
@@ -50,11 +50,11 @@ impl Harness {
         let audit_path = dir.join("audit.jsonl");
         let audit = Arc::new(Audit::open(&audit_path));
         let state = Arc::new(Mutex::new(DbState::open(":memory:").unwrap()));
-        let fake = Arc::new(FakeTelegram::new());
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let fake = Arc::new(FakeTransport::new());
+        let api: Arc<dyn ControlApi> = fake.clone();
         let machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync> =
             Arc::new(|| None);
-        let mut router = TelegramRouter::new();
+        let mut router = ControlRouter::new();
         register_commands(
             &mut router,
             Arc::new(CommandDeps {

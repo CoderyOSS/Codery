@@ -1,6 +1,6 @@
 //! Integration: machine-token lifecycle (GATE-004 §6.3–6.5, task 4).
 //! Startup check (token present ⇒ verify; pass ⇒ forwarding on, fail ⇒ off
-//! + Telegram notice naming the failed check; absent ⇒ off + /setup
+//! + Control notice naming the failed check; absent ⇒ off + /setup
 //! prompt), daily verify task (24 h), expiry reminders at 14/3/1 days with
 //! a `[Start /rotate]` button, `/rotate` (prefilled token page + one-time
 //! form, atomic swap on success — old token keeps working on failure) and
@@ -31,12 +31,12 @@ use gate::tasks::{
     daily_tick, parse_expires, startup_check, KV_LAST_VERIFIED_AT, KV_ROTATE_CB_NONCE,
     KV_ROTATE_IN_PROGRESS, KV_TOKEN_EXPIRES_AT,
 };
-use gate::telegram::commands::{register_commands, CommandDeps};
-use gate::telegram::fake::FakeTelegram;
-use gate::telegram::lifecycle::{
+use gate::control::commands::{register_commands, CommandDeps};
+use gate::control::fake::FakeTransport;
+use gate::control::lifecycle::{
     nonce_lookup, register_lifecycle, rotate_reply, disconnect_reply, ROTATE_FLOW,
 };
-use gate::telegram::{MsgRef, TelegramApi, TelegramRouter, Update};
+use gate::control::{MsgRef, ControlApi, ControlRouter, Update};
 use gate::tokens::TokenStore;
 
 const MACHINE_LOGIN: &str = "gate-machine";
@@ -97,20 +97,20 @@ fn custody_of<'a>(state: &'a DbState, enc_key: &'a str) -> MachineTokenStore<'a>
 }
 
 // ---------------------------------------------------------------------------
-// Fixture A — control plane: state + FakeTelegram + router with the
+// Fixture A — control plane: state + FakeTransport + router with the
 // command handlers + lifecycle handler registered, direct dispatch (no
 // poll loop), wiremock upstream for verify.
 // ---------------------------------------------------------------------------
 
 struct Ctl {
     dir: PathBuf,
-    fake: Arc<FakeTelegram>,
-    api: Arc<dyn TelegramApi>,
+    fake: Arc<FakeTransport>,
+    api: Arc<dyn ControlApi>,
     state: Arc<Mutex<DbState>>,
     upstream: MockServer,
     forwarding: Arc<AtomicBool>,
     deps: gate::tasks::LifecycleDeps,
-    router: TelegramRouter,
+    router: ControlRouter,
 }
 
 impl Drop for Ctl {
@@ -137,8 +137,8 @@ impl Ctl {
             Arc::new(|| None),
         ));
         let forwarding = Arc::new(AtomicBool::new(false));
-        let fake = Arc::new(FakeTelegram::new());
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let fake = Arc::new(FakeTransport::new());
+        let api: Arc<dyn ControlApi> = fake.clone();
         let deps = gate::tasks::LifecycleDeps {
             state: state.clone(),
             platform,
@@ -157,7 +157,7 @@ impl Ctl {
                 custody_of(&guard, &enc).load().unwrap_or(None)
             })
         };
-        let mut router = TelegramRouter::new();
+        let mut router = ControlRouter::new();
         register_commands(
             &mut router,
             Arc::new(CommandDeps {
@@ -172,7 +172,7 @@ impl Ctl {
         register_lifecycle(&mut router, deps.clone().into());
         // Composed nonce lookup exactly like main.rs: approval rows first,
         // then the lifecycle rotate flow.
-        let approvals = gate::telegram::approvals::TelegramApprovalBackend::nonce_lookup(state.clone());
+        let approvals = gate::control::approvals::ControlApprovalBackend::nonce_lookup(state.clone());
         let rotate = nonce_lookup(state.clone());
         router.set_nonce_lookup(Arc::new(move |flow| approvals(flow).or_else(|| rotate(flow))));
         Self {
@@ -188,7 +188,7 @@ impl Ctl {
     }
 
     /// Dispatch one operator command; return the single reply edit.
-    async fn command(&self, text: &str) -> gate::telegram::send::SendRequest {
+    async fn command(&self, text: &str) -> gate::control::send::SendRequest {
         let before = self.fake.edits().len();
         let update = Update {
             sender_id: Some(CHAT),
@@ -210,11 +210,11 @@ impl Ctl {
     }
 
     /// Press a signed button; return the reply edit it produced.
-    async fn press(&self, data: &str) -> gate::telegram::send::SendRequest {
+    async fn press(&self, data: &str) -> gate::control::send::SendRequest {
         let before = self.fake.edits().len();
         let update = Update {
             sender_id: Some(CHAT),
-            callback: Some(gate::telegram::Callback {
+            callback: Some(gate::control::Callback {
                 id: "cbq-1".to_string(),
                 data: data.to_string(),
                 from_id: CHAT,
@@ -262,7 +262,7 @@ impl Ctl {
     }
 
     /// Gate-initiated notices (startup/daily/reminders) land in `sent()`.
-    fn notices(&self) -> Vec<gate::telegram::send::SendRequest> {
+    fn notices(&self) -> Vec<gate::control::send::SendRequest> {
         self.fake.sent()
     }
 
@@ -537,7 +537,7 @@ async fn reminder_send_failure_leaves_marker_unset_and_retries_next_sweep() {
     let soon = gate::tasks::format_expires(state::now() + 13 * DAY);
     mount_good_user(&c.upstream, OLD_TOKEN, Some(&soon)).await;
 
-    // First sweep: the Telegram send fails — the marker must NOT be
+    // First sweep: the Control send fails — the marker must NOT be
     // written (an undelivered reminder must never be lost).
     c.fake.fail_next_sends(1);
     c.tick().await;
@@ -605,7 +605,7 @@ async fn reminder_1_day_and_expired_fire_once() {
 }
 
 // ---------------------------------------------------------------------------
-// /rotate and /disconnect over Telegram
+// /rotate and /disconnect over Control
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -814,7 +814,7 @@ struct Gate {
     dir: PathBuf,
     state: Arc<Mutex<DbState>>,
     upstream: MockServer,
-    fake: Arc<FakeTelegram>,
+    fake: Arc<FakeTransport>,
     forwarding: Arc<AtomicBool>,
     deps: gate::tasks::LifecycleDeps,
 }
@@ -891,8 +891,8 @@ async fn spawn_gate() -> Gate {
         Arc::new(|| None),
     ));
     let forwarding = Arc::new(AtomicBool::new(false));
-    let fake = Arc::new(FakeTelegram::new());
-    let api: Arc<dyn TelegramApi> = fake.clone();
+    let fake = Arc::new(FakeTransport::new());
+    let api: Arc<dyn ControlApi> = fake.clone();
     let notify = Some((api, CHAT));
     let deps = gate::tasks::LifecycleDeps {
         state: state.clone(),
@@ -918,7 +918,7 @@ async fn spawn_gate() -> Gate {
             notify,
         })),
         max_body_bytes: gate::config::DEFAULT_MAX_BODY_BYTES,
-        telegram_live: std::sync::atomic::AtomicBool::new(false),
+        control_live: std::sync::atomic::AtomicBool::new(false),
         forwarding_enabled: forwarding.clone(),
     };
     let app = router(gs);
@@ -1155,7 +1155,7 @@ async fn spawn_proxy_gate() -> ProxyGate {
         api: Some(Arc::new(api)),
         onepage: None,
         max_body_bytes: gate::config::DEFAULT_MAX_BODY_BYTES,
-        telegram_live: std::sync::atomic::AtomicBool::new(false),
+        control_live: std::sync::atomic::AtomicBool::new(false),
         forwarding_enabled: forwarding.clone(),
     };
     let app = router(gs);
@@ -1280,7 +1280,7 @@ async fn git_proxy_flag_off_short_circuits_before_custody_load() {
 
 // ---------------------------------------------------------------------------
 // /rotate + /disconnect reply builders used directly (unit-ish coverage of
-// the exact strings) — kept here so the Telegram command surface and the
+// the exact strings) — kept here so the Control command surface and the
 // form both speak identical text.
 // ---------------------------------------------------------------------------
 

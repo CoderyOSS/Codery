@@ -1,4 +1,4 @@
-//! Integration: guided Telegram setup walkthrough (GATE-011, task 5).
+//! Integration: guided Control setup walkthrough (GATE-011, task 5).
 //! A user with no stored token goes from `/setup` to a working agent
 //! setup, step by step, with durable resumable progress:
 //!
@@ -38,15 +38,15 @@ use gate::onepage::{mint_setup_nonce, OnePageDeps, KV_NONCE, KV_NONCE_EXPIRES};
 use gate::routes::{router, GateState, RateLimiter};
 use gate::state::{self, State as DbState};
 use gate::tasks::{KV_ROTATE_IN_PROGRESS, REMINDER_DAYS};
-use gate::telegram::commands::{register_commands, CommandDeps};
-use gate::telegram::fake::FakeTelegram;
-use gate::telegram::grant::{GrantDeps, RealGrantFlow};
-use gate::telegram::lifecycle::nonce_lookup as rotate_nonce_lookup;
-use gate::telegram::setup::{
+use gate::control::commands::{register_commands, CommandDeps};
+use gate::control::fake::FakeTransport;
+use gate::control::grant::{GrantDeps, RealGrantFlow};
+use gate::control::lifecycle::nonce_lookup as rotate_nonce_lookup;
+use gate::control::setup::{
     form_stored_hook, nonce_lookup as setup_nonce_lookup, register_setup, resume, FakeGrantFlow,
     GrantFlow, GrantOutcome, SetupDeps,
 };
-use gate::telegram::{MsgRef, TelegramApi, TelegramRouter, Update};
+use gate::control::{MsgRef, ControlApi, ControlRouter, Update};
 
 const MACHINE_LOGIN: &str = "rob-agent";
 const MAIN_TOKEN: &str = "ghp_pasteEXAMPLEtoken00000001";
@@ -56,15 +56,15 @@ const HOST: &str = "https://gag.example.com";
 const USERNAME: &str = "rob-agent";
 
 // ---------------------------------------------------------------------------
-// Fixture A — control plane: state + FakeTelegram + router (commands +
+// Fixture A — control plane: state + FakeTransport + router (commands +
 // setup handlers, composed nonce lookup), wiremock upstream, direct
 // dispatch (no poll loop). `fallback = false` ⇒ GATE_PUBLIC_URL set.
 // ---------------------------------------------------------------------------
 
 struct Ctl {
     dir: PathBuf,
-    fake: Arc<FakeTelegram>,
-    api: Arc<dyn TelegramApi>,
+    fake: Arc<FakeTransport>,
+    api: Arc<dyn ControlApi>,
     state: Arc<Mutex<DbState>>,
     upstream: MockServer,
     forwarding: Arc<AtomicBool>,
@@ -73,7 +73,7 @@ struct Ctl {
     /// The fake underneath `grant`, when one was wired (call-log reads).
     fake_grant: Option<Arc<FakeGrantFlow>>,
     deps: Arc<SetupDeps>,
-    router: TelegramRouter,
+    router: ControlRouter,
     _fallback: bool,
 }
 
@@ -137,8 +137,8 @@ impl Ctl {
             Arc::new(|| None),
         ));
         let forwarding = Arc::new(AtomicBool::new(false));
-        let tg = Arc::new(FakeTelegram::new());
-        let api: Arc<dyn TelegramApi> = tg.clone();
+        let tg = Arc::new(FakeTransport::new());
+        let api: Arc<dyn ControlApi> = tg.clone();
         let grant = build(state.clone(), platform.clone());
         let deps = Arc::new(SetupDeps {
             state: state.clone(),
@@ -159,7 +159,7 @@ impl Ctl {
                 MachineTokenStore::new(&guard, &enc).load().unwrap_or(None)
             })
         };
-        let mut router = TelegramRouter::new();
+        let mut router = ControlRouter::new();
         register_commands(
             &mut router,
             Arc::new(CommandDeps {
@@ -173,7 +173,7 @@ impl Ctl {
         );
         register_setup(&mut router, deps.clone());
         // Composed nonce lookup like main.rs: approvals, rotate, setup.
-        let approvals = gate::telegram::approvals::TelegramApprovalBackend::nonce_lookup(state.clone());
+        let approvals = gate::control::approvals::ControlApprovalBackend::nonce_lookup(state.clone());
         let rotate = rotate_nonce_lookup(state.clone());
         let setup = setup_nonce_lookup(state.clone());
         router.set_nonce_lookup(Arc::new(move |flow| {
@@ -203,7 +203,7 @@ impl Ctl {
     }
 
     /// Dispatch one operator command; the reply must be exactly one edit.
-    async fn command(&self, text: &str) -> gate::telegram::send::SendRequest {
+    async fn command(&self, text: &str) -> gate::control::send::SendRequest {
         let before = self.fake.edits().len();
         let update = Update {
             sender_id: Some(CHAT),
@@ -248,7 +248,7 @@ impl Ctl {
             .unwrap_or_else(|| panic!("no rendered setup button for action '{action}'"));
         let update = Update {
             sender_id: Some(CHAT),
-            callback: Some(gate::telegram::Callback {
+            callback: Some(gate::control::Callback {
                 id: "cbq-1".to_string(),
                 data,
                 from_id: CHAT,
@@ -266,7 +266,7 @@ impl Ctl {
     /// button performing `action`; returns its exact callback_data.
     fn rendered_button_data(&self, action: &str) -> Option<String> {
         let wanted = |data: &str| {
-            data.split(':').next() == Some(gate::telegram::setup::SETUP_FLOW)
+            data.split(':').next() == Some(gate::control::setup::SETUP_FLOW)
                 && data.rsplit(':').next() == Some(action)
         };
         for (_, req) in self.fake.edits().iter().rev() {
@@ -299,11 +299,11 @@ impl Ctl {
         MachineTokenStore::new(&guard, ENC_KEY).load().unwrap()
     }
 
-    fn edits(&self) -> Vec<(MsgRef, gate::telegram::send::SendRequest)> {
+    fn edits(&self) -> Vec<(MsgRef, gate::control::send::SendRequest)> {
         self.fake.edits()
     }
 
-    fn sent(&self) -> Vec<gate::telegram::send::SendRequest> {
+    fn sent(&self) -> Vec<gate::control::send::SendRequest> {
         self.fake.sent()
     }
 
@@ -1023,7 +1023,7 @@ async fn wrong_nonce_bounces_at_the_router_and_a_rendered_press_advances() {
         .expect("rendered [Start] button");
     assert!(
         start_data.len() <= 64,
-        "callback_data must fit Telegram's limit: {start_data}"
+        "callback_data must fit Control's limit: {start_data}"
     );
     let cb_nonce = start_data
         .split(':')
@@ -1038,7 +1038,7 @@ async fn wrong_nonce_bounces_at_the_router_and_a_rendered_press_advances() {
     let edits_before = c.fake.edits().len();
     let forged = Update {
         sender_id: Some(CHAT),
-        callback: Some(gate::telegram::Callback {
+        callback: Some(gate::control::Callback {
             id: "cbq-forged".to_string(),
             data: "setup:0000000000000000:start".to_string(),
             from_id: CHAT,
@@ -1055,7 +1055,7 @@ async fn wrong_nonce_bounces_at_the_router_and_a_rendered_press_advances() {
     assert_eq!(edits.len(), edits_before + 1, "exactly the bounce edit");
     assert_eq!(
         edits.last().unwrap().1.text,
-        gate::telegram::ACTION_NO_LONGER_VALID
+        gate::control::ACTION_NO_LONGER_VALID
     );
     assert!(c.fake.answered().contains(&"cbq-forged".to_string()));
 
@@ -1105,10 +1105,10 @@ struct FormGate {
     dir: PathBuf,
     state: Arc<Mutex<DbState>>,
     upstream: MockServer,
-    fake: Arc<FakeTelegram>,
-    api: Arc<dyn TelegramApi>,
+    fake: Arc<FakeTransport>,
+    api: Arc<dyn ControlApi>,
     forwarding: Arc<AtomicBool>,
-    router: TelegramRouter,
+    router: ControlRouter,
 }
 
 impl Drop for FormGate {
@@ -1134,8 +1134,8 @@ async fn spawn_form_gate() -> FormGate {
         Arc::new(|| None),
     ));
     let forwarding = Arc::new(AtomicBool::new(false));
-    let fake = Arc::new(FakeTelegram::new());
-    let api: Arc<dyn TelegramApi> = fake.clone();
+    let fake = Arc::new(FakeTransport::new());
+    let api: Arc<dyn ControlApi> = fake.clone();
     let notify = Some((api.clone(), CHAT));
     let grant = Arc::new(FakeGrantFlow::new());
     let deps = Arc::new(SetupDeps {
@@ -1163,7 +1163,7 @@ async fn spawn_form_gate() -> FormGate {
             notify,
         })),
         max_body_bytes: gate::config::DEFAULT_MAX_BODY_BYTES,
-        telegram_live: std::sync::atomic::AtomicBool::new(false),
+        control_live: std::sync::atomic::AtomicBool::new(false),
         forwarding_enabled: forwarding.clone(),
     };
     let app = router(gs);
@@ -1185,7 +1185,7 @@ async fn spawn_form_gate() -> FormGate {
             MachineTokenStore::new(&guard, &enc).load().unwrap_or(None)
         })
     };
-    let mut router = TelegramRouter::new();
+    let mut router = ControlRouter::new();
     register_commands(
         &mut router,
         Arc::new(CommandDeps {
@@ -1198,7 +1198,7 @@ async fn spawn_form_gate() -> FormGate {
         }),
     );
     register_setup(&mut router, deps.clone());
-    let approvals = gate::telegram::approvals::TelegramApprovalBackend::nonce_lookup(state.clone());
+    let approvals = gate::control::approvals::ControlApprovalBackend::nonce_lookup(state.clone());
     let rotate = rotate_nonce_lookup(state.clone());
     let setup = setup_nonce_lookup(state.clone());
     router.set_nonce_lookup(Arc::new(move |flow| {
@@ -1248,7 +1248,7 @@ impl FormGate {
         // Review round 1 (F1): echo a RENDERED button's callback_data —
         // never reconstruct the signed triple from state.
         let wanted = |data: &str| {
-            data.split(':').next() == Some(gate::telegram::setup::SETUP_FLOW)
+            data.split(':').next() == Some(gate::control::setup::SETUP_FLOW)
                 && data.rsplit(':').next() == Some(action)
         };
         let data = self
@@ -1267,7 +1267,7 @@ impl FormGate {
             .unwrap_or_else(|| panic!("no rendered setup button for action '{action}'"));
         let update = Update {
             sender_id: Some(CHAT),
-            callback: Some(gate::telegram::Callback {
+            callback: Some(gate::control::Callback {
                 id: "cbq-1".to_string(),
                 data,
                 from_id: CHAT,

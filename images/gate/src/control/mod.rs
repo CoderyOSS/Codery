@@ -1,25 +1,25 @@
-//! Telegram transport (GATE-006): the plumbing every control-plane task
-//! builds on. One long-poll client against the Telegram Bot API, an
-//! allowlist filter, signed callback validation, and a boxed-handler
-//! router.
+//! The control plane (GATE-006, transport-agnostic since GATE-013): the
+//! plumbing every control-plane task builds on. A transport trait with
+//! long-poll semantics, an allowlist filter, signed callback validation,
+//! and a boxed-handler router. Transports live elsewhere: the Telegram
+//! Bot API client and the Matrix adapter are preserved on the
+//! `matrix-telegram` branch; main carries the ntfy transport (`crate::ntfy`).
 //!
-//! Design rulings (GATE-006):
-//! - **The API base URL lives only here.** `https://api.telegram.org` is a
-//!   module-private literal inside [`TelegramClient`]; tests never touch
-//!   the real client — they inject [`Arc<dyn TelegramApi>`] doubles (see
-//!   `fake.rs`, compiled only under `test` / the `test-util` feature).
-//! - **Empty allowlist ⇒ loop still runs but drops everything.** Spawning
-//!   whenever `TELEGRAM_BOT_TOKEN` is set keeps behaviour uniform (offsets
-//!   keep advancing so stranger updates do not pile up) and fails closed:
-//!   with no allowlisted approver, no update is ever delivered or answered.
-//! - **dyn-safe trait.** Later tasks inject `Arc<dyn TelegramApi>`; the
-//!   router and poll loop are generic over the trait object only.
-//! - **Sends are replies.** `SendRequest.reply_to` doubles as the target
-//!   chat for `sendMessage` — control-plane traffic always answers inside
-//!   the thread the update came from.
-//! - **Callbacks are answered both ways.** The transport stops the
-//!   client-side spinner (`answerCallbackQuery`) whether the nonce
-//!   validates or not; handlers see only validated callbacks.
+//! Design rulings (GATE-006, still binding):
+//! - **Base URLs and credentials live inside transports.** Tests never
+//!   touch a real client — they inject [`Arc<dyn ControlApi>`] doubles
+//!   (see `fake.rs`, compiled only under `test` / the `test-util` feature).
+//! - **Empty allowlist ⇒ loop still runs but drops everything.** Fail
+//!   closed: with no allowlisted approver, no update is ever delivered or
+//!   answered.
+//! - **dyn-safe trait.** The router and poll loop are generic over the
+//!   trait object only.
+//! - **Sends anchor their reply target.** `SendRequest.reply_to` names
+//!   the thread/message being answered; transports without an edit or
+//!   reply concept fall back to fresh sends.
+//! - **Callbacks are validated both ways.** Transports may acknowledge a
+//!   press regardless of validity; handlers see only nonce-valid
+//!   callbacks.
 //!
 //! Non-allowlisted updates are dropped with NO reply of any kind: not
 //! answered, not edited, not deleted — the gate simply never acknowledges
@@ -43,19 +43,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::Value;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
-
-/// Long-poll window passed to Telegram's `getUpdates` (seconds). The API
-/// holds the request open for this long before returning an empty result.
-const TELEGRAM_LONG_POLL_SECS: i64 = 50;
-/// Hard reqwest timeout per call — comfortably above the long-poll window.
-const TELEGRAM_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
-/// Bot API base URL. Literal lives ONLY in this module (see module docs).
-const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
 /// Default first-error delay for [`run_poll_loop`]: 1s, 2s, 4s … capped at
 /// [`POLL_BACKOFF_CAP`]. Tests inject a smaller base.
@@ -67,13 +59,13 @@ pub const POLL_BACKOFF_CAP: Duration = Duration::from_secs(60);
 /// references state that no longer matches the flow's stored nonce.
 pub const ACTION_NO_LONGER_VALID: &str = "This action is no longer valid";
 
-/// The Telegram Bot API surface the control plane uses (GATE-006).
-/// Dyn-safe (`Arc<dyn TelegramApi>`): the real transport is
-/// [`TelegramClient`]; tests inject `fake::FakeTelegram`.
+/// The transport surface the control plane uses (GATE-006/013). Dyn-safe
+/// (`Arc<dyn ControlApi>`): each channel provides one implementation;
+/// tests inject `fake::FakeTransport`.
 #[async_trait]
-pub trait TelegramApi: Send + Sync {
-    /// Long poll: request `timeout=50` against `getUpdates`; the HTTP
-    /// timeout sits above the poll window.
+pub trait ControlApi: Send + Sync {
+    /// Long poll: block until updates arrive or the transport's own poll
+    /// window closes (the loop's backoff handles errors).
     async fn get_updates(&self, offset: i64) -> Result<Vec<Update>>;
     /// Send one message (target chat comes from `req.reply_to`).
     async fn send_message(&self, req: SendRequest) -> Result<MsgRef>;
@@ -84,10 +76,11 @@ pub trait TelegramApi: Send + Sync {
     async fn delete_message(&self, to: MsgRef) -> Result<()>;
 }
 
-/// One inbound Telegram update, narrowed to what the control plane needs
-/// from the Bot API JSON (`message.{message_id,chat.id,from.id,text}`,
-/// `callback_query.{id,data,from.id,message}`). Unknown fields are
-/// ignored; unknown update kinds parse as an id-only update.
+/// One inbound control-plane update. The shape originates from the
+/// Telegram Bot API (GATE-006) and is what every transport normalizes
+/// into: messages carry `sender_id`+`text`, button-equivalent decisions
+/// carry ONLY `callback` (no text, no sender — see GATE-013's ntfy
+/// synthesis).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Update {
     pub update_id: i64,
@@ -100,8 +93,8 @@ pub struct Update {
     pub message_ref: Option<MsgRef>,
 }
 
-/// A pressed inline button: its query id (for `answerCallbackQuery`), the
-/// signed data triple, and the presser's user id.
+/// A button-equivalent decision: transport-side acknowledgement id, the
+/// signed data triple, and the decision-maker's id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Callback {
     pub id: String,
@@ -110,9 +103,10 @@ pub struct Callback {
 }
 
 impl Update {
-    /// Lenient parse of one `result[]` element from `getUpdates`. Returns
-    /// `None` only when even `update_id` is missing (the one field the
-    /// poll loop cannot do without).
+    /// Lenient parse of one update payload (the shape the transports
+    /// normalize from their wire protocols). Returns `None` only when even
+    /// `update_id` is missing (the one field the poll loop cannot do
+    /// without).
     pub fn parse(value: &Value) -> Option<Update> {
         let update_id = value.get("update_id")?.as_i64()?;
         let mut update = Update {
@@ -219,7 +213,7 @@ fn backoff_delay(failure_count: u32, base: Duration) -> Duration {
 /// (1s, 2s, 4s… cap 60s) and a dead router ends the loop cleanly. Exits
 /// when `shutdown` flips or its sender drops.
 pub async fn run_poll_loop(
-    api: Arc<dyn TelegramApi>,
+    api: Arc<dyn ControlApi>,
     allowlist: Vec<i64>,
     tx: mpsc::Sender<Update>,
     mut shutdown: watch::Receiver<bool>,
@@ -255,7 +249,7 @@ pub async fn run_poll_loop(
                 Err(e) => {
                     failures = failures.saturating_add(1);
                     let delay = backoff_delay(failures, backoff_base);
-                    eprintln!("telegram: get_updates failed ({e}); retrying in {delay:?}");
+                    eprintln!("control: get_updates failed ({e}); retrying in {delay:?}");
                     tokio::select! {
                         _ = shutdown.changed() => return,
                         _ = tokio::time::sleep(delay) => {}
@@ -267,16 +261,16 @@ pub async fn run_poll_loop(
 }
 
 /// A registered update handler. Later control-plane tasks (2–5) register
-/// these on the [`TelegramRouter`]; a handler sees only allowlisted
+/// these on the [`ControlRouter`]; a handler sees only allowlisted
 /// updates, and only validated callbacks.
 #[async_trait]
 pub trait UpdateHandler: Send + Sync {
-    async fn handle(&self, update: Update, api: Arc<dyn TelegramApi>);
+    async fn handle(&self, update: Update, api: Arc<dyn ControlApi>);
 }
 
 /// Handler adapter for plain closures (Tasks 2–5 wiring convenience).
 pub struct FnHandler<
-    F: Fn(Update, Arc<dyn TelegramApi>) -> Pin<Box<dyn Future<Output = ()> + Send>>
+    F: Fn(Update, Arc<dyn ControlApi>) -> Pin<Box<dyn Future<Output = ()> + Send>>
         + Send
         + Sync,
 >(pub F);
@@ -284,11 +278,11 @@ pub struct FnHandler<
 #[async_trait]
 impl<F> UpdateHandler for FnHandler<F>
 where
-    F: Fn(Update, Arc<dyn TelegramApi>) -> Pin<Box<dyn Future<Output = ()> + Send>>
+    F: Fn(Update, Arc<dyn ControlApi>) -> Pin<Box<dyn Future<Output = ()> + Send>>
         + Send
         + Sync,
 {
-    async fn handle(&self, update: Update, api: Arc<dyn TelegramApi>) {
+    async fn handle(&self, update: Update, api: Arc<dyn ControlApi>) {
         (self.0)(update, api).await;
     }
 }
@@ -303,12 +297,12 @@ pub type NonceLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 /// or unknown nonce gets `answerCallbackQuery` + a "no longer valid" edit
 /// and NEVER reaches a handler.
 #[derive(Default)]
-pub struct TelegramRouter {
+pub struct ControlRouter {
     handlers: Vec<Arc<dyn UpdateHandler>>,
     nonce_of: Option<NonceLookup>,
 }
 
-impl TelegramRouter {
+impl ControlRouter {
     pub fn new() -> Self {
         Self::default()
     }
@@ -325,14 +319,14 @@ impl TelegramRouter {
     }
 
     /// Consume updates from the poll loop until the channel closes.
-    pub async fn run(self, mut rx: mpsc::Receiver<Update>, api: Arc<dyn TelegramApi>) {
+    pub async fn run(self, mut rx: mpsc::Receiver<Update>, api: Arc<dyn ControlApi>) {
         while let Some(update) = rx.recv().await {
             self.dispatch(&update, &api).await;
         }
     }
 
     /// Route one update through the filter-and-validate pipeline.
-    pub async fn dispatch(&self, update: &Update, api: &Arc<dyn TelegramApi>) {
+    pub async fn dispatch(&self, update: &Update, api: &Arc<dyn ControlApi>) {
         let Some(callback) = &update.callback else {
             // Plain text: no signature to check, the allowlist already ran.
             for handler in &self.handlers {
@@ -351,7 +345,7 @@ impl TelegramRouter {
                 // Stop the client-side spinner before handlers run; the
                 // press itself was valid even if the action later fails.
                 if let Err(e) = api.answer_callback(&callback.id).await {
-                    eprintln!("telegram: answer_callback failed: {e}");
+                    eprintln!("control: answer_callback failed: {e}");
                 }
                 for handler in &self.handlers {
                     handler.handle(update.clone(), api.clone()).await;
@@ -361,12 +355,12 @@ impl TelegramRouter {
                 // Wrong/expired nonce: answer the query and mark the
                 // button dead; NO handler ever sees it.
                 if let Err(e) = api.answer_callback(&callback.id).await {
-                    eprintln!("telegram: answer_callback failed: {e}");
+                    eprintln!("control: answer_callback failed: {e}");
                 }
                 if let Some(to) = update.message_ref {
                     let reply = SendRequest::text(ACTION_NO_LONGER_VALID).replying_to(to);
                     if let Err(e) = api.edit_message(to, reply).await {
-                        eprintln!("telegram: invalid-callback edit failed: {e}");
+                        eprintln!("control: invalid-callback edit failed: {e}");
                     }
                 }
             }
@@ -374,186 +368,12 @@ impl TelegramRouter {
     }
 }
 
-/// Real transport against the Telegram Bot API. Long-polls with
-/// `timeout=50`; every call carries a 60s HTTP timeout. The bot token is
-/// embedded in the URL path (Telegram's scheme) and never logged: every
-/// error leaving this client is rewritten to a token-free summary (see
-/// [`redacted_error`]).
-pub struct TelegramClient {
-    http: reqwest::Client,
-    base: String,
-}
-
-/// Classify a reqwest transport error into a token-free kind word. Reads
-/// ONLY the error kind probes — never `Display`/source text, which embeds
-/// the full request URL (`…/bot<TOKEN>/…`).
-fn transport_kind(e: &reqwest::Error) -> &'static str {
-    if e.is_timeout() {
-        "timed out"
-    } else if e.is_connect() {
-        "connection failed"
-    } else if e.is_redirect() {
-        "redirect loop"
-    } else if e.is_body() || e.is_decode() {
-        "bad response"
-    } else {
-        "network error"
-    }
-}
-
-/// Token-safe error for ANY transport failure: reqwest error Display
-/// embeds the request URL, and the URL path carries the bot token, so raw
-/// error text must never reach a log line. Only the Bot API method name
-/// and the error kind survive (e.g. `getUpdates: transport timed out`).
-fn redacted_error(method: &str, e: &reqwest::Error) -> anyhow::Error {
-    anyhow!("{method}: transport {}", transport_kind(e))
-}
-
-impl TelegramClient {
-    pub fn new(token: &str) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(TELEGRAM_HTTP_TIMEOUT)
-            .build()
-            .expect("reqwest client with rustls backend");
-        Self {
-            http,
-            base: format!("{TELEGRAM_API_BASE}/bot{token}"),
-        }
-    }
-
-    fn url(&self, method: &str) -> String {
-        format!("{}/{}", self.base, method)
-    }
-
-    /// POST one Bot API call and unwrap the `{ok: true, result}` envelope.
-    /// Transport failures are rewritten to token-free summaries before
-    /// they escape ([`redacted_error`]); the only free text ever included
-    /// in an error is Telegram's own response `description` — the token
-    /// lives in the request URL, never in a response body.
-    async fn call(&self, method: &str, body: Value) -> Result<Value> {
-        let response = self
-            .http
-            .post(self.url(method))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| redacted_error(method, &e))?;
-        let status = response.status();
-        let payload: Value = response
-            .json()
-            .await
-            .map_err(|e| redacted_error(method, &e))?;
-        if payload.get("ok").and_then(Value::as_bool) != Some(true) {
-            let description = payload
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown telegram error");
-            return Err(anyhow!("{method}: status {status} ({description})"));
-        }
-        Ok(payload)
-    }
-
-    /// `MsgRef` out of a Bot API `result` message object (lenient).
-    fn parse_message_ref(result: &Value) -> Option<MsgRef> {
-        Some(MsgRef {
-            chat_id: result.pointer("/chat/id")?.as_i64()?,
-            message_id: result.get("message_id")?.as_i64()? as i32,
-        })
-    }
-
-    /// `sendMessage` body: target chat from the reply anchor, optional
-    /// keyboard, optional reply pin. A zero/negative `message_id` on the
-    /// anchor means "fresh send into this chat" (gate-initiated asks) —
-    /// `reply_to_message_id` is omitted, since Telegram rejects ids that
-    /// name no message.
-    fn send_body(req: &SendRequest, chat_id: i64) -> Value {
-        let mut body = json!({ "chat_id": chat_id, "text": req.text });
-        if let Some(mode) = &req.parse_mode {
-            body["parse_mode"] = json!(mode);
-        }
-        if let Some(markup) = req.reply_markup() {
-            body["reply_markup"] = markup;
-        }
-        if let Some(reply) = req.reply_to {
-            if reply.message_id > 0 {
-                body["reply_to_message_id"] = json!(reply.message_id);
-            }
-        }
-        body
-    }
-}
-
-#[async_trait]
-impl TelegramApi for TelegramClient {
-    async fn get_updates(&self, offset: i64) -> Result<Vec<Update>> {
-        let payload = self
-            .call(
-                "getUpdates",
-                json!({ "offset": offset, "timeout": TELEGRAM_LONG_POLL_SECS }),
-            )
-            .await?;
-        let items = payload
-            .get("result")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        // Lenient: skip unparseable shapes rather than failing the batch.
-        Ok(items.iter().filter_map(Update::parse).collect())
-    }
-
-    async fn send_message(&self, req: SendRequest) -> Result<MsgRef> {
-        let Some(reply) = req.reply_to else {
-            return Err(anyhow!(
-                "send_message needs a target chat: set SendRequest.reply_to to the message being replied to"
-            ));
-        };
-        let body = Self::send_body(&req, reply.chat_id);
-        let payload = self.call("sendMessage", body).await?;
-        Self::parse_message_ref(payload.get("result").unwrap_or(&Value::Null))
-            .ok_or_else(|| anyhow!("telegram sendMessage returned no message ref"))
-    }
-
-    async fn edit_message(&self, to: MsgRef, req: SendRequest) -> Result<MsgRef> {
-        let mut body = json!({
-            "chat_id": to.chat_id,
-            "message_id": to.message_id,
-            "text": req.text,
-        });
-        if let Some(mode) = &req.parse_mode {
-            body["parse_mode"] = json!(mode);
-        }
-        if let Some(markup) = req.reply_markup() {
-            body["reply_markup"] = markup;
-        }
-        let payload = self.call("editMessageText", body).await?;
-        Ok(Self::parse_message_ref(payload.get("result").unwrap_or(&Value::Null))
-            .unwrap_or(to))
-    }
-
-    async fn answer_callback(&self, callback_id: &str) -> Result<()> {
-        self.call(
-            "answerCallbackQuery",
-            json!({ "callback_query_id": callback_id }),
-        )
-        .await
-        .map(|_| ())
-    }
-
-    async fn delete_message(&self, to: MsgRef) -> Result<()> {
-        self.call(
-            "deleteMessage",
-            json!({ "chat_id": to.chat_id, "message_id": to.message_id }),
-        )
-        .await
-        .map(|_| ())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::Mutex;
-    use crate::telegram::fake::FakeTelegram;
+    use crate::control::fake::FakeTransport;
 
     #[derive(Default, Clone)]
     struct CallLog(Arc<Mutex<Vec<Update>>>);
@@ -571,7 +391,7 @@ mod tests {
 
     #[async_trait]
     impl UpdateHandler for LogHandler {
-        async fn handle(&self, update: Update, _api: Arc<dyn TelegramApi>) {
+        async fn handle(&self, update: Update, _api: Arc<dyn ControlApi>) {
             self.0 .0.lock().unwrap().push(update);
         }
     }
@@ -621,15 +441,15 @@ mod tests {
 
     #[tokio::test]
     async fn allowlisted_update_reaches_handler() {
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         fake.push_update(text_update(42, "/start"));
 
         let (tx, rx) = mpsc::channel(8);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let mut router = TelegramRouter::new();
+        let mut router = ControlRouter::new();
         let log = CallLog::default();
         router.register(Arc::new(LogHandler(log.clone())));
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let api: Arc<dyn ControlApi> = fake.clone();
         tokio::spawn(run_poll_loop(
             api.clone(),
             vec![42],
@@ -648,15 +468,15 @@ mod tests {
 
     #[tokio::test]
     async fn non_allowlisted_update_dropped_with_zero_outbound() {
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         fake.push_update(text_update(99, "/start"));
 
         let (tx, rx) = mpsc::channel(8);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let mut router = TelegramRouter::new();
+        let mut router = ControlRouter::new();
         let log = CallLog::default();
         router.register(Arc::new(LogHandler(log.clone())));
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let api: Arc<dyn ControlApi> = fake.clone();
         tokio::spawn(run_poll_loop(
             api.clone(),
             vec![42],
@@ -677,16 +497,16 @@ mod tests {
 
     #[tokio::test]
     async fn callback_from_non_allowlisted_user_dropped_silently() {
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         fake.push_update(callback_update(99, &format!("elev1:{NONCE}:approve")));
 
         let (tx, rx) = mpsc::channel(8);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let mut router = TelegramRouter::new();
+        let mut router = ControlRouter::new();
         let log = CallLog::default();
         router.register(Arc::new(LogHandler(log.clone())));
         router.set_nonce_lookup(noop_nonce_lookup());
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let api: Arc<dyn ControlApi> = fake.clone();
         tokio::spawn(run_poll_loop(
             api.clone(),
             vec![42],
@@ -705,15 +525,15 @@ mod tests {
 
     #[tokio::test]
     async fn empty_allowlist_drops_everything_fail_closed() {
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         fake.push_update(text_update(42, "/start"));
 
         let (tx, rx) = mpsc::channel(8);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let mut router = TelegramRouter::new();
+        let mut router = ControlRouter::new();
         let log = CallLog::default();
         router.register(Arc::new(LogHandler(log.clone())));
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let api: Arc<dyn ControlApi> = fake.clone();
         tokio::spawn(run_poll_loop(
             api.clone(),
             vec![],
@@ -733,15 +553,15 @@ mod tests {
 
     #[tokio::test]
     async fn callback_with_wrong_nonce_answers_and_edits_without_dispatch() {
-        let fake = Arc::new(FakeTelegram::new());
-        let mut router = TelegramRouter::new();
+        let fake = Arc::new(FakeTransport::new());
+        let mut router = ControlRouter::new();
         let log = CallLog::default();
         router.register(Arc::new(LogHandler(log.clone())));
         router.set_nonce_lookup(noop_nonce_lookup());
 
         // Same shape and length as a real triple, wrong nonce value.
         let update = callback_update(42, "elev1:0000000000000000:approve");
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let api: Arc<dyn ControlApi> = fake.clone();
         router.dispatch(&update, &api).await;
 
         assert_eq!(log.len(), 0, "invalid nonce ⇒ handler NOT dispatched");
@@ -761,14 +581,14 @@ mod tests {
 
     #[tokio::test]
     async fn callback_with_unknown_flow_rejected_fail_closed() {
-        let fake = Arc::new(FakeTelegram::new());
-        let mut router = TelegramRouter::new();
+        let fake = Arc::new(FakeTransport::new());
+        let mut router = ControlRouter::new();
         let log = CallLog::default();
         router.register(Arc::new(LogHandler(log.clone())));
         router.set_nonce_lookup(noop_nonce_lookup());
 
         let update = callback_update(42, "unknownflow:whatever:approve");
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let api: Arc<dyn ControlApi> = fake.clone();
         router.dispatch(&update, &api).await;
 
         assert_eq!(log.len(), 0, "unknown flow ⇒ no dispatch");
@@ -779,14 +599,14 @@ mod tests {
 
     #[tokio::test]
     async fn callback_with_valid_nonce_dispatches_handler() {
-        let fake = Arc::new(FakeTelegram::new());
-        let mut router = TelegramRouter::new();
+        let fake = Arc::new(FakeTransport::new());
+        let mut router = ControlRouter::new();
         let log = CallLog::default();
         router.register(Arc::new(LogHandler(log.clone())));
         router.set_nonce_lookup(noop_nonce_lookup());
 
         let update = callback_update(42, &format!("elev1:{NONCE}:approve"));
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let api: Arc<dyn ControlApi> = fake.clone();
         router.dispatch(&update, &api).await;
 
         assert_eq!(log.len(), 1, "valid nonce reaches the handler");
@@ -828,59 +648,11 @@ mod tests {
         assert_eq!(validate_callback("", NONCE), None);
     }
 
-    #[test]
-    fn nonce_is_16_lowercase_hex_chars_and_random() {
-        let a = nonce();
-        let b = nonce();
-        assert_eq!(a.len(), 16);
-        assert!(
-            a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "lowercase hex only: {a}"
-        );
-        assert_ne!(a, b, "nonces must be random per call");
-    }
-
-    // --- error redaction (F1): the bot token must never reach a log line ---
-
-    #[tokio::test]
-    async fn transport_errors_are_redacted_and_never_carry_the_bot_token() {
-        // Synthetic error-shaped payload: a real reqwest error from a
-        // refused loopback connect, whose Display embeds the full URL —
-        // including a token-shaped secret in the path — exactly the shape
-        // that would leak `bot<TOKEN>` if an error were logged raw.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
-        let port = listener.local_addr().unwrap().port();
-        drop(listener); // no listener ⇒ the connect below refuses instantly
-
-        let err = reqwest::get(format!(
-            "http://127.0.0.1:{port}/botS3cr3tT0ken123/getUpdates"
-        ))
-        .await
-        .expect_err("connect to a dead port must fail");
-        let raw = err.to_string();
-        assert!(
-            raw.contains("botS3cr3tT0ken123"),
-            "sanity: raw reqwest errors embed the url: {raw}"
-        );
-
-        let summary = redacted_error("getUpdates", &err).to_string();
-        assert_eq!(summary, "getUpdates: transport connection failed");
-        assert!(!summary.contains("bot"), "no bot substring survives: {summary}");
-        assert!(
-            !summary.contains("S3cr3tT0ken123"),
-            "no token substring survives: {summary}"
-        );
-        assert!(
-            !summary.contains("127.0.0.1"),
-            "no url fragment survives: {summary}"
-        );
-    }
-
-    // --- poll loop ---
+        // --- poll loop ---
 
     #[tokio::test]
     async fn poll_loop_offset_advances_across_deliveries() {
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         fake.push_update(Update {
             update_id: 5,
             sender_id: Some(42),
@@ -896,10 +668,10 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(8);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let mut router = TelegramRouter::new();
+        let mut router = ControlRouter::new();
         let log = CallLog::default();
         router.register(Arc::new(LogHandler(log.clone())));
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let api: Arc<dyn ControlApi> = fake.clone();
         tokio::spawn(run_poll_loop(
             api.clone(),
             vec![42],
@@ -920,16 +692,16 @@ mod tests {
 
     #[tokio::test]
     async fn poll_loop_survives_get_updates_errors_with_backoff() {
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         fake.fail_next_get_updates(2);
         fake.push_update(text_update(42, "after the outage"));
 
         let (tx, rx) = mpsc::channel(8);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let mut router = TelegramRouter::new();
+        let mut router = ControlRouter::new();
         let log = CallLog::default();
         router.register(Arc::new(LogHandler(log.clone())));
-        let api: Arc<dyn TelegramApi> = fake.clone();
+        let api: Arc<dyn ControlApi> = fake.clone();
         tokio::spawn(run_poll_loop(
             api.clone(),
             vec![42],
@@ -1020,25 +792,4 @@ mod tests {
         assert_eq!(Update::parse(&json!({})), None, "no update_id ⇒ skipped");
     }
 
-    #[test]
-    fn send_body_omits_reply_to_for_gate_initiated_fresh_sends() {
-        // message_id 0 anchors a fresh send into a chat (approval asks,
-        // Task 2): no reply_to_message_id may ride along — Telegram
-        // rejects ids that name no message.
-        let fresh = SendRequest::text("ask").replying_to(MsgRef {
-            chat_id: -42,
-            message_id: 0,
-        });
-        let body = TelegramClient::send_body(&fresh, -42);
-        assert_eq!(body["chat_id"], -42);
-        assert!(body.get("reply_to_message_id").is_none());
-
-        // A real reply anchor (message_id > 0) still pins the thread.
-        let reply = SendRequest::text("reply").replying_to(MsgRef {
-            chat_id: -42,
-            message_id: 7,
-        });
-        let body = TelegramClient::send_body(&reply, -42);
-        assert_eq!(body["reply_to_message_id"], 7);
     }
-}

@@ -58,7 +58,7 @@
 //! * [`NullReductionFlow`], the no-op placeholder;
 //! * the call site in [`run_elevation_flow`]: fired after DONE is written.
 //!
-//! `main.rs` wires [`crate::telegram::grant::RealReductionFlow`] as the
+//! `main.rs` wires [`crate::control::grant::RealReductionFlow`] as the
 //! reducer (GATE-010 §10: instructions + poll-verify + registry update).
 //! When a forwarded request on a temporarily-elevated repo answers 2xx,
 //! the apiproxy records that through [`mark_work_done`] — bookkeeping
@@ -76,8 +76,8 @@ use crate::github::Platform;
 use crate::registry::RegistryDeps;
 use crate::rolemapping::{role_from_name, role_name};
 use crate::state::{self, State as DbState};
-use crate::telegram::send::SendRequest;
-use crate::telegram::{nonce, NonceLookup, TelegramApi, Update, UpdateHandler};
+use crate::control::send::SendRequest;
+use crate::control::{nonce, NonceLookup, ControlApi, Update, UpdateHandler};
 use crate::types::Role;
 
 /// `flows.kind` for elevations — the same value the core error mapping
@@ -171,8 +171,8 @@ impl ElevationPayload {
         serde_json::from_str(raw).unwrap_or_default()
     }
 
-    fn msg_ref(&self) -> Option<crate::telegram::send::MsgRef> {
-        Some(crate::telegram::send::MsgRef {
+    fn msg_ref(&self) -> Option<crate::control::send::MsgRef> {
+        Some(crate::control::send::MsgRef {
             chat_id: self.msg_chat?,
             message_id: self.msg_id?,
         })
@@ -263,7 +263,7 @@ pub struct ElevationDeps {
     /// `(api, chat_id)` for gate-initiated sends; `None` (no bot) ⇒ flows
     /// stay DETECTED and expire with the sweep — the proxies' fail-fast
     /// answers do not depend on the bot.
-    pub notify: Option<(Arc<dyn TelegramApi>, i64)>,
+    pub notify: Option<(Arc<dyn ControlApi>, i64)>,
     /// Consent-batch collection window (GATE-010: ~10 s).
     pub batch_window: Duration,
     /// Verify-poll cadence (GATE-010: 5 s).
@@ -281,7 +281,7 @@ pub struct ElevationDeps {
 
 /// Temporary-grant reduction seam: after a "grant until done, then remove"
 /// elevation completes, reduce `repo` back to `to`. The real reducer is
-/// [`crate::telegram::grant::RealReductionFlow`] (wired in `main.rs`);
+/// [`crate::control::grant::RealReductionFlow`] (wired in `main.rs`);
 /// [`NullReductionFlow`] remains the no-op placeholder.
 #[async_trait]
 pub trait ReductionFlow: Send + Sync {
@@ -638,7 +638,7 @@ async fn finish_done(
 
 async fn send_to_chat(deps: &ElevationDeps, req: SendRequest) -> Option<(i64, i32)> {
     let (api, chat_id) = deps.notify.as_ref()?;
-    let anchored = req.replying_to(crate::telegram::send::MsgRef {
+    let anchored = req.replying_to(crate::control::send::MsgRef {
         chat_id: *chat_id,
         message_id: 0,
     });
@@ -754,7 +754,7 @@ pub fn diy_text(repo: &str, needed: Role, path: &str) -> String {
 /// Fire-and-forget: the agent's `role_unavailable` answer is the binding
 /// semantic; a failed/absent channel must not change it.
 pub async fn maybe_send_diy(
-    notify: &Option<(Arc<dyn TelegramApi>, i64)>,
+    notify: &Option<(Arc<dyn ControlApi>, i64)>,
     repo: &str,
     needed: Role,
     path: &str,
@@ -788,7 +788,7 @@ pub fn nonce_lookup(state: Arc<Mutex<DbState>>) -> NonceLookup {
 
 /// Register the elevation button handler on a router.
 pub fn register_elevation(
-    router: &mut crate::telegram::TelegramRouter,
+    router: &mut crate::control::ControlRouter,
     deps: Arc<ElevationHandler>,
 ) {
     router.register(deps);
@@ -809,7 +809,7 @@ impl ElevationHandler {
 
 #[async_trait]
 impl UpdateHandler for ElevationHandler {
-    async fn handle(&self, update: Update, api: Arc<dyn TelegramApi>) {
+    async fn handle(&self, update: Update, api: Arc<dyn ControlApi>) {
         let Some(callback) = &update.callback else {
             return;
         };
@@ -883,8 +883,8 @@ impl ElevationHandler {
         temporary: bool,
         payload: &ElevationPayload,
         approver: i64,
-        api: &Arc<dyn TelegramApi>,
-        pressed: Option<crate::telegram::send::MsgRef>,
+        api: &Arc<dyn ControlApi>,
+        pressed: Option<crate::control::send::MsgRef>,
     ) {
         {
             let guard = self.deps.state.lock().expect("state lock must be poison-free");

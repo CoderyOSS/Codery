@@ -79,12 +79,12 @@ pub struct ApiDeps {
     /// offers the Telegram grant flow, debounced once per repo per 24 h.
     /// `None` (no bot configured, or unit tests) ⇒ the error mapping
     /// alone, no offer message.
-    pub offer: Option<crate::telegram::grant::GrantOfferDeps>,
+    pub offer: Option<crate::control::grant::GrantOfferDeps>,
     /// Personal-repo ceiling channel (GATE-010 §9.3): where the DIY
     /// instructions go when a Maintain/Admin need lands on a personal
     /// repo (no elevation flow can exist there). `None` ⇒ the denial
     /// alone.
-    pub elevation_notify: Option<(Arc<dyn crate::telegram::TelegramApi>, i64)>,
+    pub elevation_notify: Option<(Arc<dyn crate::control::ControlApi>, i64)>,
 }
 
 impl ApiDeps {
@@ -281,7 +281,7 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
                     let id = {
                         let guard =
                             gs.state.lock().expect("state lock must be poison-free");
-                        crate::telegram::elevation::open_or_join_flow(
+                        crate::control::elevation::open_or_join_flow(
                             &guard,
                             &repo_label,
                             &format!("/{rest}"),
@@ -304,7 +304,7 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
                         // repo the machine account cannot see — offer the
                         // grant flow (debounced once per repo per 24 h).
                         if let Some(offer) = &deps.offer {
-                            let _ = crate::telegram::grant::maybe_offer_grant(
+                            let _ = crate::control::grant::maybe_offer_grant(
                                 &offer.state,
                                 &offer.notify,
                                 &repo_label,
@@ -343,7 +343,7 @@ async fn handle_api(gs: &GateState, agent: &AgentIdentity, req: Request) -> Resp
                                 .state
                                 .lock()
                                 .expect("state lock must be poison-free");
-                            crate::telegram::elevation::open_or_join_flow(
+                            crate::control::elevation::open_or_join_flow(
                                 &guard,
                                 &repo_label,
                                 &format!("/{rest}"),
@@ -546,7 +546,7 @@ async fn forward_and_respond(
             // exists. A record only: the reduction proceeds at DONE.
             if (200..300).contains(&status) && repo_label != "-" {
                 let guard = gs.state.lock().expect("state lock must be poison-free");
-                crate::telegram::elevation::mark_work_done(&guard, &repo_label);
+                crate::control::elevation::mark_work_done(&guard, &repo_label);
             }
             audit_api(
                 &gs.audit,
@@ -564,7 +564,7 @@ async fn forward_and_respond(
             // repo never lands here (third-party goes through approval).
             if let (AgentError::AccessPending { repo, .. }, true) = (&e, is_write_method(method)) {
                 if let Some(offer) = &deps.offer {
-                    let _ = crate::telegram::grant::maybe_offer_grant(
+                    let _ = crate::control::grant::maybe_offer_grant(
                         &offer.state,
                         &offer.notify,
                         repo,
@@ -657,7 +657,7 @@ async fn personal_repo_ceiling(
     if deps.platform.owner_is_org(owner).await {
         return None;
     }
-    crate::telegram::elevation::maybe_send_diy(&deps.elevation_notify, repo_label, needed, path)
+    crate::control::elevation::maybe_send_diy(&deps.elevation_notify, repo_label, needed, path)
         .await;
     audit_api(
         &gs.audit,
@@ -671,7 +671,7 @@ async fn personal_repo_ceiling(
     );
     Some(
         AgentError::RoleUnavailable {
-            message: crate::telegram::elevation::diy_agent_message(repo_label, needed),
+            message: crate::control::elevation::diy_agent_message(repo_label, needed),
         }
         .into_response(),
     )
@@ -679,7 +679,7 @@ async fn personal_repo_ceiling(
 
 /// Elevation status endpoint: `{"id","state",...}` from the `flows` table
 /// plus the gap detail (repo, needed role, temporary flag) agents poll
-/// after a `permission_pending`. The elevation state machine (telegram::
+/// after a `permission_pending`. The elevation state machine (control::
 /// elevation) rewrites `state` as the flow progresses.
 async fn elevation(
     State(gs): State<Arc<GateState>>,
@@ -699,7 +699,7 @@ async fn elevation(
                 .into_response()
         }
     };
-    let payload = crate::telegram::elevation::ElevationPayload::from_json(&row.payload_json);
+    let payload = crate::control::elevation::ElevationPayload::from_json(&row.payload_json);
     let mut body = json!({ "id": id, "state": row.flow_state });
     if !payload.repo.is_empty() {
         body["repo"] = json!(payload.repo);
@@ -757,7 +757,7 @@ pub fn map_upstream_error(
                 // the elevation endpoint answers "no such flow"); the
                 // deny itself is audited by the forwarding path.
                 let id = match repo {
-                    Some(repo) => crate::telegram::elevation::open_or_join_flow(
+                    Some(repo) => crate::control::elevation::open_or_join_flow(
                         state, &repo, path, needed,
                     ),
                     None => crate::state::uuid_v4(),

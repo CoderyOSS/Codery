@@ -29,9 +29,9 @@ use crate::approval::{
 };
 use crate::audit::{Audit, AuditEntry};
 use crate::state::{self, State};
-use crate::telegram::send::{MsgRef, SendRequest};
-use crate::telegram::{
-    nonce, validate_callback, ACTION_NO_LONGER_VALID, NonceLookup, TelegramApi, Update,
+use crate::control::send::{MsgRef, SendRequest};
+use crate::control::{
+    nonce, validate_callback, ACTION_NO_LONGER_VALID, NonceLookup, ControlApi, Update,
     UpdateHandler,
 };
 
@@ -45,17 +45,17 @@ const TIMED_OUT_NOTICE: &str =
 /// The approval backend wired behind the core trait when the bot runs:
 /// holds land on the operator's phone, decisions come back as signed
 /// button presses.
-pub struct TelegramApprovalBackend {
+pub struct ControlApprovalBackend {
     state: Arc<Mutex<State>>,
     audit: Arc<Audit>,
-    api: Arc<dyn TelegramApi>,
+    api: Arc<dyn ControlApi>,
     /// Chat the asks go to (`TELEGRAM_CHAT_ID`). `None` means asks cannot
     /// be delivered: `present` errors and the proxy denies the hold —
     /// fail closed.
     ask_chat: Option<i64>,
 }
 
-impl TelegramApprovalBackend {
+impl ControlApprovalBackend {
     /// Build the backend, sweeping every unresolved hold first (GATE-005,
     /// same as the stub backend: on init the restart resolves rows without
     /// a live waiter as `TimedOut` — no post-restart press may resurrect a
@@ -63,7 +63,7 @@ impl TelegramApprovalBackend {
     pub fn new(
         state: Arc<Mutex<State>>,
         audit: Arc<Audit>,
-        api: Arc<dyn TelegramApi>,
+        api: Arc<dyn ControlApi>,
         ask_chat: Option<i64>,
     ) -> Result<Self> {
         {
@@ -101,7 +101,7 @@ impl TelegramApprovalBackend {
         outcome: ApprovalOutcome,
         approver: i64,
         pressed: MsgRef,
-        api: Arc<dyn TelegramApi>,
+        api: Arc<dyn ControlApi>,
     ) {
         let (changed, settled, repo, class) = {
             let guard = self.state.lock().expect("state lock must be poison-free");
@@ -151,7 +151,7 @@ impl TelegramApprovalBackend {
     /// Re-deliver the ask for an unresolved hold (the /pending Resume
     /// button): fresh message, same pending id + nonce, so the original
     /// signed buttons keep working. Decided holds get a state reply.
-    pub async fn resume(&self, id: &str, pressed: MsgRef, api: Arc<dyn TelegramApi>) {
+    pub async fn resume(&self, id: &str, pressed: MsgRef, api: Arc<dyn ControlApi>) {
         let payload = {
             let guard = self.state.lock().expect("state lock must be poison-free");
             crate::approval::payload_of(&guard, id)
@@ -230,7 +230,7 @@ impl TelegramApprovalBackend {
 }
 
 #[async_trait]
-impl ApprovalBackend for TelegramApprovalBackend {
+impl ApprovalBackend for ControlApprovalBackend {
     /// Deliver the ask: the chat must be configured BEFORE anything is
     /// persisted, and a send failure immediately resolves the row `Denied`
     /// (`delivery-failed`) — an ask that cannot be delivered must never
@@ -468,12 +468,12 @@ fn split_flow(data: &str) -> Option<(String, String)> {
 /// re-checked here so a row that vanished between validation and handling
 /// still fails closed.
 struct ApprovalCallbacks {
-    backend: Arc<TelegramApprovalBackend>,
+    backend: Arc<ControlApprovalBackend>,
 }
 
 #[async_trait]
 impl UpdateHandler for ApprovalCallbacks {
-    async fn handle(&self, update: Update, api: Arc<dyn TelegramApi>) {
+    async fn handle(&self, update: Update, api: Arc<dyn ControlApi>) {
         let Some(cb) = update.callback else {
             return;
         };
@@ -486,7 +486,7 @@ impl UpdateHandler for ApprovalCallbacks {
                 .await;
             return;
         };
-        if id == crate::telegram::lifecycle::ROTATE_FLOW {
+        if id == crate::control::lifecycle::ROTATE_FLOW {
             // The lifecycle's [Start /rotate] button shares the router and
             // the signed-triple format, but it is NOT a hold: its own
             // handler answers the press (the composed nonce lookup above
@@ -534,17 +534,17 @@ impl UpdateHandler for ApprovalCallbacks {
 /// Wire the approval layer onto a router: the row-backed nonce lookup for
 /// callback validation plus the button handler.
 pub fn register_approvals(
-    router: &mut crate::telegram::TelegramRouter,
-    backend: Arc<TelegramApprovalBackend>,
+    router: &mut crate::control::ControlRouter,
+    backend: Arc<ControlApprovalBackend>,
 ) {
-    router.set_nonce_lookup(TelegramApprovalBackend::nonce_lookup(backend.state.clone()));
+    router.set_nonce_lookup(ControlApprovalBackend::nonce_lookup(backend.state.clone()));
     router.register(Arc::new(ApprovalCallbacks { backend }));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telegram::fake::FakeTelegram;
+    use crate::control::fake::FakeTransport;
     use serde_json::json;
 
     /// Backend construction sweeps unresolved holds fail-closed (GATE-005),
@@ -578,8 +578,8 @@ mod tests {
                 .unwrap();
         }
 
-        let api: Arc<dyn TelegramApi> = Arc::new(FakeTelegram::new());
-        TelegramApprovalBackend::new(state.clone(), audit.clone(), api, Some(1)).unwrap();
+        let api: Arc<dyn ControlApi> = Arc::new(FakeTransport::new());
+        ControlApprovalBackend::new(state.clone(), audit.clone(), api, Some(1)).unwrap();
         let outcome = {
             let guard = state.lock().unwrap();
             row_state(&guard, "hold-pre-restart").2

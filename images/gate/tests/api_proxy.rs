@@ -23,8 +23,8 @@ use gate::github::{GitHubPlatform, Platform};
 use gate::policy::{PolicyEngine, PolicyFile};
 use gate::routes::{router, GateState, RateLimiter};
 use gate::state::State as DbState;
-use gate::telegram::fake::FakeTelegram;
-use gate::telegram::grant::GrantOfferDeps;
+use gate::control::fake::FakeTransport;
+use gate::control::grant::GrantOfferDeps;
 use gate::tokens::TokenStore;
 
 const AGENT: &str = "claude-code";
@@ -48,7 +48,7 @@ struct Gate {
     state: Arc<Mutex<DbState>>,
     /// The grant-offer channel when the gate was spawned with the offer
     /// hook on (`spawn_gate_with_offer`); `None` otherwise.
-    telegram: Option<Arc<FakeTelegram>>,
+    control: Option<Arc<FakeTransport>>,
 }
 
 impl Drop for Gate {
@@ -170,7 +170,7 @@ async fn spawn_gate_full(
     spawn_gate_opts(auto, policy_src, machine_token, max_body_bytes, false).await
 }
 
-/// Variant with the GATE-010 grant-offer hook wired to a FakeTelegram.
+/// Variant with the GATE-010 grant-offer hook wired to a FakeTransport.
 async fn spawn_gate_with_offer(auto: ApprovalOutcome) -> Gate {
     spawn_gate_opts(auto, DEFAULT_POLICY, Some(MACHINE_TOKEN), DEFAULT_MAX_BODY_BYTES, true)
         .await
@@ -233,8 +233,8 @@ async fn spawn_gate_opts(
         APPROVAL_TIMEOUT,
     )
     .unwrap();
-    let telegram = if offer {
-        let fake = Arc::new(FakeTelegram::new());
+    let control = if offer {
+        let fake = Arc::new(FakeTransport::new());
         api.offer = Some(GrantOfferDeps {
             state: state.clone(),
             notify: Some((fake.clone(), 4242)),
@@ -253,7 +253,7 @@ async fn spawn_gate_opts(
         api: Some(Arc::new(api)),
         onepage: None,
         max_body_bytes,
-        telegram_live: std::sync::atomic::AtomicBool::new(false),
+        control_live: std::sync::atomic::AtomicBool::new(false),
         forwarding_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
     let app = router(gs);
@@ -275,7 +275,7 @@ async fn spawn_gate_opts(
         audit_path,
         dir,
         state: state.clone(),
-        telegram,
+        control,
     }
 }
 
@@ -925,7 +925,7 @@ async fn mutation_404_offers_grant_once_reads_never_offer() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let v = Gate::body_json(resp).await;
     assert_eq!(v["error"], "access_pending");
-    let fake = gate.telegram.as_ref().expect("offer channel wired");
+    let fake = gate.control.as_ref().expect("offer channel wired");
     assert_eq!(fake.sent().len(), 1, "one offer: {:?}", fake.sent());
     assert!(
         fake.sent()[0].text.contains("octo/ghost") && fake.sent()[0].text.contains("/grant"),
@@ -962,7 +962,7 @@ async fn preflight_noaccess_offers_the_grant_too() {
         .send("POST", "/api/v3/repos/octo/reg/issues", br#"{"title":"x"}"#)
         .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let fake = gate.telegram.as_ref().expect("offer channel wired");
+    let fake = gate.control.as_ref().expect("offer channel wired");
     assert_eq!(fake.sent().len(), 1, "pre-flight no-access offers: {:?}", fake.sent());
     assert!(fake.sent()[0].text.contains("octo/reg"), "{}", fake.sent()[0].text);
 

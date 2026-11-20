@@ -32,8 +32,8 @@ use tokio::sync::watch;
 use crate::github::{Platform, RepoAccessError};
 use crate::rolemapping::{role_from_name, role_name};
 use crate::state::{State as DbState, RegistryRow};
-use crate::telegram::send::SendRequest;
-use crate::telegram::TelegramApi;
+use crate::control::send::SendRequest;
+use crate::control::ControlApi;
 use crate::types::Role;
 
 /// 30 minutes: the registry re-check cadence (GATE-010). Overridable with
@@ -51,7 +51,7 @@ pub struct RegistryDeps {
     /// The machine account login, as named in drop notices.
     pub machine_login: String,
     /// `(api, chat_id)` for gate-initiated notices; `None` = no channel.
-    pub notify: Option<(Arc<dyn TelegramApi>, i64)>,
+    pub notify: Option<(Arc<dyn ControlApi>, i64)>,
 }
 
 /// What one [`refresh`] decided; `UpstreamFailed` is the only outcome that
@@ -224,7 +224,7 @@ mod tests {
 
     use super::*;
     use crate::github::RepoAccess;
-    use crate::telegram::fake::FakeTelegram;
+    use crate::control::fake::FakeTransport;
 
     const LOGIN: &str = "rob-agent";
     const REPO: &str = "acme/api";
@@ -353,14 +353,14 @@ mod tests {
     fn deps_for(
         state: Arc<Mutex<DbState>>,
         platform: Arc<dyn Platform>,
-        notify: Option<&Arc<FakeTelegram>>,
+        notify: Option<&Arc<FakeTransport>>,
     ) -> RegistryDeps {
         RegistryDeps {
             state,
             platform,
             machine_login: LOGIN.to_string(),
             notify: notify.map(|fake| {
-                let api: Arc<dyn TelegramApi> = fake.clone();
+                let api: Arc<dyn ControlApi> = fake.clone();
                 (api, CHAT)
             }),
         }
@@ -437,7 +437,7 @@ mod tests {
         wiremock_permissions(&server, 200, &permissions_body(Role::None)).await;
         let platform = github_platform_at(&server).await;
         let state = seeded_state(REPO, "write");
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         let deps = deps_for(state.clone(), platform, Some(&fake));
 
         let outcome = refresh(&deps, REPO).await;
@@ -466,7 +466,7 @@ mod tests {
         let platform = github_platform_at(&server).await;
         let state = seeded_state(REPO, "write");
         backdate(&state, REPO, 1000);
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         let deps = deps_for(state.clone(), platform, Some(&fake));
 
         let outcome = refresh(&deps, REPO).await;
@@ -487,7 +487,7 @@ mod tests {
         wiremock_permissions(&server, 404, r#"{"message":"Not Found"}"#).await;
         let platform = github_platform_at(&server).await;
         let state = Arc::new(Mutex::new(DbState::open(":memory:").expect("open")));
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         let deps = deps_for(state.clone(), platform, Some(&fake));
 
         let outcome = refresh(&deps, REPO).await;
@@ -507,7 +507,7 @@ mod tests {
         wiremock_permissions(&server, 404, r#"{"message":"Not Found"}"#).await;
         let platform = github_platform_at(&server).await;
         let state = seeded_state(REPO, "write");
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         let deps = deps_for(state.clone(), platform, Some(&fake));
 
         let outcome = refresh(&deps, REPO).await;
@@ -528,7 +528,7 @@ mod tests {
         wiremock_permissions(&server, 200, &permissions_body(Role::Triage)).await;
         let platform = github_platform_at(&server).await;
         let state = seeded_state(REPO, "maintain");
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         let deps = deps_for(state.clone(), platform, Some(&fake));
 
         let outcome = refresh(&deps, REPO).await;
@@ -551,7 +551,7 @@ mod tests {
         wiremock_permissions(&server, 200, &permissions_body(Role::Write)).await;
         let platform = github_platform_at(&server).await;
         let state = seeded_state(REPO, "read");
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         let deps = deps_for(state.clone(), platform, Some(&fake));
 
         let outcome = refresh(&deps, REPO).await;
@@ -573,7 +573,7 @@ mod tests {
         let platform = github_platform_at(&server).await;
         let state = seeded_state(REPO, "write");
         backdate(&state, REPO, 1000);
-        let fake = Arc::new(FakeTelegram::new());
+        let fake = Arc::new(FakeTransport::new());
         let deps = deps_for(state.clone(), platform, Some(&fake));
 
         let outcome = refresh(&deps, REPO).await;
@@ -624,7 +624,7 @@ mod tests {
         let fake = Arc::new(FakePlatform::default());
         *fake.perms.lock().unwrap() = perms;
         let platform: Arc<dyn Platform> = fake.clone();
-        let tg = Arc::new(FakeTelegram::new());
+        let tg = Arc::new(FakeTransport::new());
         let deps = deps_for(state.clone(), platform, Some(&tg));
 
         let reconciled = sweep_tick(&deps).await;
@@ -656,7 +656,7 @@ mod tests {
         let fake = Arc::new(FakePlatform::default());
         *fake.perms.lock().unwrap() = perms;
         let platform: Arc<dyn Platform> = fake.clone();
-        let tg = Arc::new(FakeTelegram::new());
+        let tg = Arc::new(FakeTransport::new());
         let deps = deps_for(state.clone(), platform, Some(&tg));
 
         let reconciled = sweep_tick(&deps).await;
@@ -680,7 +680,7 @@ mod tests {
             .unwrap();
         let fake = FakePlatform::with("acme/api", access(Role::Write));
         let platform: Arc<dyn Platform> = fake.clone();
-        let tg = Arc::new(FakeTelegram::new());
+        let tg = Arc::new(FakeTransport::new());
         let deps = deps_for(state.clone(), platform, Some(&tg));
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);

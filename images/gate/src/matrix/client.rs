@@ -1,5 +1,5 @@
 //! MatrixClient transport (GATE-012): the Matrix half of the control
-//! plane, implemented behind the GATE-006 [`crate::telegram::TelegramApi`]
+//! plane, implemented behind the GATE-006 [`crate::control::ControlApi`]
 //! trait. ALL matrix-sdk calls live in this file; error strings carry
 //! kind words only — never the access token (mirrors the Telegram
 //! redaction discipline).
@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 
 use super::{command_to_callback, mxid_map, render_buttons, ROOM_CHAT_ID};
 use crate::config::MatrixConfig;
-use crate::telegram::{Callback, MsgRef, SendRequest, TelegramApi, Update};
+use crate::control::{Callback, MsgRef, SendRequest, ControlApi, Update};
 
 /// Wire-shape check for `MATRIX_ROOM_ID`: `!localpart:server` with both
 /// halves non-empty. Fail at connect (boot) — never half-wire a channel.
@@ -471,7 +471,7 @@ impl MatrixClient {
 }
 
 #[async_trait]
-impl TelegramApi for MatrixClient {
+impl ControlApi for MatrixClient {
     /// Long-poll equivalent: block on the queue (the SDK sync loop feeds
     /// it), then drain everything already queued. The offset argument is
     /// bookkeeping-only — update ids are sequential per-process.
@@ -549,7 +549,7 @@ impl TelegramApi for MatrixClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telegram::Callback;
+    use crate::control::Callback;
 
     const GOOD_ROOM: &str = "!control:example.org";
 

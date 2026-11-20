@@ -52,7 +52,7 @@ pub struct GateState {
     /// Health flag (GATE-006): true once the Telegram control-plane poll
     /// loop has been spawned (`TELEGRAM_BOT_TOKEN` configured). Surfaced
     /// on `/whoami` so operators can see the gate's control plane state.
-    pub telegram_live: AtomicBool,
+    pub control_live: AtomicBool,
     /// Master forwarding switch (GATE-004 §6.3): the machine-token
     /// lifecycle tasks flip it after a credential check; the proxy
     /// credential-probe paths consult it BEFORE touching custody or
@@ -83,7 +83,7 @@ impl GateState {
             api: None,
             onepage: None,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
-            telegram_live: AtomicBool::new(false),
+            control_live: AtomicBool::new(false),
             forwarding_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -99,7 +99,7 @@ impl GateState {
             api: None,
             onepage: None,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
-            telegram_live: AtomicBool::new(false),
+            control_live: AtomicBool::new(false),
             forwarding_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -189,7 +189,7 @@ async fn whoami(
 ) -> Json<serde_json::Value> {
     Json(json!({
         "agent": agent.name,
-        "telegram": gs.telegram_live.load(Ordering::Relaxed),
+        "control": gs.control_live.load(Ordering::Relaxed),
     }))
 }
 
@@ -362,14 +362,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn whoami_reports_telegram_health_flag() {
+    async fn whoami_reports_control_health_flag() {
         let (f, raw) = fixture(Some("claude-code"));
         let resp = f
             .send(get(&[basic("claude-code", &raw.unwrap())]))
             .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
-        assert_eq!(v["telegram"], false, "flag default: no telegram loop");
+        assert_eq!(v["control"], false, "flag default: no control loop");
     }
 
     #[tokio::test]

@@ -49,7 +49,7 @@ pub struct OnePageDeps {
     /// `(api, chat_id)` for the rotate-complete notice (GATE-004 §6.4);
     /// `None` = no bot/chat configured — storage works, notices are
     /// skipped.
-    pub notify: Option<(Arc<dyn crate::telegram::TelegramApi>, i64)>,
+    pub notify: Option<(Arc<dyn crate::control::ControlApi>, i64)>,
 }
 
 /// Mint a fresh single-use setup nonce: 32 random bytes (hex) with a
@@ -217,7 +217,7 @@ async fn token_submit(
                         // First setup (no rotate marker matched): advance the
                         // guided walkthrough (GATE-011) to step 8. The hook
                         // no-ops when no walkthrough is active.
-                        crate::telegram::setup::form_stored_hook(&gs.state, &deps.notify).await;
+                        crate::control::setup::form_stored_hook(&gs.state, &deps.notify).await;
                     }
                     html_page(StatusCode::OK, &success_page(&deps, &vt))
                 }

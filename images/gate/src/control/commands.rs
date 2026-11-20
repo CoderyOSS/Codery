@@ -24,10 +24,10 @@ use async_trait::async_trait;
 use crate::approval::list_unresolved;
 use crate::audit::{Audit, AuditEntry};
 use crate::state::{self, RegistryRow, State};
-use crate::telegram::grant::{outcome_text, RealGrantFlow};
-use crate::telegram::send::SendRequest;
-use crate::telegram::setup::{GrantFlow, NotifyHandle};
-use crate::telegram::{TelegramApi, Update, UpdateHandler};
+use crate::control::grant::{outcome_text, RealGrantFlow};
+use crate::control::send::SendRequest;
+use crate::control::setup::{GrantFlow, NotifyHandle};
+use crate::control::{ControlApi, Update, UpdateHandler};
 use crate::tokens::TokenStore;
 use crate::types::Role;
 
@@ -74,11 +74,11 @@ pub struct CommandDeps {
     pub machine_token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     pub lifecycle: Option<Arc<crate::tasks::LifecycleDeps>>,
     pub grant: Option<(Arc<RealGrantFlow>, i64)>,
-    pub reduction: Option<Arc<crate::telegram::grant::ReductionDeps>>,
+    pub reduction: Option<Arc<crate::control::grant::ReductionDeps>>,
 }
 
 /// Register the command dispatcher on a router.
-pub fn register_commands(router: &mut crate::telegram::TelegramRouter, deps: Arc<CommandDeps>) {
+pub fn register_commands(router: &mut crate::control::ControlRouter, deps: Arc<CommandDeps>) {
     router.register(Arc::new(Commands { deps }));
 }
 
@@ -88,7 +88,7 @@ struct Commands {
 
 #[async_trait]
 impl UpdateHandler for Commands {
-    async fn handle(&self, update: Update, api: Arc<dyn TelegramApi>) {
+    async fn handle(&self, update: Update, api: Arc<dyn ControlApi>) {
         // Callback updates belong to the approval/lifecycle handlers; a
         // reply needs a message to edit in place.
         let Some(text) = update.text else {
@@ -105,7 +105,7 @@ impl UpdateHandler for Commands {
         let rest: Vec<&str> = words.collect();
         let sender = update.sender_id;
         if cmd == "setup" {
-            // The guided walkthrough handler (telegram::setup) sees this
+            // The guided walkthrough handler (control::setup) sees this
             // same update and owns the reply — nothing to do here.
             return;
         }
@@ -145,11 +145,11 @@ impl UpdateHandler for Commands {
             // Machine-token lifecycle (GATE-004): delegate to the
             // lifecycle layer — one reply per command, like every other.
             ("rotate", _) => match &self.deps.lifecycle {
-                Some(deps) => crate::telegram::lifecycle::rotate_reply(deps, sender),
+                Some(deps) => crate::control::lifecycle::rotate_reply(deps, sender),
                 None => (UNKNOWN_COMMAND.to_string(), Vec::new()).into(),
             },
             ("disconnect", _) => match &self.deps.lifecycle {
-                Some(deps) => crate::telegram::lifecycle::disconnect_reply(deps, sender),
+                Some(deps) => crate::control::lifecycle::disconnect_reply(deps, sender),
                 None => (UNKNOWN_COMMAND.to_string(), Vec::new()).into(),
             },
             _ => (UNKNOWN_COMMAND.to_string(), Vec::new()).into(),
@@ -176,7 +176,7 @@ impl Commands {
         &self,
         arg: Option<&str>,
         rest: &[&str],
-        api: &Arc<dyn TelegramApi>,
+        api: &Arc<dyn ControlApi>,
     ) -> SendRequest {
         let Some((flow, chat)) = self.deps.grant.as_ref() else {
             return (GRANT_USAGE.to_string(), Vec::new()).into();
@@ -248,7 +248,7 @@ impl Commands {
                  repos are managed; /grant {repo} adds one."
             ));
         }
-        crate::telegram::grant::revoke_menu_reply(deps, &repo)
+        crate::control::grant::revoke_menu_reply(deps, &repo)
     }
 
     /// /elevate owner/repo role (GATE-006, GATE-010): validate, then open
@@ -285,7 +285,7 @@ impl Commands {
         };
         let (flow_id, flow_state) = {
             let guard = self.deps.state.lock().expect("state lock must be poison-free");
-            let id = crate::telegram::elevation::open_or_join_flow(
+            let id = crate::control::elevation::open_or_join_flow(
                 &guard,
                 &repo,
                 "/elevate (operator request)",
@@ -347,7 +347,7 @@ impl Commands {
             repo: repo.clone(),
             action: "killswitch.set".to_string(),
             decision: if blocked { "blocked" } else { "unblocked" }.to_string(),
-            basis: "telegram command".to_string(),
+            basis: "control command".to_string(),
             approver: sender.map(|id| id.to_string()),
         });
         let text = if blocked {
@@ -685,7 +685,7 @@ mod tests {
             let rows = guard.flows_list("elevation").unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].flow_state, "DETECTED");
-            let p = crate::telegram::elevation::ElevationPayload::from_json(&rows[0].payload_json);
+            let p = crate::control::elevation::ElevationPayload::from_json(&rows[0].payload_json);
             assert_eq!(p.repo, "acme/api");
             assert_eq!(p.needed_role, "write");
             assert_eq!(p.actions.len(), 1);
@@ -705,7 +705,7 @@ mod tests {
             let guard = deps.state.lock().unwrap();
             let rows = guard.flows_list("elevation").unwrap();
             assert_eq!(rows.len(), 1, "join, never duplicate");
-            let p = crate::telegram::elevation::ElevationPayload::from_json(&rows[0].payload_json);
+            let p = crate::control::elevation::ElevationPayload::from_json(&rows[0].payload_json);
             assert_eq!(p.needed_role, "maintain", "raised to the max");
             assert_eq!(p.actions.len(), 2, "the gap joined the action list");
         }

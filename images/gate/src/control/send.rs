@@ -3,7 +3,7 @@
 //! inline keyboard rows. Buttons come in two flavours — link buttons (URL)
 //! and callback buttons, whose `callback_data` is the signed triple
 //! `"{flow_id}:{nonce}:{action}"` validated server-side by
-//! [`crate::telegram::validate_callback`].
+//! [`crate::control::validate_callback`].
 
 use serde_json::{json, Value};
 
@@ -17,7 +17,7 @@ pub struct MsgRef {
 }
 
 /// Wire format of a signed callback button: `"{flow_id}:{nonce}:{action}"`.
-/// The nonce is the per-flow [`crate::telegram::nonce()`] value; the
+/// The nonce is the per-flow [`crate::control::nonce()`] value; the
 /// control plane validates it before honouring any action.
 pub fn callback_data(flow_id: &str, nonce: &str, action: &str) -> String {
     format!("{flow_id}:{nonce}:{action}")
@@ -91,14 +91,7 @@ impl SendRequest {
 
     /// Pin the message as a reply to `to` (and target its chat on sends).
     ///
-    /// Gate-initiated asks use a zero `message_id` (there is no message to
-    /// reply to yet): the anchor still routes the send to `chat_id`, but
-    /// NO reply parameter may reach Telegram's API — a bogus
-    /// `reply_to_message_id` would make real `sendMessage` calls fail (the
-    /// in-memory test fakes accept anything, so only the wire format pins
-    /// this). The omission lives in `TelegramClient::send_body`, which
-    /// serializes `reply_to_message_id` only for `message_id > 0`; the
-    /// tests below pin both shapes.
+    /// transports without one (ntfy, GATE-013).
     pub fn replying_to(mut self, to: MsgRef) -> Self {
         self.reply_to = Some(to);
         self
@@ -168,29 +161,4 @@ mod tests {
 
     // -- zero reply anchors must serialize WITHOUT reply parameters (F2) --
 
-    #[test]
-    fn zero_anchor_serializes_without_reply_to_message_id() {
-        // Gate-initiated ask: anchor names only the chat (message_id 0).
-        let fresh = SendRequest::text("ask").replying_to(MsgRef {
-            chat_id: -42,
-            message_id: 0,
-        });
-        let body = crate::telegram::TelegramClient::send_body(&fresh, -42);
-        assert_eq!(body["chat_id"], -42, "the anchor still routes the chat");
-        assert!(
-            body.get("reply_to_message_id").is_none(),
-            "a zero anchor must NOT produce a reply parameter: {body}"
-        );
-    }
-
-    #[test]
-    fn nonzero_anchor_serializes_with_reply_to_message_id() {
-        let reply = SendRequest::text("reply").replying_to(MsgRef {
-            chat_id: -42,
-            message_id: 7,
-        });
-        let body = crate::telegram::TelegramClient::send_body(&reply, -42);
-        assert_eq!(body["reply_to_message_id"], 7, "{body}");
-        assert_eq!(body["chat_id"], -42);
-    }
-}
+        }
