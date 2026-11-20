@@ -129,8 +129,8 @@ pub(crate) async fn send_notice(
     req: SendRequest,
 ) -> anyhow::Result<()> {
     let Some((api, chat)) = notify else {
-        eprintln!("lifecycle: no telegram channel configured — notice skipped");
-        anyhow::bail!("no telegram channel configured");
+        eprintln!("lifecycle: no control channel configured — notice skipped");
+        anyhow::bail!("no control channel configured");
     };
     let anchored = req.replying_to(MsgRef {
         chat_id: *chat,

@@ -38,6 +38,13 @@ matrix-sdk = { version = "0.19.1", default-features = false, features = [
 # need it (e.g. future integration tests); `cargo test` always has it.
 test-util = []
 
+# Test binaries link the whole tree (matrix-sdk included, GATE-012);
+# debug info turns each into a ~460 MB link that OOMs the host's linker
+# when several run in parallel. Tests don't need debug symbols.
+[profile.test]
+debug = 0
+split-debuginfo = "off"
+
 [dev-dependencies]
 # Self dev-dependency: compiles the crate for integration tests with
 # `test-util` on, so tests/telegram_approvals.rs can drive FakeTelegram

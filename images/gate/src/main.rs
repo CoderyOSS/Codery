@@ -66,40 +66,76 @@ async fn main() -> anyhow::Result<()> {
     let gate_host = cfg.gate_host();
     let machine_login = cfg.machine_login.clone();
 
-    // Approval backend selection (GATE-005/006): with the bot configured,
-    // dangerous holds land on the operator's Telegram chat; without it the
-    // StubBackend keeps every hold fail closed — the auto decision is
-    // Denied, so dangerous operations are rejected, never silently
+    // Control-channel selection (GATE-012): exactly one — Matrix when
+    // configured (mutual exclusion is enforced at config load), else
+    // Telegram, else none (StubBackend, dangerous holds deny). The triple
+    // `(transport, chat, allowlist)` preserves every downstream seam's
+    // Telegram-era call shape: `chat`/`allowlist` route through the same
+    // numeric id space both transports emit (GATE-012 identity mapping).
+    let channel: Option<(
+        Arc<dyn gate::telegram::TelegramApi>,
+        Option<i64>,
+        Vec<i64>,
+        &'static str,
+    )> = if let Some(matrix_cfg) = &cfg.matrix {
+        let state_dir = std::path::Path::new(&cfg.state_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("/data"))
+            .join("matrix-state");
+        let api: Arc<dyn gate::telegram::TelegramApi> =
+            Arc::new(gate::matrix::connect(matrix_cfg, &state_dir).await?);
+        // mxid_map assigns positional ids 1..=n in allowlist order — the
+        // numeric allowlist the poll loop filters on is exactly that range.
+        let allowlist = (1..=matrix_cfg.user_allowlist.len() as i64).collect();
+        Some((
+            api,
+            Some(gate::matrix::ROOM_CHAT_ID),
+            allowlist,
+            "matrix",
+        ))
+    } else if let Some(token) = cfg.telegram_bot_token.clone() {
+        Some((
+            Arc::new(TelegramClient::new(&token)),
+            cfg.telegram_chat_id,
+            cfg.telegram_allowlist.clone(),
+            "telegram",
+        ))
+    } else {
+        None
+    };
+    let chat_id = channel.as_ref().and_then(|(_, chat, _, _)| *chat);
+
+    // Approval backend selection (GATE-005/006/012): with either channel
+    // configured, dangerous holds land on the operator's chat/room; without
+    // one the StubBackend keeps every hold fail closed — the auto decision
+    // is Denied, so dangerous operations are rejected, never silently
     // forwarded.
-    let telegram = cfg.telegram_bot_token.clone().map(|token| {
-        let api: Arc<dyn gate::telegram::TelegramApi> = Arc::new(TelegramClient::new(&token));
-        let backend = Arc::new(TelegramApprovalBackend::new(
+    let approval_backend: Option<Arc<TelegramApprovalBackend>> = match &channel {
+        Some((api, chat, _, _)) => Some(Arc::new(TelegramApprovalBackend::new(
             state.clone(),
             audit.clone(),
             api.clone(),
-            cfg.telegram_chat_id,
-        )?);
-        Ok::<_, anyhow::Error>((api, backend))
-    });
-    let telegram = match telegram {
-        Some(t) => Some(t?),
+            *chat,
+        )?)),
         None => None,
     };
-    let backend: Arc<dyn ApprovalBackend> = match &telegram {
-        Some((_, b)) => b.clone(),
+    let backend: Arc<dyn ApprovalBackend> = match &approval_backend {
+        Some(b) => b.clone(),
         None => Arc::new(StubBackend::new(
             state.clone(),
             audit.clone(),
             ApprovalOutcome::Denied,
         )?),
     };
+    // Router-side handle: `backend` below moves into the proxy deps.
+    let control_backend = approval_backend;
 
     // Where lifecycle notices go: the bot AND a chat must both exist. With
     // either missing, lifecycle checks still run and flags still flip —
     // only the notices are skipped.
     let telegram_notify: Option<(Arc<dyn gate::telegram::TelegramApi>, i64)> =
-        match (&telegram, cfg.telegram_chat_id) {
-            (Some((api, _)), Some(chat)) => Some((api.clone(), chat)),
+        match (&channel, chat_id) {
+            (Some((api, ..)), Some(chat)) => Some((api.clone(), chat)),
             _ => None,
         };
 
@@ -220,7 +256,7 @@ async fn main() -> anyhow::Result<()> {
     // handler and the guided setup walkthrough (/setup, GATE-011);
     // callbacks are nonce-validated against the pending rows, the
     // lifecycle rotate nonce and the setup flow nonce.
-    if let Some((api, backend)) = telegram {
+    if let Some((api, _chat, allowlist, channel_name)) = channel {
         // Grant-flow machinery (GATE-010): the real implementation behind
         // setup step 8 AND the /grant command. Durations come from env
         // (GATE_FLOW_* overrides shrink them for tests).
@@ -235,7 +271,10 @@ async fn main() -> anyhow::Result<()> {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let mut router = TelegramRouter::new();
-        register_approvals(&mut router, backend.clone());
+        register_approvals(
+            &mut router,
+            control_backend.expect("a live channel implies a real approval backend"),
+        );
         // Composed callback validation: approval rows first, then the
         // lifecycle rotate flow, then the setup walkthrough (the approval
         // layer set its own lookup; the composed one keeps all three).
@@ -263,7 +302,7 @@ async fn main() -> anyhow::Result<()> {
                 audit: audit.clone(),
                 machine_token: machine_token.clone(),
                 lifecycle: Some(lifecycle_deps.clone()),
-                grant: cfg.telegram_chat_id.map(|chat| (grant_flow.clone(), chat)),
+                grant: chat_id.map(|chat| (grant_flow.clone(), chat)),
                 reduction: Some(reduction_deps.clone()),
             }),
         );
@@ -277,15 +316,16 @@ async fn main() -> anyhow::Result<()> {
             machine_login: machine_login.clone(),
             enc_key: cfg.token_enc_key.clone(),
             gate_public_url: cfg.public_url.clone(),
-            chat_id: cfg.telegram_chat_id.unwrap_or(0),
+            chat_id: chat_id.unwrap_or(0),
             forwarding: forwarding.clone(),
             grant: grant_flow.clone(),
             audit: audit.clone(),
         });
         register_setup(&mut router, setup_deps.clone());
+        let approver_count = allowlist.len();
         tokio::spawn(run_poll_loop(
             api.clone(),
-            cfg.telegram_allowlist.clone(),
+            allowlist,
             tx,
             shutdown_rx,
             POLL_BACKOFF_BASE,
@@ -293,8 +333,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(router.run(rx, api.clone()));
         gate_state.telegram_live.store(true, Ordering::Relaxed);
         eprintln!(
-            "telegram control plane live ({} allowlisted approver(s))",
-            cfg.telegram_allowlist.len()
+            "{channel_name} control plane live ({approver_count} allowlisted approver(s))"
         );
         // Restart resume (GATE-011): resends the current setup step only
         // when its progress row is older than 1 h; fresh flows stay quiet.
