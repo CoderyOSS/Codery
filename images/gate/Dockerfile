@@ -5,10 +5,8 @@
 FROM rust:1-alpine AS build
 WORKDIR /src
 # musl-dev: ring/sqlite compile C via the native cc.
-# cmake + perl: aws-lc-rs (matrix-sdk's TLS backend, GATE-012) builds C
-# via aws-lc-sys, which requires cmake and perl on the build host.
 # ca-certificates: runtime trust bundle copied into the scratch stage.
-RUN apk add --no-cache musl-dev ca-certificates cmake perl
+RUN apk add --no-cache musl-dev ca-certificates
 # Manifests first so the dependency layers cache; no cargo config or
 # toolchain pin is committed — the image uses its own default toolchain.
 COPY Cargo.toml Cargo.lock ./

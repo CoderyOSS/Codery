@@ -5,11 +5,11 @@
 GitAuthGate is an opt-in tools-layer service that puts every agent GitHub
 action behind a gate you control: a machine account's token is held in
 encrypted custody and agents reach GitHub only through the gate's git and
-API proxies, with human approval (over Telegram) for dangerous operations
+API proxies, with human approval (over ntfy/NTF-AI) for dangerous operations
 (force pushes, branch/tag deletions, held API mutations). Design and
 decisions live in the ADRs — start at `docs/adr/GATE-001` (placement and
 agent wiring), then `GATE-009` (build/config), `GATE-004` (token custody),
-`GATE-005` (policy), `GATE-006` (Telegram control channel), `GATE-011`
+`GATE-005` (policy), `GATE-006` (the control-plane contract), `GATE-013` (ntfy channel), `GATE-011`
 (first-run setup).
 
 The service is defined in `stacks/tools/devtools/compose.yml` with
@@ -31,31 +31,20 @@ container, no route, and paseo's gate env vars interpolate to empty.
    with the absolute context path.
 
 2. **Stage secrets in `/opt/codery/.env`** (the core+tools secrets file;
-   see `host/templates/env.example`) — always the first two keys, then
-   **exactly one control channel** (GATE-012: staging both the Telegram
-   trio and the Matrix quartet makes the gate refuse to boot):
+   see `host/templates/env.example`) — the two gate keys plus the ntfy
+   channel (GATE-013: all four `NTFY_*` keys or the gate refuses to boot;
+   a partial set is never half-wired):
 
    | Key | Value |
    |---|---|
    | `GATE_TOKEN_ENC_KEY` | `openssl rand -hex 32` — AES key for token-at-rest encryption. Keep it here, never next to the ciphertext (`/opt/codery/data/gate/`). Changing it later fails closed — re-run setup. |
    | `GATE_MACHINE_LOGIN` | machine account login (you pick it during setup; must match the account the gate verifies tokens against) |
+   | `NTFY_URL` | `https://ntfy.$DOMAIN_NAME` — MUST be byte-identical to the address the NTF-AI app subscribes with |
+   | `NTFY_TOPIC` | control topic: asks, notices, your written replies — long and random |
+   | `NTFY_ANSWERS_TOPIC` | button answers — the phone does NOT subscribe to it |
+   | `NTFY_TOKEN` | broker access token (`ntfy token add gate`) — the operator identity |
 
-   **Control channel — choose one:**
-
-   | Telegram (GATE-006) | Matrix (GATE-012, E2EE) |
-   |---|---|
-   | `TELEGRAM_BOT_TOKEN` — [@BotFather](https://t.me/BotFather) token | `MATRIX_HOMESERVER_URL` — bot account's homeserver |
-   | `TELEGRAM_ALLOWLIST` — permitted Telegram user IDs, comma-separated | `MATRIX_ACCESS_TOKEN` — bot account access token |
-   | `TELEGRAM_CHAT_ID` — numeric chat id asks are delivered to | `MATRIX_ROOM_ID` — the one **encrypted** control room (`!local:server`) |
-   | | `MATRIX_USER_ALLOWLIST` — permitted mxids, comma-separated (empty ⇒ drop all) |
-
-   Partial Matrix configuration (any Matrix key staged without all of
-   `MATRIX_HOMESERVER_URL`/`MATRIX_ACCESS_TOKEN`/`MATRIX_ROOM_ID`) also
-   refuses to boot — never half-wire a channel.
-
-   How to obtain the Telegram values — see **Telegram control channel
-   wiring** below; the Matrix path — see **Matrix control channel
-   wiring**.
+   See **ntfy control channel wiring** below for the broker setup.
 
 3. **Stage routing + image keys in the stack `.env`**
    (`/opt/codery/stacks/devtools/.env` — compose interpolation reads this
@@ -64,7 +53,7 @@ container, no route, and paseo's gate env vars interpolate to empty.
    | Key | Value |
    |---|---|
    | `COMPOSE_PROFILES` | add `gag` to the existing list |
-   | `GATE_IMAGE` | the tag from step 1, e.g. `codery-gate:20261117` |
+   | `GATE_IMAGE` | the tag from step 1, e.g. `codery-gitgate:0.2.0` |
    | `GATE_AGENT_HOST` | `gag.<domain>` (leave unset until step 5 mints the token) |
    | `GATE_AGENT_TOKEN` | set after first-run setup (step 5) |
 
@@ -96,57 +85,47 @@ container, no route, and paseo's gate env vars interpolate to empty.
 5. **Deploy via Dockhand** (repo copy and `/opt/codery/stacks/` copy of
    `compose.yml` updated together).
 
-## Telegram control channel wiring
+## ntfy control channel wiring (GATE-013)
 
-The control plane (first-run setup, approvals, grants, elevation,
-reminders) talks over the Telegram Bot API. Three keys in
-`/opt/codery/.env`, staged with the other gate secrets, then **Deploy** —
-the gate service picks them up via `env_file`:
+The control channel is the self-hosted ntfy broker (deployed with the
+`gag` profile) plus the free **NTF-AI** iOS/iPadOS app — an independent
+fork of the official ntfy iOS client speaking the stock ntfy protocol.
 
-| Key | How to obtain |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | Message [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token it issues (`123456:ABC-…`). |
-| `TELEGRAM_ALLOWLIST` | Comma-separated Telegram **user IDs** allowed to talk to the bot — the operator(s). Find yours: message [@userinfobot](https://t.me/userinfobot); it replies with your `Id`. |
-| `TELEGRAM_CHAT_ID` | The numeric chat id **asks are delivered to** (approval prompts, elevation consents, expiry reminders). Usually your own user id — the same number as your allowlist entry. Negative numbers are group chats. |
+**Broker** (deployed automatically with the profile):
 
-Missing-key behavior is fail closed, by design:
+- `NTFY_BASE_URL` = `https://ntfy.$DOMAIN_NAME` — byte-identical to the
+  app's server address, or the push signal will not match (ntfy's #1
+  self-hosting gotcha).
+- `NTFY_UPSTREAM_BASE_URL` = `https://ntfy-me.com` — NTF-AI's APNs
+  wake-up relay. It receives only a SHA-256 hash of the topic address,
+  the message id, and your server IP; never the title, body, tags, or
+  attachments. Apple receives a poll ping. Up to 2,000 pings/day per
+  server IP.
+- `NTFY_AUTH_DEFAULT_ACCESS=deny-all` — broker auth IS the operator
+  identity. Create one admin user and gate's token after first deploy:
+  `docker exec ntfy ntfy user add --role=admin <you>` then
+  `docker exec ntfy ntfy token add gate` — stage the `tk_…` value as
+  `NTFY_TOKEN`.
+- Zoraxy: `ntfy.<domain>` → `ntfy:80` (real certificate; the app fetches
+  message bodies when a push wakes it — including on cellular — so the
+  vhost, not a tailnet-only bind, is the supported shape).
 
-- **No channel at all** → the control plane never spawns; git/API
-  proxying still works, but there is no setup, no approvals (held
-  mutations are denied), no grants/elevation.
-- **Empty allowlist** → every update is dropped.
-- **Unset/invalid `TELEGRAM_CHAT_ID`** → the bot runs, but no ask can be
-  delivered: approval present errors and held mutations are denied.
-- **Matrix instead of Telegram** → same contract (GATE-012): approvals,
-  grants, elevation, and the guided setup ride the encrypted room; the
-  bot joins only the pinned room, allowlisted mxids command it, and
-  anything else is dropped with zero outbound.
+**Phone**:
 
-## Matrix control channel wiring (GATE-012, E2EE)
+1. Install **NTF-AI** from the App Store (iPhone/iPad, iOS 15+).
+2. **+** → *Use another server* → `https://ntfy.<domain>` → subscribe to
+   `NTFY_TOPIC`; sign in under **Settings → Users** with your broker
+   user. Do NOT subscribe to the answers topic.
+3. Approval asks arrive as notifications with **Approve/Deny buttons** —
+   a tap POSTs the signed decision to the answers topic, straight from
+   the lock screen. Written replies (e.g. `/status`) go through the
+   compose field. Both topics are token-gated; the broker never
+   acknowledges strangers.
 
-Prerequisites: a dedicated Matrix bot account on any homeserver (register
-e.g. `@gatebot:<homeserver>`), and an **encrypted** control room with only
-you and the bot in it.
-
-1. Get the bot's access token (Element: account → Help & About → Advanced
-   → Access token, or `curl -X POST <homeserver>/_matrix/client/v3/login`
-   with the account credentials). Stage it as `MATRIX_ACCESS_TOKEN`.
-2. Create the control room, **enable encryption**, invite the bot account,
-   and stage the room id (`!local:server` — Element: room Settings →
-   Advanced) as `MATRIX_ROOM_ID`. The gate auto-joins on boot.
-3. Stage your mxid(s) in `MATRIX_USER_ALLOWLIST` — the allowlisted mxids
-   are the only senders the gate ever answers.
-4. Deploy. Expect an **unverified device** notice for the bot in your
-   client — single-device bot, keys never leave `/data`; decryption of
-   room traffic works regardless.
-
-Behavioral notes: approval asks arrive as messages ending in the exact
-commands to send (`/ok <flow>:<nonce>:approve` / `/no …:deny`); progress
-updates edit in place; anything the Telegram channel does (setup
-walkthrough, grants, elevation consents, expiry reminders, `/status`,
-`/pending`, `/rotate`, `/block`) works identically from the room. The
-gate warns at boot if the room is **not** encrypted — that warning means
-the GATE-012 guarantees are not in effect; fix the room.
+Fail-closed rules carried over from GATE-006: no channel ⇒ the control
+plane never spawns (proxying works, holds are denied); a decision or
+command the gate cannot bind to live state answers "no longer valid";
+nobody without the broker token reaches any topic at all.
 
 ## Zoraxy route (operator applies)
 
@@ -163,8 +142,8 @@ Request a proxy host in the Zoraxy UI (agents request, never edit):
 **No public URL?** Fallback mode (GATE-001): leave `GATE_PUBLIC_URL`
 empty (remove it from the compose `environment` block) — agents use the
 internal alias `http://gitauthgate:8080` (codery-net only), the token
-intake falls back to paste-in-Telegram, and the agent wiring instructions
-are delivered over Telegram instead of `GET /`.
+intake falls back to paste-in-the-control-app, and the agent wiring
+instructions are delivered over the control channel instead of `GET /`.
 
 ## Host-side verification checklist
 
@@ -191,20 +170,23 @@ docker build -t codery-gate:check /opt/codery/projects/Codery/images/gate
 docker run --rm --network codery-net curlimages/curl -sI https://gag.<domain>/
 ```
 
-**Matrix channel checks (GATE-012, after the gate boots with `MATRIX_*` staged):**
+**ntfy channel checks (GATE-013, after the gate boots with `NTFY_*` staged):**
 
 ```bash
-# the gate logs the channel at boot — must say matrix, not telegram
+# the gate logs the channel at boot — must say ntfy
 docker logs gitauthgate 2>&1 | grep "control plane live"
 ```
 
-- **Room encrypted + invite accepted**: no `NOT encrypted` warning in the
-  gate log; a `/status` from an allowlisted mxid gets answered in the room.
-- **Stranger silence**: a non-allowlisted mxid (or any message from another
-  room) produces no reply of any kind — the gate never acknowledges
-  strangers.
-- **Expired triple**: send `/ok elev1:0000000000000000:approve` — the
+- **Instant push**: a `/status` from NTF-AI gets a banner within a second
+  or two, phone locked; the body fetches from the broker (a banner that
+  stays "New message" means the app could not reach `ntfy.<domain>` —
+  check the Zoraxy route and that `NTFY_URL` matches the app's server).
+- **Buttons decide**: a held operation shows Approve/Deny on the lock
+  screen; the tap lands as a decision without opening the app.
+- **Expired action**: send `/ok elev1:0000000000000000:approve` — the
   reply marks the action "no longer valid" instead of deciding anything.
+- **No token, no entry**: an unauthenticated publish to the topic gets
+  403 from the broker — the gate never sees it at all.
 
 **Empty-GH_HOST check** (GATE-001 spike deliverable) — inside the paseo
 container:
@@ -221,10 +203,12 @@ ment them during opt-in. Note the outcome here when you do.
 
 ## First-run setup
 
-With the gate deployed, the Zoraxy route live, and the control-channel
-keys staged (Telegram **or** Matrix — see the wiring sections above):
+With the gate deployed, the Zoraxy routes live (`gag.<domain>` and
+`ntfy.<domain>`), and the ntfy keys staged (see **ntfy control channel
+wiring** above):
 
-1. From an allowlisted chat/room, start the guided walkthrough (GATE-011) — eight steps, one message each: machine
+1. From the NTF-AI app's control topic, start the guided walkthrough
+   (GATE-011) — eight steps, one message each: machine
    account email alias, sign-up (private window), profile, private-email
    settings, 2FA, classic PAT creation, token intake via the one-time
    HTTPS form (`{GATE_PUBLIC_URL}/setup/token?nonce=…`), repo access
@@ -253,7 +237,7 @@ branch** (e.g. `main` in every repo the agent works on):
    A bypass entry would let the exact actor the gate exists to constrain
    skip the protection.
 
-The post-setup Telegram message reminds you of this (GATE-011 step 8);
+The post-setup control-channel message reminds you of this (GATE-011 step 8);
 this section is the full walkthrough it points to.
 
 ## Agent wiring recap
@@ -282,7 +266,7 @@ compose config with and without the `gag` profile, the image build, the
 codery-net DNS/TLS probe, and the empty-`GH_HOST` check all still apply
 (run those first).
 
-1. **First-run setup, Telegram only.** From the allowlisted chat, run
+1. **First-run setup, NTF-AI only.** From the control topic, run
    `/setup` and complete the whole walkthrough (machine-account email
    alias, sign-up in a private window, profile, private-email setting,
    2FA, classic PAT, token intake form, repo grants).
@@ -296,9 +280,10 @@ codery-net DNS/TLS probe, and the empty-`GH_HOST` check all still apply
    custody unchanged.
 3. **Force-push hold → approve → forwarded.** With `force-push =
    "approve"` (the default policy), `git push --force` from the agent.
-   **Expected:** the push blocks for up to 300 s while an ask arrives in
-   `TELEGRAM_CHAT_ID`; **Approve** → the push forwards upstream and
-   succeeds. Deny/timeout → rejected. Either outcome is audited.
+   **Expected:** the push blocks for up to 300 s while an ask with
+   Approve/Deny buttons arrives on the phone; **Approve** → the push
+   forwards upstream and succeeds. Deny/timeout → rejected. Either
+   outcome is audited.
 4. **`/block` kill switch.** `/block <owner>/<repo>`, then any git/API
    request against that repo.
    **Expected:** GitHub-shaped 429 immediately — no ask, no upstream

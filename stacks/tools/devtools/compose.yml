@@ -10,14 +10,16 @@
 #   browser  playwright headless browser backend — agent browser automation
 #   design   opendesign design workspace (opendesign.<domain>)
 #   db       dbgate     database client (dbgate.<domain>)
-#   gag      gitauthgate GitHub gate (gag.<domain>)
+#   gag      gitauthgate GitHub gate (gag.<domain>) + its ntfy broker
+#                       (ntfy.<domain> — the NTF-AI control channel)
 #
 # Degrades gracefully: a tool that isn't in the list simply doesn't exist —
 # paseo's browser tools fail fast, opendesign previews error until `browser`
 # is enabled alongside it. Zoraxy proxy-hosts for absent tools 502 until the
 # route is disabled too.
 #
-# Upstreams (Zoraxy → codery-net names): paseo:6767, apps:<port> for runtime
+# Upstreams (Zoraxy → codery-net names): paseo:6767, apps:<port> for runtime,
+# ntfy:80 (gag profile),
 # helpers, opendesign:7456, dbgate:3000, ws://playwright:3000.
 #
 # Visibility mounts: apps gets the full /opt/codery root (permissions gate
@@ -146,14 +148,14 @@ services:
     # docs/guides/gitauthgate-setup.md. The image is one static musl binary
     # (no git, no shell), so building on-host (docker build -t
     # codery-gitgate:<tag> images/gate) is cheap and needs no registry auth.
-    # Config model (GATE-001/009/012, opendesign placement): secrets
-    # (GATE_TOKEN_ENC_KEY, GATE_MACHINE_LOGIN, and ONE control channel —
-    # TELEGRAM_BOT_TOKEN/TELEGRAM_ALLOWLIST/TELEGRAM_CHAT_ID or
-    # MATRIX_HOMESERVER_URL/MATRIX_ACCESS_TOKEN/MATRIX_ROOM_ID/
-    # MATRIX_USER_ALLOWLIST; both channels ⇒ refuse to boot) come from
-    # /opt/codery/.env via env_file; routing values are pinned here. The
-    # 23080 loopback publish is for host-side curl checks only — Zoraxy
-    # reaches the container by DNS alias.
+    # Config model (GATE-001/009/013, opendesign placement): secrets
+    # (GATE_TOKEN_ENC_KEY, GATE_MACHINE_LOGIN, and the ntfy channel —
+    # NTFY_URL/NTFY_TOPIC/NTFY_ANSWERS_TOPIC/NTFY_TOKEN, all four or the
+    # gate refuses to boot) come from /opt/codery/.env via env_file;
+    # routing values are pinned here. The 23080 loopback publish is for
+    # host-side curl checks only — Zoraxy reaches the container by DNS
+    # alias. NTFY_URL must be byte-identical to the address the NTF-AI
+    # app subscribes with (https://ntfy.$DOMAIN_NAME).
     # pull_policy: never — dockhand always pulls on deploy; the image is
     # local-only (DockerHub publication pending), so pulling must be off.
     # The deployed stacks/ copy also carries a build: section (absolute
@@ -178,6 +180,31 @@ services:
       codery-net:
         aliases: [gitauthgate]
 
+  ntfy:
+    # GATE-013: the control-channel broker (stock ntfy server). NTF-AI's
+    # instant push needs upstream-base-url = https://ntfy-me.com (their
+    # APNs wake-up relay: topic-hash + message id only, never content).
+    # deny-all + one admin user + a token (see gitauthgate-setup.md) —
+    # the token IS the operator identity. Zoraxy proxies
+    # ntfy.<domain> -> ntfy:80; no host port publish.
+    image: binwiederhier/ntfy:latest
+    container_name: ntfy
+    restart: unless-stopped
+    profiles: [gag]
+    command: serve
+    environment:
+      NTFY_BASE_URL: https://ntfy.${DOMAIN_NAME:?set DOMAIN_NAME in stack .env}
+      NTFY_UPSTREAM_BASE_URL: https://ntfy-me.com
+      NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
+      NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_BEHIND_PROXY: "true"
+    volumes:
+      - codery-ntfy-data:/var/lib/ntfy
+    networks:
+      codery-net:
+        aliases: [ntfy]
+
   dbgate:
     image: dbgate/dbgate:latest
     container_name: dbgate
@@ -200,6 +227,7 @@ networks:
     external: true
 
 volumes:
+  codery-ntfy-data:
   codery-paseo-home:
     external: true
   codery-paseo-ssh-host-keys:

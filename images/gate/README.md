@@ -14,23 +14,32 @@ on first boot.
 
 1. **Get the image** (DockerHub once published; until then build locally):
    ```bash
-   docker pull coderyoss/codery-gitgate:0.1.0
+   docker pull coderyoss/codery-gitgate:0.2.0
    # today, pre-publish:
-   docker build -t codery-gitgate:0.1.0 <repo>/images/gate
+   docker build -t codery-gitgate:0.2.0 <repo>/images/gate
    ```
 2. **Fill the env** (secrets stay beside the compose; `.env` is gitignored):
    ```bash
    cp .env.example .env
-   # GATE_PUBLIC_URL      your reverse-proxy URL, https://gag.example.com
-   # GATE_TOKEN_ENC_KEY   openssl rand -base64 32
-   # GATE_MACHINE_LOGIN   the GitHub machine account's login
+   # GATE_PUBLIC_URL       your reverse-proxy URL, https://gag.example.com
+   # GATE_TOKEN_ENC_KEY    openssl rand -base64 32
+   # GATE_MACHINE_LOGIN    the GitHub machine account's login
+   # NTFY_URL              the broker URL — byte-identical to the app's
+   # NTFY_TOPIC / NTFY_ANSWERS_TOPIC   long random topic names
+   # NTFY_TOKEN            an access token from the ntfy broker
    ```
-   Telegram trio is optional — unset means dangerous holds fail closed.
 3. **Run it**
-   - *Codery host*: Dockhand → import this directory's `compose.yml`.
+   - *Codery host*: Dockhand → import this directory's `compose.yml`
+     (also brings up the ntfy broker service).
    - *Plain host*: `docker network create codery-net` (if absent),
-     then `docker compose up -d`.
-4. **First run**: browse to the gate page through your reverse proxy route
+     then `docker compose up -d` (ntfy included).
+4. **Broker first-run**: create one ntfy admin user and mint gate's
+   token (`ntfy user add --role=admin <you>`; `ntfy token add gate`),
+   then put NTF-AI on your phone: subscribe to `NTFY_TOPIC` with
+   `NTFY_URL` as the server, signed in with your user. Approval asks
+   arrive with **Approve/Deny buttons**; written replies go through the
+   compose field.
+5. **Gate first run**: browse to the gate page through your reverse proxy
    (Zoraxy on Codery hosts: `gag.<domain>` → `gitauthgate:8080`) and follow
    the rendered instructions — `/setup/token` stores the machine account's
    PAT, encrypted with `GATE_TOKEN_ENC_KEY` into `/data/gate.db`.
@@ -54,3 +63,6 @@ From then on, agents use gate as their GitHub origin:
   `docker build -t codery-gitgate:<newtag> .`, then redeploy the stack —
   the version bump is a reviewed, in-history change.
 - **Rollback**: flip `image:` back to the previous tag, redeploy.
+- **Control channel** (GATE-013): the ntfy broker is the only transport
+  on main; Telegram and Matrix live on the `matrix-telegram` branch and
+  can be revived from there if ever needed.

@@ -4,8 +4,8 @@
 # self-contained deployment for hosts without the devtools stack.
 #
 # Setup (see README.md for the full walk-through):
-#   1. docker pull coderyoss/codery-gitgate:0.1.0
-#      (pre-publish: docker build -t codery-gitgate:0.1.0 <repo>/images/gate)
+#   1. docker pull coderyoss/codery-gitgate:0.2.0
+#      (pre-publish: docker build -t codery-gitgate:0.2.0 <repo>/images/gate)
 #   2. cp .env.example .env — fill GATE_PUBLIC_URL, GATE_TOKEN_ENC_KEY,
 #      GATE_MACHINE_LOGIN, and ONE control channel (GATE-012: Telegram
 #      here OR the Matrix keys — never both; the gate refuses to boot)
@@ -19,7 +19,7 @@
 # read-only: it is config, not state.
 services:
   gate:
-    image: codery-gitgate:0.1.0
+    image: codery-gitgate:0.2.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -37,15 +37,13 @@ services:
       GATE_POLICY_PATH: /data/policy.toml
       GATE_STATE_PATH: /data/gate.db
       GATE_AUDIT_PATH: /data/audit.jsonl
-      # Control plane is optional: unset = StubBackend, dangerous holds
-      # fail closed. Choose ONE channel (GATE-012) — never both.
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_ALLOWLIST: ${TELEGRAM_ALLOWLIST:-}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
-      MATRIX_HOMESERVER_URL: ${MATRIX_HOMESERVER_URL:-}
-      MATRIX_ACCESS_TOKEN: ${MATRIX_ACCESS_TOKEN:-}
-      MATRIX_ROOM_ID: ${MATRIX_ROOM_ID:-}
-      MATRIX_USER_ALLOWLIST: ${MATRIX_USER_ALLOWLIST:-}
+      # Control channel (GATE-013): the ntfy broker. All four keys or
+      # none — a partial set refuses to boot. Unset = StubBackend,
+      # dangerous holds fail closed.
+      NTFY_URL: ${NTFY_URL:-}
+      NTFY_TOPIC: ${NTFY_TOPIC:-}
+      NTFY_ANSWERS_TOPIC: ${NTFY_ANSWERS_TOPIC:-}
+      NTFY_TOKEN: ${NTFY_TOKEN:-}
     volumes:
       - ./policy.toml:/data/policy.toml:ro
       - gag-data:/data
