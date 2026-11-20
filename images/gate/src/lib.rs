@@ -10,6 +10,7 @@ pub mod custody;
 pub mod errors;
 pub mod github;
 pub mod gitproxy;
+pub mod matrix;
 pub mod onepage;
 pub mod pktline;
 pub mod policy;
