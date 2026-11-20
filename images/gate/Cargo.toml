@@ -21,25 +21,15 @@ sha2 = "0.10"
 subtle = "2"
 getrandom = "0.3"
 base64 = "0.22"
-# GATE-012 control-channel transport. default-features = false: the
-# `sqlite` state-store feature links system libsqlite3-sys, which cannot
-# coexist with gate's bundled rusqlite (`links = "sqlite3"`); sled gives
-# the same persistent key/session store in pure Rust. rustls-aws-lc-rs is
-# 0.19's only exposed TLS backend.
-matrix-sdk = { version = "0.19.1", default-features = false, features = [
-    "automatic-room-key-forwarding",
-    "e2e-encryption",
-    "rustls-aws-lc-rs",
-    "bundled-sqlite",
-] }
 
 [features]
-# Compiles the FakeTelegram test double into release-style builds that
+# Compiles the FakeTransport test double into release-style builds that
 # need it (e.g. future integration tests); `cargo test` always has it.
 test-util = []
 
-# Test binaries link the whole tree (matrix-sdk included, GATE-012);
-# debug info turns each into a ~460 MB link that OOMs the host's linker
+# Test binaries link the whole tree;
+# debug info bloats links enough to OOM the host linker when several run
+# in parallel.
 # when several run in parallel. Tests don't need debug symbols.
 [profile.test]
 debug = 0
