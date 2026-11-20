@@ -82,6 +82,9 @@ pub struct Config {
     /// with a bot token configured ⇒ asks cannot be delivered: approval
     /// `present` errors and holds are denied — fail closed.
     pub telegram_chat_id: Option<i64>,
+    /// Matrix control channel (GATE-012), mutually exclusive with the
+    /// Telegram one — `matrix_config_from` refuses dual/partial configs.
+    pub matrix: Option<MatrixConfig>,
     /// Registry sweep cadence in seconds (`GATE_REGISTRY_SWEEP_SECS`,
     /// default 1800).
     pub registry_sweep_secs: u64,
@@ -136,6 +139,91 @@ fn chat_id_from(v: Option<&str>) -> Option<i64> {
         .and_then(|s| s.parse().ok())
 }
 
+/// GATE-012 Matrix control-channel configuration. Present (`Some`) only
+/// when the required keys are set; any Matrix key present demands a
+/// COMPLETE configuration — partial configs refuse to boot, never
+/// half-wire a channel.
+#[derive(Debug, Clone)]
+pub struct MatrixConfig {
+    pub homeserver_url: String,
+    pub access_token: String,
+    pub room_id: String,
+    /// mxids allowed to command the gate; empty ⇒ drop everything
+    /// (fail closed, mirrors the Telegram allowlist rule).
+    pub user_allowlist: Vec<String>,
+}
+
+/// Parse `MATRIX_USER_ALLOWLIST`: comma-separated mxids, trimmed, blanks
+/// skipped. There is no "bad entry" notion at this layer — mxid shape is
+/// validated by the transport (GATE-012).
+fn mxids_from(v: Option<&str>) -> Vec<String> {
+    v.map(|s| {
+        s.split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// GATE-012 channel resolution. A key "counts as set" when trimmed
+/// non-empty (the allowlist counts as set whenever its key is present —
+/// a blank allowlist is a valid empty fail-closed list). Rules, in order:
+/// no Matrix key ⇒ `Ok(None)`; any Matrix key alongside
+/// `TELEGRAM_BOT_TOKEN` ⇒ refuse (mutually exclusive channels); any
+/// Matrix key without all three required ones ⇒ refuse naming the
+/// missing keys. The error strings name the offending env keys so the
+/// operator can fix the `.env` without reading code.
+/// A required key "counts as set" when trimmed non-empty.
+fn trimmed_non_empty(v: Option<&str>) -> Option<&str> {
+    v.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn matrix_config_from(
+    telegram_token: Option<&str>,
+    homeserver: Option<&str>,
+    access_token: Option<&str>,
+    room_id: Option<&str>,
+    user_allowlist: Option<&str>,
+) -> anyhow::Result<Option<MatrixConfig>> {
+    let hs = trimmed_non_empty(homeserver);
+    let token = trimmed_non_empty(access_token);
+    let room = trimmed_non_empty(room_id);
+    let any_present = hs.is_some() || token.is_some() || room.is_some() || user_allowlist.is_some();
+    if !any_present {
+        return Ok(None);
+    }
+    if trimmed_non_empty(telegram_token).is_some() {
+        anyhow::bail!(
+            "GATE-012: TELEGRAM_BOT_TOKEN and MATRIX_ACCESS_TOKEN are mutually exclusive — \
+             configure exactly one control channel"
+        );
+    }
+    let mut missing = Vec::new();
+    if hs.is_none() {
+        missing.push("MATRIX_HOMESERVER_URL");
+    }
+    if token.is_none() {
+        missing.push("MATRIX_ACCESS_TOKEN");
+    }
+    if room.is_none() {
+        missing.push("MATRIX_ROOM_ID");
+    }
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "GATE-012: partial Matrix configuration — {} must also be set",
+            missing.join(", ")
+        );
+    }
+    Ok(Some(MatrixConfig {
+        homeserver_url: hs.unwrap().to_string(),
+        access_token: token.unwrap().to_string(),
+        room_id: room.unwrap().to_string(),
+        user_allowlist: mxids_from(user_allowlist),
+    }))
+}
+
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
@@ -164,6 +252,13 @@ impl Config {
                 env::var("TELEGRAM_ALLOWLIST").ok().as_deref(),
             ),
             telegram_chat_id: chat_id_from(env::var("TELEGRAM_CHAT_ID").ok().as_deref()),
+            matrix: matrix_config_from(
+                env::var("TELEGRAM_BOT_TOKEN").ok().as_deref(),
+                env::var("MATRIX_HOMESERVER_URL").ok().as_deref(),
+                env::var("MATRIX_ACCESS_TOKEN").ok().as_deref(),
+                env::var("MATRIX_ROOM_ID").ok().as_deref(),
+                env::var("MATRIX_USER_ALLOWLIST").ok().as_deref(),
+            )?,
             registry_sweep_secs: sweep_secs_from(
                 env::var("GATE_REGISTRY_SWEEP_SECS").ok().as_deref(),
             ),
@@ -353,5 +448,70 @@ mod tests {
         ] {
             assert_eq!(secs_from(env, default), want, "{env:?}");
         }
+    }
+
+    // --- GATE-012: Matrix control channel (mutually exclusive) ---
+
+    const HS: Option<&str> = Some("https://matrix.example.org");
+    const TOKEN: Option<&str> = Some("syt_gate_XXXXXXXX");
+    const ROOM: Option<&str> = Some("!control:example.org");
+    const MXIDS: Option<&str> = Some("@rob:example.org, @ops:example.org ");
+
+    #[test]
+    fn matrix_config_parses_all_keys() {
+        let cfg = matrix_config_from(None, HS, TOKEN, ROOM, MXIDS)
+            .expect("complete matrix config must load");
+        let cfg = cfg.expect("all keys set ⇒ Some");
+        assert_eq!(cfg.homeserver_url, "https://matrix.example.org");
+        assert_eq!(cfg.access_token, "syt_gate_XXXXXXXX");
+        assert_eq!(cfg.room_id, "!control:example.org");
+        assert_eq!(
+            cfg.user_allowlist,
+            vec!["@rob:example.org".to_string(), "@ops:example.org".to_string()]
+        );
+    }
+
+    #[test]
+    fn matrix_config_absent_when_no_keys() {
+        let cfg = matrix_config_from(None, None, None, None, None)
+            .expect("no keys at all is a valid no-matrix config");
+        assert!(cfg.is_none());
+    }
+
+    #[test]
+    fn both_channels_configured_refuses() {
+        let err = matrix_config_from(Some("123:abc"), HS, TOKEN, ROOM, None)
+            .expect_err("dual channels must refuse to boot");
+        let msg = err.to_string();
+        assert!(msg.contains("TELEGRAM_BOT_TOKEN"), "{msg}");
+        assert!(msg.contains("MATRIX_ACCESS_TOKEN"), "{msg}");
+    }
+
+    #[test]
+    fn partial_matrix_config_refuses() {
+        // token-only: missing homeserver + room
+        let err = matrix_config_from(None, None, TOKEN, None, None)
+            .expect_err("token without homeserver/room must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("MATRIX_HOMESERVER_URL"), "{msg}");
+        assert!(msg.contains("MATRIX_ROOM_ID"), "{msg}");
+
+        // homeserver-only
+        let err = matrix_config_from(None, HS, None, None, None)
+            .expect_err("homeserver alone must refuse");
+        assert!(err.to_string().contains("MATRIX_ACCESS_TOKEN"));
+
+        // room-only
+        let err = matrix_config_from(None, None, None, ROOM, None)
+            .expect_err("room alone must refuse");
+        assert!(err.to_string().contains("MATRIX_ACCESS_TOKEN"));
+    }
+
+    #[test]
+    fn blank_allowlist_is_valid_empty_fail_closed() {
+        let cfg = matrix_config_from(None, HS, TOKEN, ROOM, Some(""))
+            .expect("blank allowlist is a complete config")
+            .expect("all required keys set ⇒ Some");
+        assert!(cfg.user_allowlist.is_empty(), "empty allowlist ⇒ drop everything");
     }
 }
