@@ -22,8 +22,13 @@ container, no route, and paseo's gate env vars interpolate to empty.
    model as the other tool images):
 
    ```
-   docker build -t codery-gate:$(date +%Y%m%d) /opt/codery/projects/Codery/images/gate
+   docker build -t codery-gitgate:0.1.0 /opt/codery/projects/Codery/images/gate
    ```
+
+   `pull_policy: never` on the service keeps dockhand from trying to pull
+   a registry image that doesn't exist yet (DockerHub publication is
+   planned); the deployed stacks/ copy also carries a `build:` section
+   with the absolute context path.
 
 2. **Stage secrets in `/opt/codery/.env`** (the core+tools secrets file;
    see `host/templates/env.example`):
@@ -56,8 +61,9 @@ container, no route, and paseo's gate env vars interpolate to empty.
 4. **Create the policy file** (the gate refuses to start without it):
 
    ```
-   mkdir -p /opt/codery/data/gate
-   cat > /opt/codery/data/gate/policy.toml <<'EOF'
+   sudo mkdir -p /opt/codery/data/gate
+   sudo chown 65532:65532 /opt/codery/data/gate
+   sudo tee /opt/codery/data/gate/policy.toml > /dev/null <<'EOF'
    [defaults]
    push = "allow"
    force-push = "approve"
@@ -65,6 +71,10 @@ container, no route, and paseo's gate env vars interpolate to empty.
    tag-delete = "approve"
    EOF
    ```
+
+   The chown is required: the gate runs as uid 65532 (the bind dir is
+   NOT volume-seeded from the image's baked /data — only named volumes
+   seed). Gate refuses to start without the policy file.
 
    Tune per repo later (`[repos."owner/name"]` overrides) — edits are
    picked up on mtime change; the effective policy is visible at
