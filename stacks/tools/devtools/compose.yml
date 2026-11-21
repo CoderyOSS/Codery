@@ -169,7 +169,8 @@ services:
       - /opt/codery/.env
     environment:
       # empty ⇒ fallback mode: internal alias http://gitauthgate:8080 (GATE-001)
-      GATE_PUBLIC_URL: https://gag.${DOMAIN_NAME:?set DOMAIN_NAME in stack .env}
+      # GATE-specific key in the stack .env — no generic DOMAIN_NAME coupling (GATE-013).
+      GATE_PUBLIC_URL: ${GATE_PUBLIC_URL:?set GATE_PUBLIC_URL in stack .env}
       GATE_LISTEN_ADDR: 0.0.0.0:8080
       GATE_POLICY_PATH: /data/policy.toml
     ports:
@@ -196,7 +197,8 @@ services:
     profiles: [gag]
     command: serve
     environment:
-      NTFY_BASE_URL: https://ntfy.${DOMAIN_NAME:?set DOMAIN_NAME in stack .env}
+      # Byte-identical to the NTF-AI app's server address; explicit stack key.
+      NTFY_BASE_URL: ${NTFY_BASE_URL:?set NTFY_BASE_URL in stack .env}
       NTFY_UPSTREAM_BASE_URL: https://ntfy-me.com
       NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
       NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
