@@ -49,8 +49,8 @@ pub struct GateState {
     /// Cap on proxied request bodies; over-limit requests get a 413
     /// before anything is forwarded upstream.
     pub max_body_bytes: usize,
-    /// Health flag (GATE-006): true once the Telegram control-plane poll
-    /// loop has been spawned (`TELEGRAM_BOT_TOKEN` configured). Surfaced
+    /// Health flag (GATE-006/013): true once the control-plane poll
+    /// loop has been spawned (a control channel is configured). Surfaced
     /// on `/whoami` so operators can see the gate's control plane state.
     pub control_live: AtomicBool,
     /// Master forwarding switch (GATE-004 §6.3): the machine-token

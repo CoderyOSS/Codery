@@ -22,7 +22,7 @@ container, no route, and paseo's gate env vars interpolate to empty.
    model as the other tool images):
 
    ```
-   docker build -t codery-gitgate:0.1.0 /opt/codery/projects/Codery/images/gate
+   docker build -t codery-gitgate:0.2.0 /opt/codery/projects/Codery/images/gate
    ```
 
    `pull_policy: never` on the service keeps dockhand from trying to pull
@@ -106,6 +106,13 @@ fork of the official ntfy iOS client speaking the stock ntfy protocol.
   `docker exec ntfy ntfy user add --role=admin <you>` then
   `docker exec ntfy ntfy token add gate` — stage the `tk_…` value as
   `NTFY_TOKEN`.
+- **Answers-topic anonymous write grant** (required): lock-screen buttons
+  POST from the NTF-AI app with no broker credentials — grant write-only
+  access to the answers topic and let its unguessable URL carry the
+  authorization:
+  `docker exec ntfy ntfy access everyone "$NTFY_ANSWERS_TOPIC" wo`.
+  Without this grant every button tap 403s and holds time out as denies.
+  The control topic stays fully locked (token required).
 - Zoraxy: `ntfy.<domain>` → `ntfy:80` (real certificate; the app fetches
   message bodies when a push wakes it — including on cellular — so the
   vhost, not a tailnet-only bind, is the supported shape).

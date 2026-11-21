@@ -7,8 +7,8 @@
 #   1. docker pull coderyoss/codery-gitgate:0.2.0
 #      (pre-publish: docker build -t codery-gitgate:0.2.0 <repo>/images/gate)
 #   2. cp .env.example .env — fill GATE_PUBLIC_URL, GATE_TOKEN_ENC_KEY,
-#      GATE_MACHINE_LOGIN, and ONE control channel (GATE-012: Telegram
-#      here OR the Matrix keys — never both; the gate refuses to boot)
+#      GATE_MACHINE_LOGIN, and the four NTFY_* channel keys (GATE-013;
+#      a partial set refuses to boot)
 #   3. run it: docker network create codery-net (if absent);
 #      docker compose up -d
 #   4. browse to the gate page via your reverse proxy → /setup/token

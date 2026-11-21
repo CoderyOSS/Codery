@@ -3,7 +3,7 @@
 GitHub auth gate for agent-driven git and API access: a machine account's
 PAT is custodied (AES-GCM-encrypted at rest), agents proxy git and API
 traffic through gate, and the policy engine decides per action class —
-`allow`, `deny`, or `approve` (Telegram hold; fail-closed without a bot).
+`allow`, `deny`, or `approve` (ntfy approval buttons; fail-closed without a broker).
 
 Single static musl binary; runtime is `scratch` (no shell, no git) running
 as uid 65532. State lives in `/data` (`gate.db` + `audit.jsonl`), owned by

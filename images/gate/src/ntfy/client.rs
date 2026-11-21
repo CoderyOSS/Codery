@@ -26,12 +26,35 @@ use super::{
 use crate::config::NtfyConfig;
 use crate::control::{MsgRef, SendRequest, Update};
 
-/// Publish-body builder (pure, testable): control topic, message text,
-/// and ask buttons as ntfy HTTP actions posting to the answers topic.
+/// Strip HTML tags from a message authored with `SendRequest::html`
+/// (GATE-011 copy is Telegram-HTML): ntfy renders markup literally, so
+/// the phone must receive plain text (I3).
+fn strip_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Publish-body builder (pure, testable): control topic, message text
+/// (HTML-stripped when authored as HTML), and ask buttons as ntfy HTTP
+/// actions posting to the answers topic.
 fn publish_body(req: &SendRequest, cfg: &NtfyConfig) -> Value {
+    let text = if req.parse_mode.as_deref() == Some("HTML") {
+        strip_html(&req.text)
+    } else {
+        req.text.clone()
+    };
     let mut body = json!({
         "topic": cfg.topic,
-        "message": req.text,
+        "message": text,
     });
     let answers_url = format!("{}/{}", cfg.url, cfg.answers_topic);
     if let Some(actions) = actions_buttons(&answers_url, &req.inline_buttons) {
@@ -40,10 +63,14 @@ fn publish_body(req: &SendRequest, cfg: &NtfyConfig) -> Value {
     body
 }
 
-/// The event id of one `/json` stream line — any event kind carries one,
-/// and all of them advance the reconnect cursor (keepalives too).
+/// The event id of a MESSAGE stream line — the only ids that are cache
+/// positions (M3). Keepalive/open ids are not resumable anchors and do
+/// not advance the cursor.
 fn cursor_of(line: &str) -> Option<String> {
     let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("event").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
     v.get("id").and_then(Value::as_str).map(String::from)
 }
 
@@ -107,22 +134,25 @@ impl NtfyClient {
         })
     }
 
-    /// Long-poll equivalent: open the JSON stream over both gated topics
-    /// (comma-separated topics, one stream), block until the first
-    /// update, and return it. Every line — message, keepalive, open —
-    /// advances the cursor so the next call resumes after it (Review
-    /// Focus 4: no update lost across reconnects while the broker cache
-    /// holds it).
+    /// Held-open JSON stream over both gated topics (comma-separated
+    /// topics, one stream): blocks until a message event arrives, then
+    /// returns it. NO `poll=1` — a poll returns the cache and closes,
+    /// which would turn every quiet moment into an error-driven backoff
+    /// (I1). The cursor advances on MESSAGE events only (keepalive/open
+    /// ids are not cache positions) and is seeded with a 1-second
+    /// duration anchor at boot, so a fresh gate does not replay the
+    /// broker's cache; reconnects resume exactly after the last seen
+    /// message.
     async fn next_update(&self) -> Result<Update> {
         let cursor = self.cursor.lock().expect("cursor lock").clone();
         let since = if cursor.is_empty() {
-            String::new()
+            "1s".to_string()
         } else {
-            format!("&since={cursor}")
+            cursor
         };
         let url = format!(
-            "{}/{},{}?poll=1{}",
-            self.cfg.url, self.cfg.topic, self.cfg.answers_topic, since
+            "{}/{},{}?since={since}",
+            self.cfg.url, self.cfg.topic, self.cfg.answers_topic
         );
         let response = self
             .http
@@ -229,15 +259,25 @@ mod tests {
     }
 
     #[test]
+    fn html_authored_messages_publish_tag_free() {
+        let req = SendRequest::html("<b>Email</b> — use a <code>private window</code>");
+        let body = publish_body(&req, &cfg());
+        let message = body["message"].as_str().expect("message present");
+        assert!(!message.contains('<'), "no markup reaches ntfy: {message}");
+        assert!(message.contains("Email"), "text survives the strip: {message}");
+        assert!(message.contains("private window"), "text survives the strip: {message}");
+    }
+
+    #[test]
     fn cursor_of_reads_any_event_kind() {
         assert_eq!(
             cursor_of(r#"{"id":"TTQ1x","event":"message","message":"hi"}"#).as_deref(),
             Some("TTQ1x")
         );
         assert_eq!(
-            cursor_of(r#"{"id":"TTQ1y","event":"keepalive"}"#).as_deref(),
-            Some("TTQ1y"),
-            "keepalives advance the cursor too"
+            cursor_of(r#"{"id":"TTQ1y","event":"keepalive"}"#),
+            None,
+            "keepalive ids are not cache positions (M3)"
         );
         assert_eq!(cursor_of("garbage"), None);
     }

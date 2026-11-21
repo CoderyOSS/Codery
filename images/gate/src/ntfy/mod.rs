@@ -92,9 +92,17 @@ pub fn command_to_callback(text: &str) -> Option<String> {
     triple_of(rest.trim())
 }
 
+/// ntfy renders at most THREE user actions per notification — anything
+/// beyond is dropped here (transports may degrade rendering; the dropped
+/// decisions remain available as written `/ok`-family commands).
+pub const MAX_ACTIONS: usize = 3;
+
 /// The ntfy `actions` JSON array for approval-ask buttons: one HTTP
 /// action per `(label, data)` — `body` carries the signed triple, `clear`
-/// swaps the ask for its outcome. `None` when there are no buttons.
+/// swaps the ask for its outcome. Capped at [`MAX_ACTIONS`]; `None` when
+/// there are no buttons. The POST is unauthenticated BY DESIGN: the
+/// answers topic carries a write-only anonymous grant and its URL is the
+/// secret (GATE-013) — the operator's phone holds no broker token.
 pub fn actions_buttons(
     answers_base_url: &str,
     buttons: &[(String, String)],
@@ -106,6 +114,7 @@ pub fn actions_buttons(
     Some(
         buttons
             .iter()
+            .take(MAX_ACTIONS)
             .map(|(label, data)| {
                 json!({
                     "action": "http",
@@ -212,6 +221,15 @@ mod tests {
         assert_eq!(approve["clear"], true);
         assert_eq!(buttons[1]["body"], "elev1:abcd0123456789ef:deny");
         assert!(actions_buttons(ANSWERS, &[]).is_none(), "no buttons ⇒ no actions");
+    }
+
+    #[test]
+    fn actions_are_capped_at_three() {
+        let buttons: Vec<(String, String)> = (0..5)
+            .map(|i| (format!("B{i}"), format!("flow{i}:abcd0123456789ef:approve")))
+            .collect();
+        let rendered = actions_buttons(ANSWERS, &buttons).expect("buttons present");
+        assert_eq!(rendered.len(), MAX_ACTIONS, "ntfy renders three actions at most");
     }
 
     #[test]

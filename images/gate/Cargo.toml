@@ -27,17 +27,15 @@ base64 = "0.22"
 # need it (e.g. future integration tests); `cargo test` always has it.
 test-util = []
 
-# Test binaries link the whole tree;
-# debug info bloats links enough to OOM the host linker when several run
-# in parallel.
-# when several run in parallel. Tests don't need debug symbols.
+# Debug info bloats test-binary links enough to OOM the host linker when
+# several run in parallel; tests don't need symbols.
 [profile.test]
 debug = 0
 split-debuginfo = "off"
 
 [dev-dependencies]
 # Self dev-dependency: compiles the crate for integration tests with
-# `test-util` on, so tests/telegram_approvals.rs can drive FakeTelegram
+# `test-util` on, so tests/control_approvals.rs can drive FakeTransport
 # while release builds keep the test double out (plain `cargo test`
 # includes it; the feature never leaks into non-test builds).
 gate = { path = ".", features = ["test-util"] }

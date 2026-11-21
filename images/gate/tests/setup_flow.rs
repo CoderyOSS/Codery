@@ -1451,8 +1451,8 @@ async fn step_messages_carry_the_adr_buttons_and_links() {
         step2
             .inline_buttons
             .iter()
-            .any(|(label, _)| label.contains("Check again")),
-        "step 2 carries the retry button: {:?}",
+            .any(|(label, _)| label.contains("Done, account created")),
+        "step 2 carries the done button (retry is resend-the-name; ntfy caps actions at 3): {:?}",
         step2.inline_buttons
     );
     assert!(

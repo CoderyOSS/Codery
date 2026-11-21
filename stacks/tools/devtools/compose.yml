@@ -185,7 +185,10 @@ services:
     # instant push needs upstream-base-url = https://ntfy-me.com (their
     # APNs wake-up relay: topic-hash + message id only, never content).
     # deny-all + one admin user + a token (see gitauthgate-setup.md) —
-    # the token IS the operator identity. Zoraxy proxies
+    # the token IS the operator identity. The ANSWERS topic additionally
+    # carries a write-only anonymous grant (`ntfy access everyone
+    # <answers> wo`) so lock-screen buttons can POST without holding the
+    # token — its unguessable URL is the authorization. Zoraxy proxies
     # ntfy.<domain> -> ntfy:80; no host port publish.
     image: binwiederhier/ntfy:latest
     container_name: ntfy

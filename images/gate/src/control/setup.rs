@@ -19,8 +19,8 @@
 //!
 //! 0 intro `[Start]` · 1 email (plus-address suggestion from an optional
 //! text reply) · 2 sign-up (username via text reply, existence polled via
-//! unauthenticated `GET /users/{name}`; `[Check again]`/`[Done]` re-run
-//! the check and the flow advances ONLY on a 200 — a taken name gets
+//! unauthenticated `GET /users/{name}`; `[Done]` (or resending the name)
+//! re-runs the check and the flow advances ONLY on a 200 — a taken name gets
 //! `{name}-agent-1`/`{name}-bot` alternatives) · 3 profile · 4 private
 //! email · 5 2FA (steps 1–5 carry Done-style buttons) · 6 token creation
 //! (prefilled link, 14/3/1-day reminder promise) · 7 intake (one-time
@@ -384,7 +384,7 @@ fn step_buttons(step: u8, nonce: &str) -> Vec<(String, String)> {
     let extra: &[(&str, &str)] = match step {
         0 => &[("Start", "start")],
         1 => &[("Done, I have an address", "done")],
-        2 => &[("Check again", "check"), ("Done, account created", "done")],
+        2 => &[("Done, account created", "done")],
         3 | 5 => &[("Done", "done")],
         4 => &[("Done, both checked", "done")],
         8 => &[("Finish setup", "finish")],
@@ -481,8 +481,8 @@ impl StepCtx {
                 if let Some(name) = &self.username {
                     text.push_str(&format!(
                         "\n\nChecking <code>{}</code> — not on GitHub yet. Finish the \
-                         signup, then press <b>Check again</b> (or just resend the \
-                         name).",
+                         signup, then resend the name to re-check, and press \
+                         <b>Done, account created</b>.",
                         esc(name)
                     ));
                 }
@@ -589,8 +589,8 @@ impl StepCtx {
                 "• Already signed in as your main account? The signup would attach to \
                  the WRONG account — use a private window.\n• Username rules: letters, \
                  digits, single hyphens, max 39 characters.\n• I probe github.com \
-                 unauthenticated — a fresh account can take a minute to appear; press \
-                 Check again.\n• This gate expects the machine account to be named \
+                 unauthenticated — a fresh account can take a minute to appear; resend \
+                 the name to re-check.\n• This gate expects the machine account to be named \
                  <b>{}</b>.",
                 esc(&self.machine_login)
             ),
@@ -1003,8 +1003,7 @@ impl SetupHandler {
                     2,
                     format!(
                         "I can't see <b>{}</b> on GitHub yet — finish the signup in \
-                         the private window, then press <b>Check again</b> or resend \
-                         the name.",
+                         the private window, then resend the name.",
                         esc(&name)
                     ),
                     &api,
@@ -1626,7 +1625,8 @@ mod tests {
                 "step {step} Done-button presence wrong"
             );
         }
-        // Step 0 has Start; step 2 additionally Check again; step 8 Finish.
+        // Step 0 has Start; step 2 carries exactly Done (ntfy caps actions
+        // at three: base I'm-stuck/Cancel + one more); step 8 Finish.
         let b = |step: u8, label: &str| {
             c.req(step)
                 .inline_buttons
@@ -1634,7 +1634,8 @@ mod tests {
                 .any(|(l, _)| l == label)
         };
         assert!(b(0, "Start"));
-        assert!(b(2, "Check again"));
+        assert!(b(2, "Done, account created"));
+        assert!(!b(2, "Check again"), "dropped to respect ntfy's 3-action cap");
         assert!(b(8, "Finish setup"));
         assert!(!b(6, "Finish setup"));
     }

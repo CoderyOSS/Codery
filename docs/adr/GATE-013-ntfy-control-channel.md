@@ -90,6 +90,10 @@ self-hosted broker.
   answers topic is polled by URL — keep both names long and random.
 - Don't configure more than one control channel per deployment (a rule
   that survives, even though only one transport now exists).
+- Do grant the ANSWERS topic write-only anonymous access
+  (`ntfy access everyone <answers> wo`): lock-screen buttons POST from
+  the app with no broker credentials, and the unguessable topic URL is
+  the authorization. Never widen the control topic the same way.
 
 ## Consequences
 
